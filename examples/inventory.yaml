@@ -163,10 +163,8 @@ codexRuntime:
 
 captainHook:
   version: 12.66.0
-  sums: https://github.com/yasyf/captain-hook/releases/download/v12.66.0/SHA256SUMS.txt
-  asset: ./captain-hook-v12.66.0-linux-amd64.tar.gz
+  url: https://github.com/yasyf/captain-hook/releases/download/v12.66.0/captain-hook-v12.66.0-linux-amd64.tar.gz
   sha256: c6fba4c8414a2c193db8bb120c10c70192c603c4cd5ce0b404346b6717040cee
-  plugin: captain-hook@captain-hook
 
 cookiesync:
   schemaFingerprint: 2dc96a8a0930930535e711cbab04af029573c9b95318206f8a8fbad87677ca38

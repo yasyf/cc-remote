@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import fcntl
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -24,6 +25,19 @@ log = os.open(os.path.join(services, name + ".log"), os.O_WRONLY | os.O_APPEND |
 os.dup2(log, 1)
 os.dup2(log, 2)
 os.environ["PATH"] = os.path.expanduser("~/.local/bin") + ":/usr/local/bin:/usr/bin:/bin"
+child = None
+
+
+def stop(signum, frame):
+    if child is not None and child.poll() is None:
+        child.terminate()
+        child.wait()
+    sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGHUP, stop)
 script = read(__file__)
 while read(__file__) == script:
     recipe = read(recipe_path)

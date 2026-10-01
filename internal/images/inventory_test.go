@@ -35,7 +35,7 @@ func validInventory() Inventory {
 			Plugins:      []Plugin{{ID: "hooks@market", Version: "1.0.0", Bins: []string{"bin/hooks"}}},
 		},
 		CodexRuntime: &CodexRuntime{Version: "26.1.0", URL: "https://example.com/runtime.tar.xz", SHA256: digest, Plugins: []string{"pdf"}},
-		CaptainHook:  &CaptainHook{Version: "1.0.0", Sums: "https://example.com/SHA256SUMS.txt", Asset: "./hook.tar.gz", SHA256: digest, Plugin: "hooks@market"},
+		CaptainHook:  &CaptainHook{Version: "1.0.0", URL: "https://example.com/hook.tar.gz", SHA256: digest},
 		Cookiesync:   &Cookiesync{SchemaFingerprint: digest},
 		Services: []Service{
 			{Name: "hooks", Plugin: "hooks@market", Command: []string{"bin/hooks", "serve"}, Env: map[string]string{"URL": "http://127.0.0.1:${PORT}"}},
@@ -67,6 +67,13 @@ func TestLoadExample(t *testing.T) {
 	}
 	if got, want := inventory.Configure.Env, []string{"EXAMPLE_PORT"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("configure.env = %v, want %v", got, want)
+	}
+}
+
+func TestParseRejectsSecondDocument(t *testing.T) {
+	_, err := Parse([]byte("version: 1\n---\nversion: 2\n"))
+	if err == nil || !strings.Contains(err.Error(), "want one YAML document") {
+		t.Fatalf("Parse error = %v, want one YAML document", err)
 	}
 }
 
@@ -107,7 +114,10 @@ func TestValidateRejects(t *testing.T) {
 		{"duplicate user bin", func(i *Inventory) { i.Tools = append(i.Tools, i.Tools[0]) }, `tools[jq]: bin "jq" is already installed by tools[jq]`},
 		{"profile bin clash", func(i *Inventory) { i.Profiles["stack"].Tools[0].Name = "jq" }, `profiles.stack.tools[jq]: bin "jq" is already installed by tools[jq]`},
 		{"link without system bin", func(i *Inventory) { i.Links = []string{"jq"} }, `links: "jq" is not a system bin`},
-		{"python without uv", func(i *Inventory) { i.System = i.System[1:] }, "python: no system or tools artifact provides the uv bin"},
+		{"python without uv", func(i *Inventory) {
+			i.System = i.System[1:]
+			i.Python.System = nil
+		}, "python: no system or tools artifact provides the uv bin"},
 		{"python version and marketplace", func(i *Inventory) { i.Python.User[0].Version = "1.0.0" }, "python.user[wlm]: set exactly one of version and marketplace"},
 		{"system python from marketplace", func(i *Inventory) {
 			i.Python.System[0].Version = ""
@@ -123,7 +133,11 @@ func TestValidateRejects(t *testing.T) {
 		{"plugin unknown marketplace", func(i *Inventory) { i.Claude.Plugins[0].ID = "hooks@elsewhere" }, `claude.plugins[hooks@elsewhere]: marketplace "elsewhere" is not under claude.marketplaces`},
 		{"undeclared env", func(i *Inventory) { i.Claude.Env["DOMAIN"] = "${HOST}" }, "claude.env: DOMAIN references ${HOST}, which configure.env does not declare"},
 		{"codex runtime without codex", func(i *Inventory) { i.System = i.System[:2] }, "codexRuntime: no system or tools artifact provides the codex bin"},
-		{"captain hook plugin", func(i *Inventory) { i.CaptainHook.Plugin = "other@market" }, `captainHook: plugin "other@market" is not under claude.plugins`},
+		{"captain hook url", func(i *Inventory) { i.CaptainHook.URL = "http://example.com/hook.tar.gz" }, `captainHook: url "http://example.com/hook.tar.gz" is not an https URL`},
+		{"system python with user uv", func(i *Inventory) {
+			i.Tools = append(i.Tools, i.System[0])
+			i.System = i.System[1:]
+		}, "python.system: no system artifact provides the uv bin"},
 		{"cookiesync without bin", func(i *Inventory) { i.Tools = i.Tools[:1] }, "cookiesync: no system or tools artifact provides the cookiesync bin"},
 		{"service env undeclared", func(i *Inventory) { i.Configure.Env = nil }, "services[hooks].env: URL references ${PORT}, which configure.env does not declare"},
 		{"service path command", func(i *Inventory) { i.Services[1].Command = []string{"/usr/bin/cookiesync"} }, `services[cookiesync]: command "/usr/bin/cookiesync" is not a bin name on PATH`},

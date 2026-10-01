@@ -122,7 +122,7 @@ func TestRenderPluginsServicesAndEnv(t *testing.T) {
 		`  executable="$(command -v 'cookiesync')"`,
 		`  checkout 'market' 'owner/market' '` + commit + `' public`,
 		`  uv_tool 'wlm' '3.13' 'wlm[lab] @ git+file://'"$marketplace_dir"'/market@` + commit + `'`,
-		`  install_captain_hook '1.0.0' 'https://example.com/SHA256SUMS.txt' './hook.tar.gz' '` + digest + `' 'hooks@market'`,
+		`  install_captain_hook '1.0.0' 'https://example.com/hook.tar.gz' '` + digest + `'`,
 		`  synckit_state '` + digest + `'`,
 		"hooks@market 1.0.0\nPINS",
 	} {

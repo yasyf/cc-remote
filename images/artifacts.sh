@@ -11,7 +11,7 @@ install_artifact() {
   local name="$1" version="$2" url="$3" algorithm="$4" digest="$5" format="$6" dir="$7" links="$8"
   local download="$tmp_dir/$name-$version.$format"
   shift 8
-  if [ "$(cat "$dir/.cc-remote-digest" 2> /dev/null)" != "$digest" ]; then
+  if [ "$format" = deb ] || [ "$(cat "$dir/.cc-remote-digest" 2> /dev/null)" != "$digest" ]; then
     fetch "$url" "$download" "$algorithm" "$digest"
     rm -rf "$dir"
     mkdir -p "$dir"

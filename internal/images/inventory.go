@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/url"
 	"os"
@@ -42,7 +43,6 @@ var (
 	aptPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*$`)
 	baseImagePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
 	imageNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*$`)
-	assetPattern     = regexp.MustCompile(`^\S+$`)
 	reference        = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 )
 
@@ -133,10 +133,8 @@ type CodexRuntime struct {
 
 type CaptainHook struct {
 	Version string `yaml:"version"`
-	Sums    string `yaml:"sums"`
-	Asset   string `yaml:"asset"`
+	URL     string `yaml:"url"`
 	SHA256  string `yaml:"sha256"`
-	Plugin  string `yaml:"plugin"`
 }
 
 type Cookiesync struct {
@@ -172,6 +170,12 @@ func Parse(raw []byte) (Inventory, error) {
 	decoder.KnownFields(true)
 	var inventory Inventory
 	if err := decoder.Decode(&inventory); err != nil {
+		return Inventory{}, fmt.Errorf("parse inventory: %w", err)
+	}
+	switch err := decoder.Decode(new(any)); {
+	case err == nil:
+		return Inventory{}, errors.New("parse inventory: want one YAML document")
+	case !errors.Is(err, io.EOF):
 		return Inventory{}, fmt.Errorf("parse inventory: %w", err)
 	}
 	if err := inventory.Validate(); err != nil {
@@ -389,6 +393,9 @@ func (inv Inventory) validatePython() error {
 	if len(tools) > 0 && !versionPattern.MatchString(inv.Python.Version) {
 		return fmt.Errorf("python.version %q is not a version", inv.Python.Version)
 	}
+	if len(inv.Python.System) > 0 && !inv.providesSystem("uv") {
+		return errors.New("python.system: no system artifact provides the uv bin")
+	}
 	if len(tools) > 0 && !inv.provides("uv") {
 		return errors.New("python: no system or tools artifact provides the uv bin")
 	}
@@ -491,17 +498,15 @@ func (inv Inventory) validateExtras() error {
 	}
 	if hook := inv.CaptainHook; hook != nil {
 		switch {
+		case !inv.provides("uv"):
+			return errors.New("captainHook: no system or tools artifact provides the uv bin its package install runs")
 		case !versionPattern.MatchString(hook.Version):
 			return fmt.Errorf("captainHook: version %q is not a version", hook.Version)
-		case !assetPattern.MatchString(hook.Asset):
-			return fmt.Errorf("captainHook: asset %q is not a file name", hook.Asset)
 		case !sha256Pattern.MatchString(hook.SHA256):
 			return errors.New("captainHook: sha256 is not 64 lowercase hex digits")
-		case !slices.ContainsFunc(inv.Claude.Plugins, func(p Plugin) bool { return p.ID == hook.Plugin }):
-			return fmt.Errorf("captainHook: plugin %q is not under claude.plugins", hook.Plugin)
 		}
-		if err := httpsURL(hook.Sums); err != nil {
-			return fmt.Errorf("captainHook: sums: %w", err)
+		if err := httpsURL(hook.URL); err != nil {
+			return fmt.Errorf("captainHook: %w", err)
 		}
 	}
 	if sync := inv.Cookiesync; sync != nil {
@@ -577,6 +582,13 @@ func (inv Inventory) provides(bin string) bool {
 		}
 	}
 	return false
+}
+
+func (inv Inventory) providesSystem(bin string) bool {
+	return slices.ContainsFunc(inv.System, func(a Artifact) bool {
+		_, ok := a.bins()[bin]
+		return ok
+	})
 }
 
 func references(template string) []string {

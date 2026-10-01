@@ -39,9 +39,19 @@ PINS
 }
 
 healthy() {
-  claude plugin list --json \
-    | jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} \
+  local plugins
+  plugins="$(claude plugin list --json)"
+  jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$plugins" \
     | sort
+}
+
+check_plugins() {
+  local installed
+  installed="$(healthy)"
+  if ! diff <(pinned) - <<< "$installed" >&2; then
+    echo "plugins: the installed, enabled and loadable plugins differ from the pins" >&2
+    exit 1
+  fi
 }
 
 with_github_token() {
@@ -106,10 +116,7 @@ install_plugins() {
 {{- range .Claude.Plugins}}
   install_plugin {{q .ID}} {{q .Version}}
 {{- end}}
-  if ! diff <(pinned) <(healthy) >&2; then
-    echo "plugins: the installed, enabled and loadable plugins differ from the pins" >&2
-    exit 1
-  fi
+  check_plugins
 }
 
 uv_tool() {
@@ -136,12 +143,13 @@ codex_runtime_root="$HOME/.cache/codex-runtimes/codex-primary-runtime"
 install_codex_runtime() {
   local version="$1" url="$2" digest="$3" config="$HOME/.codex/config.toml" download="$tmp_dir/codex-runtime.tar.xz" plugin
   shift 3
-  if [ "$(jq -r .bundleVersion "$codex_runtime_root/runtime.json" 2> /dev/null)" != "$version" ]; then
+  if [ "$(cat "$codex_runtime_root/.cc-remote-digest" 2> /dev/null)" != "$digest" ]; then
     fetch "$url" "$download" sha256 "$digest"
     rm -rf "$codex_runtime_root"
     mkdir -p "$(dirname "$codex_runtime_root")"
     tar -xJf "$download" -C "$(dirname "$codex_runtime_root")"
     rm -f "$download"
+    printf '%s\n' "$digest" > "$codex_runtime_root/.cc-remote-digest"
   fi
   mkdir -p "$HOME/.codex"
   grep -qsF '[marketplaces.openai-primary-runtime]' "$config" \
@@ -157,8 +165,9 @@ codex_runtime_plugin() {
 }
 
 verify_codex_runtime() {
-  local version="$1" plugin
-  shift
+  local version="$1" digest="$2" plugin
+  shift 2
+  verify_pin "$codex_runtime_root" "$digest"
   if [ "$(jq -r .bundleVersion "$codex_runtime_root/runtime.json" 2> /dev/null)" != "$version" ]; then
     echo "cc-remote: the Codex runtime is not at $version" >&2
     exit 1
@@ -176,13 +185,11 @@ captain_hook_build() {
 }
 
 install_captain_hook() {
-  local version="$1" sums="$2" asset="$3" digest="$4" plugin="$5"
+  local version="$1" url="$2" digest="$3" download="$tmp_dir/captain-hook.tar.gz"
   if [ "$(captain_hook_build)" != "$version" ]; then
-    if ! curl -sSfL --retry 3 --retry-all-errors --retry-delay 2 "$sums" | grep -xF "$digest  $asset" > /dev/null; then
-      echo "plugins: $sums does not list $digest for $asset" >&2
-      exit 1
-    fi
-    "$(plugin_root "$plugin")/linux/install.sh" "$version"
+    fetch "$url" "$download" sha256 "$digest"
+    tar -xzf "$download" -C "$tmp_dir" capt-hookd
+    "$tmp_dir/capt-hookd" package-install
   fi
 }
 
@@ -250,8 +257,9 @@ start_services() {
 }
 
 run_install() {
-  local github_token
+  local github_token installed
   IFS= read -r github_token
+  mkdir -p "$bin_dir"
 {{- range .Tools}}
   {{install . "tool_dir" "bin_dir"}}
 {{- end}}
@@ -262,7 +270,8 @@ run_install() {
   checkout {{q .Name}} {{q .GitHub}} {{q .Ref}} {{if .Private}}private{{else}}public{{end}}
 {{- end}}
 {{- if .Claude.Plugins}}
-  if [ "$(healthy)" != "$(pinned)" ]; then
+  installed="$(healthy)"
+  if [ "$installed" != "$(pinned)" ]; then
     install_plugins
   fi
 {{- end}}
@@ -273,12 +282,13 @@ run_install() {
   install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
 {{- end}}
 {{- with .CaptainHook}}
-  install_captain_hook {{q .Version}} {{q .Sums}} {{q .Asset}} {{q .SHA256}} {{q .Plugin}}
+  install_captain_hook {{q .Version}} {{q .URL}} {{q .SHA256}}
 {{- end}}
   run_verify
 }
 
 run_configure() {
+  :
 {{- range .Configure.Env}}
   require_env {{q .}}
 {{- end}}
@@ -325,10 +335,7 @@ run_verify() {
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
 {{- end}}
 {{- if .Claude.Plugins}}
-  if ! diff <(pinned) <(healthy) >&2; then
-    echo "plugins: the installed, enabled and loadable plugins differ from the pins" >&2
-    exit 1
-  fi
+  check_plugins
 {{- range .Claude.Plugins}}
 {{- $plugin := .}}
 {{- range .Bins}}
@@ -344,7 +351,7 @@ run_verify() {
 {{- end}}
 {{- end}}
 {{- with .CodexRuntime}}
-  verify_codex_runtime {{q .Version}}{{range .Plugins}} {{q .}}{{end}}
+  verify_codex_runtime {{q .Version}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
 {{- end}}
 {{- with .CaptainHook}}
   verify_captain_hook {{q .Version}}
