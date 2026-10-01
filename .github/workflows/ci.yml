@@ -64,6 +64,30 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Render the example inventory
+        run: |
+          for profile in agents stack; do
+            go run ./cmd/cc-remote images render --inventory examples/inventory.yaml --profile "$profile" --out "$RUNNER_TEMP/images/$profile"
+          done
+      - name: bash -n
+        run: |
+          for script in "$RUNNER_TEMP"/images/*/*.sh; do
+            bash -n "$script"
+          done
+      - name: shellcheck
+        run: shellcheck "$RUNNER_TEMP"/images/*/*.sh
+      - name: Compile the service supervisor
+        run: python3 -m py_compile images/supervise.py
+
   workflow:
     runs-on: ubuntu-latest
     timeout-minutes: 10
