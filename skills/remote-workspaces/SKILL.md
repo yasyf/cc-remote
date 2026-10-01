@@ -25,8 +25,9 @@ finding; do not work around it.
 
 Recipe ids follow `<provider>-<profile>-ssh`. cc-remote derives one recipe for
 each provider that a profile in the cc-remote config configures a machine for,
-so the profile names in the config become the ids. The config's top-level `provider` and `profile` over SSH is the
-default recipe, and its name ends in `(default)`. Print the generated set:
+so the profile names in the config become the ids. The config's top-level
+`provider` and `profile` make the default recipe, and its name ends in
+`(default)`. Print the generated set:
 
 ```sh
 cc-remote orca recipes
@@ -66,8 +67,17 @@ cc-remote orca recipes --orca-yaml orca.yaml
 ```
 
 The command rewrites only the `environmentRecipes` key. Rerun it whenever the
-cc-remote config changes: `wait` refuses a recipe whose `orca.yaml` entry
+cc-remote config changes. `wait` refuses a recipe whose `orca.yaml` entry
 differs from what cc-remote generates.
+
+`recipes` and `wait` read the config at `$CC_REMOTE_CONFIG`, or else at
+`$XDG_CONFIG_HOME/cc-remote/config.yaml`, where `$XDG_CONFIG_HOME` defaults to
+`~/.config`. To use a config checked into the repo, pass `--config` with a path
+relative to the repo root. The generated commands pass that path to cc-remote
+unchanged, so pass the same `--config` to `wait`.
+
+Run `cc-remote ledger init` once on the Mac before the first create.
+cc-remote refuses every create until a budget ledger exists.
 
 `cc-remote orca recipes --plugin <dir>` writes the same recipes as an Orca
 plugin, an `orca-plugin.json` that lists them under `contributes.vmRecipes`.

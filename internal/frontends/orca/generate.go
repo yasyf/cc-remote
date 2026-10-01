@@ -70,17 +70,6 @@ type manifest struct {
 	Capabilities []string `json:"capabilities"`
 }
 
-func DefaultPlugin() Plugin {
-	return Plugin{
-		ID:          "cc-remote-recipes",
-		Publisher:   "yasyf",
-		Name:        "cc-remote recipes",
-		Version:     "0.1.0",
-		Description: "Sprites and Namespace workspaces over SSH, created by cc-remote.",
-		Repository:  "https://github.com/yasyf/cc-remote",
-	}
-}
-
 func Entries(l Lifecycle, recipes []Recipe) ([]Entry, error) {
 	if err := l.validate(); err != nil {
 		return nil, err

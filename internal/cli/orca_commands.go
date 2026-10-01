@@ -14,7 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/version"
 )
 
 func newOrcaCmd(runner orca.Runner) *cobra.Command {
@@ -31,8 +33,33 @@ func newOrcaCmd(runner orca.Runner) *cobra.Command {
 	return cmd
 }
 
+type orcaConfig struct {
+	path string
+}
+
+func (o *orcaConfig) bind(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&o.path, "config", "", "config file (default $CC_REMOTE_CONFIG or ~/.config/cc-remote/config.yaml); "+
+		"recipes pass this path to cc-remote as given, so name it relative to the repo root")
+}
+
+func (o *orcaConfig) load() (*config.Config, []orca.Recipe, orca.Lifecycle, error) {
+	path := o.path
+	if path == "" {
+		path = config.DefaultPath()
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, nil, orca.Lifecycle{}, err
+	}
+	recipes, err := orca.Recipes(orca.SourceOf(cfg))
+	lifecycle := orca.DefaultLifecycle()
+	lifecycle.Config = o.path
+	return cfg, recipes, lifecycle, err
+}
+
 func newOrcaRecipesCmd() *cobra.Command {
 	var orcaYAML, pluginDir string
+	var source orcaConfig
 	cmd := &cobra.Command{
 		Use:   "recipes",
 		Short: "Generate Orca environment recipes from the cc-remote config",
@@ -40,13 +67,16 @@ func newOrcaRecipesCmd() *cobra.Command {
 			"or write an Orca plugin that contributes the same recipes through contributes.vmRecipes with --plugin.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			recipes, err := orca.Recipes(orca.DefaultSource())
+			cfg, recipes, lifecycle, err := source.load()
 			if err != nil {
 				return err
 			}
-			lifecycle := orca.DefaultLifecycle()
 			if pluginDir != "" {
-				if err := writePlugin(pluginDir, lifecycle, recipes); err != nil {
+				plugin, err := orca.PluginOf(cfg, version.Version)
+				if err != nil {
+					return err
+				}
+				if err := writePlugin(pluginDir, plugin, lifecycle, recipes); err != nil {
 					return err
 				}
 			}
@@ -66,12 +96,14 @@ func newOrcaRecipesCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&orcaYAML, "orca-yaml", "", "rewrite environmentRecipes in this orca.yaml, creating it if absent")
 	cmd.Flags().StringVar(&pluginDir, "plugin", "", "write orca-plugin.json and recipes/ into this directory")
+	source.bind(cmd)
 	return cmd
 }
 
 func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 	var repoID string
 	var timeout time.Duration
+	var source orcaConfig
 	cmd := &cobra.Command{
 		Use:   "wait <recipe-id> <workspace>",
 		Short: "Preflight a recipe, then wait for Orca to list the SSH workspace it creates from it",
@@ -83,7 +115,7 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 			"recipe flag on worktree create and no command that adds an SSH host, so this command only waits.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			recipes, err := orca.Recipes(orca.DefaultSource())
+			_, recipes, lifecycle, err := source.load()
 			if err != nil {
 				return err
 			}
@@ -99,7 +131,7 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 			}
 			preflight := orca.Preflight{
 				Recipe:    recipe,
-				Lifecycle: orca.DefaultLifecycle(),
+				Lifecycle: lifecycle,
 				Workspace: args[1],
 				RepoID:    repoID,
 				Checkout:  checkout,
@@ -113,6 +145,7 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repoID, "repo", "", "Orca repo id; defaults to the repo whose path is this checkout's primary worktree")
 	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Minute, "how long to wait for Orca to list the workspace")
+	source.bind(cmd)
 	return cmd
 }
 
@@ -160,8 +193,8 @@ func newOrcaGoneCmd(runner orca.Runner) *cobra.Command {
 	}
 }
 
-func writePlugin(dir string, lifecycle orca.Lifecycle, recipes []orca.Recipe) error {
-	files, err := orca.PluginFiles(orca.DefaultPlugin(), lifecycle, recipes)
+func writePlugin(dir string, plugin orca.Plugin, lifecycle orca.Lifecycle, recipes []orca.Recipe) error {
+	files, err := orca.PluginFiles(plugin, lifecycle, recipes)
 	if err != nil {
 		return err
 	}

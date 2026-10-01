@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/providers"
 )
 
@@ -26,10 +27,7 @@ const (
 	provisionedRoot = "provisioned-root"
 )
 
-var (
-	recipeID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	segment  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
-)
+var recipeID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 type Source struct {
 	Provider string
@@ -54,17 +52,6 @@ type machine struct {
 	profile  string
 }
 
-func DefaultSource() Source {
-	return Source{
-		Provider: "sprites",
-		Profile:  "lean",
-		Profiles: map[string][]string{
-			"lean": {"sprites", "namespace"},
-			"full": {"namespace"},
-		},
-	}
-}
-
 func DefaultLifecycle() Lifecycle {
 	return Lifecycle{Binary: "cc-remote"}
 }
@@ -77,8 +64,8 @@ func Recipes(src Source) ([]Recipe, error) {
 	var machines []machine
 	for profile, providers := range src.Profiles {
 		for _, provider := range providers {
-			if !segment.MatchString(provider) || !segment.MatchString(profile) {
-				return nil, fmt.Errorf("provider %q and profile %q must match %s", provider, profile, segment)
+			if !config.Identifier.MatchString(provider) || !config.Identifier.MatchString(profile) {
+				return nil, fmt.Errorf("provider %q and profile %q must match %s", provider, profile, config.Identifier)
 			}
 			machines = append(machines, machine{provider: provider, profile: profile})
 		}
@@ -112,8 +99,8 @@ func (r Recipe) ID() string {
 
 func (r Recipe) validate() error {
 	for field, value := range map[string]string{"provider": r.Provider, "profile": r.Profile} {
-		if !segment.MatchString(value) {
-			return fmt.Errorf("recipe %s: %s %q must match %s", r.ID(), field, value, segment)
+		if !config.Identifier.MatchString(value) {
+			return fmt.Errorf("recipe %s: %s %q must match %s", r.ID(), field, value, config.Identifier)
 		}
 	}
 	if !recipeID.MatchString(r.ID()) {

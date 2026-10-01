@@ -18,7 +18,11 @@ var defaultSprites = orca.Recipe{
 
 func defaultRecipes(t *testing.T) []orca.Recipe {
 	t.Helper()
-	recipes, err := orca.Recipes(orca.DefaultSource())
+	recipes, err := orca.Recipes(orca.Source{
+		Provider: "sprites",
+		Profile:  "agents",
+		Profiles: map[string][]string{"agents": {"namespace", "sprites"}, "stack": {"namespace"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,9 +36,9 @@ func TestRecipes(t *testing.T) {
 		got = append(got, r.ID()+" | "+r.Name+" | "+r.Description)
 	}
 	want := []string{
-		"sprites-lean-ssh | Sprites lean over SSH (default) | The default. A Sprites machine with the lean profile, reached over SSH.",
-		"namespace-full-ssh | Namespace full over SSH | A Namespace machine with the full profile, reached over SSH.",
-		"namespace-lean-ssh | Namespace lean over SSH | A Namespace machine with the lean profile, reached over SSH.",
+		"sprites-agents-ssh | Sprites agents over SSH (default) | The default. A Sprites machine with the agents profile, reached over SSH.",
+		"namespace-agents-ssh | Namespace agents over SSH | A Namespace machine with the agents profile, reached over SSH.",
+		"namespace-stack-ssh | Namespace stack over SSH | A Namespace machine with the stack profile, reached over SSH.",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("Recipes() =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -149,7 +153,15 @@ func TestEntriesRejectsInvalidConfig(t *testing.T) {
 
 func TestPluginFiles(t *testing.T) {
 	stack := orca.Recipe{Provider: "namespace", Profile: "stack", Name: "Namespace stack over SSH"}
-	files, err := orca.PluginFiles(orca.DefaultPlugin(), orca.DefaultLifecycle(), []orca.Recipe{defaultSprites, stack})
+	plugin := orca.Plugin{
+		ID:          "cc-remote-recipes",
+		Publisher:   "example",
+		Name:        "project remote workspaces",
+		Version:     "1.2.3",
+		Description: "Remote workspaces for project, created by cc-remote over SSH.",
+		Repository:  "https://github.com/example/project",
+	}
+	files, err := orca.PluginFiles(plugin, orca.DefaultLifecycle(), []orca.Recipe{defaultSprites, stack})
 	if err != nil {
 		t.Fatalf("PluginFiles() error = %v", err)
 	}
@@ -163,11 +175,11 @@ func TestPluginFiles(t *testing.T) {
 	wantManifest := `{
   "manifestVersion": 1,
   "id": "cc-remote-recipes",
-  "publisher": "yasyf",
-  "name": "cc-remote recipes",
-  "version": "0.1.0",
-  "description": "Sprites and Namespace workspaces over SSH, created by cc-remote.",
-  "repository": "https://github.com/yasyf/cc-remote",
+  "publisher": "example",
+  "name": "project remote workspaces",
+  "version": "1.2.3",
+  "description": "Remote workspaces for project, created by cc-remote over SSH.",
+  "repository": "https://github.com/example/project",
   "engines": {
     "orca": ">=1.4.215"
   },
