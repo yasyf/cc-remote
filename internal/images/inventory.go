@@ -30,20 +30,21 @@ const (
 )
 
 var (
-	namePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	versionPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
-	sha256Pattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	sha512Pattern    = regexp.MustCompile(`^[0-9a-f]{128}$`)
-	refPattern       = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	githubPattern    = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
-	pluginPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*@([A-Za-z0-9][A-Za-z0-9._-]*)$`)
-	packagePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?$`)
-	envPattern       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	userPattern      = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-	aptPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*$`)
-	baseImagePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
-	imageNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*$`)
-	reference        = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+	namePattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	versionPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	sha256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	sha512Pattern      = regexp.MustCompile(`^[0-9a-f]{128}$`)
+	refPattern         = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	githubPattern      = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
+	pluginPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*@([A-Za-z0-9][A-Za-z0-9._-]*)$`)
+	packagePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?$`)
+	envPattern         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	userPattern        = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	aptPattern         = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*$`)
+	baseImagePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
+	imageNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*$`)
+	instructionPattern = regexp.MustCompile(`^([A-Z]+)\s+[^\n]*\S$`)
+	reference          = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 )
 
 type Inventory struct {
@@ -59,15 +60,17 @@ type Inventory struct {
 	CaptainHook  *CaptainHook       `yaml:"captainHook"`
 	Cookiesync   *Cookiesync        `yaml:"cookiesync"`
 	Services     []Service          `yaml:"services"`
+	Prepare      []string           `yaml:"prepare"`
 	Configure    Configure          `yaml:"configure"`
 	Profiles     map[string]Profile `yaml:"profiles"`
 }
 
 type Image struct {
-	Name         string `yaml:"name"`
-	Base         string `yaml:"base"`
-	User         string `yaml:"user"`
-	WorkspaceDir string `yaml:"workspaceDir"`
+	Name         string   `yaml:"name"`
+	Base         string   `yaml:"base"`
+	User         string   `yaml:"user"`
+	WorkspaceDir string   `yaml:"workspaceDir"`
+	Layer        []string `yaml:"layer"`
 }
 
 type Apt struct {
@@ -154,7 +157,8 @@ type Configure struct {
 }
 
 type Profile struct {
-	Tools []Artifact `yaml:"tools"`
+	Tools   []Artifact `yaml:"tools"`
+	Prepare []string   `yaml:"prepare"`
 }
 
 func Load(file string) (Inventory, error) {
@@ -219,6 +223,15 @@ func (inv Inventory) validateImage() error {
 		return fmt.Errorf("image.user %q is not a Linux user name", image.User)
 	case !path.IsAbs(image.WorkspaceDir) || path.Clean(image.WorkspaceDir) != image.WorkspaceDir:
 		return fmt.Errorf("image.workspaceDir %q is not a clean absolute path", image.WorkspaceDir)
+	}
+	for _, line := range image.Layer {
+		match := instructionPattern.FindStringSubmatch(line)
+		switch {
+		case match == nil:
+			return fmt.Errorf("image.layer: %q is not one Dockerfile instruction on one line", line)
+		case match[1] == "FROM":
+			return errors.New("image.layer: FROM would start a new stage after the provisioned one")
+		}
 	}
 	return nil
 }
@@ -531,9 +544,15 @@ func (inv Inventory) validateServices() error {
 		}
 		declared[name] = true
 	}
-	for _, line := range inv.Configure.Run {
-		if strings.TrimSpace(line) == "" {
-			return errors.New("configure.run: a step is empty")
+	if err := validateSteps("configure.run", inv.Configure.Run); err != nil {
+		return err
+	}
+	if err := validateSteps("prepare", inv.Prepare); err != nil {
+		return err
+	}
+	for _, name := range slices.Sorted(maps.Keys(inv.Profiles)) {
+		if err := validateSteps("profiles."+name+".prepare", inv.Profiles[name].Prepare); err != nil {
+			return err
 		}
 	}
 	names := map[string]bool{}
@@ -559,6 +578,15 @@ func (inv Inventory) validateServices() error {
 			}
 		}
 		names[service.Name] = true
+	}
+	return nil
+}
+
+func validateSteps(where string, steps []string) error {
+	for _, step := range steps {
+		if strings.TrimSpace(step) == "" {
+			return fmt.Errorf("%s: a step is empty", where)
+		}
 	}
 	return nil
 }

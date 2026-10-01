@@ -121,7 +121,7 @@ func TestRenderPluginsServicesAndEnv(t *testing.T) {
 		`  service 'hooks' env "URL=http://127.0.0.1:${PORT}" "$executable" 'serve'`,
 		`  executable="$(command -v 'cookiesync')"`,
 		`  checkout 'market' 'owner/market' '` + commit + `' public`,
-		`  uv_tool 'wlm' '3.13' 'wlm[lab] @ git+file://'"$marketplace_dir"'/market@` + commit + `'`,
+		`  uv_tool 'example-tool' '3.13' 'example-tool[cli] @ git+file://'"$marketplace_dir"'/market@` + commit + `'`,
 		`  install_captain_hook '1.0.0' 'https://example.com/hook.tar.gz' '` + digest + `'`,
 		`  synckit_state '` + digest + `'`,
 		"hooks@market 1.0.0\nPINS",
@@ -132,6 +132,19 @@ func TestRenderPluginsServicesAndEnv(t *testing.T) {
 	}
 	if want := "  mkdir -p ~/.example\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
 		t.Errorf("plugins.sh lacks the configure step %q", want)
+	}
+	if want := "  (\n    cd \"$HOME\"\n    mkdir -p ~/.cache/example\n  )\n  run_verify\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
+		t.Errorf("plugins.sh lacks the prepare block %q", want)
+	}
+}
+
+func TestRenderAddsProfilePrepareSteps(t *testing.T) {
+	scripts, err := Render(validInventory(), "stack")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if want := "    mkdir -p ~/.cache/example\n    kind version\n  )\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
+		t.Errorf("stack plugins.sh lacks the prepare steps %q", want)
 	}
 }
 
@@ -164,6 +177,20 @@ func TestFingerprintFormat(t *testing.T) {
 	}
 }
 
+func TestStamp(t *testing.T) {
+	scripts := Scripts{Provision: []byte("A"), Plugins: []byte("BC")}
+	image := Context{Dockerfile: []byte("D"), Provision: []byte("A"), Start: []byte("S")}
+	tools, img := scripts.Fingerprint(), image.Fingerprint()
+	sum := sha256.Sum256([]byte("cc-remote/ready/v1\ntools 64\n" + tools))
+	if got, want := Stamp(scripts, nil), hex.EncodeToString(sum[:]); got != want {
+		t.Errorf("Stamp without image = %s, want %s", got, want)
+	}
+	sum = sha256.Sum256([]byte("cc-remote/ready/v1\ntools 64\n" + tools + "image 64\n" + img))
+	if got, want := Stamp(scripts, &image), hex.EncodeToString(sum[:]); got != want {
+		t.Errorf("Stamp with image = %s, want %s", got, want)
+	}
+}
+
 func TestFingerprintsTrackTheirInputs(t *testing.T) {
 	base := fingerprints(t, validInventory())
 	if again := fingerprints(t, validInventory()); again != base {
@@ -181,6 +208,8 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 		{"image user", func(i *Inventory) { i.Image.User = "dev" }, false, true},
 		{"image base", func(i *Inventory) { i.Image.Base = "ubuntu:26.04@sha256:" + strings.Repeat("5", 64) }, false, true},
 		{"image name", func(i *Inventory) { i.Image.Name = "other" }, false, false},
+		{"image layer", func(i *Inventory) { i.Image.Layer = append(i.Image.Layer, "RUN true") }, false, true},
+		{"prepare step", func(i *Inventory) { i.Prepare = []string{"true"} }, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -224,6 +253,7 @@ COPY provision.sh start.sh /tmp/cc-remote/
 RUN bash /tmp/cc-remote/provision.sh \
     && install -m 0755 /tmp/cc-remote/start.sh /usr/local/bin/cc-remote-start \
     && rm -rf /tmp/cc-remote
+ENV LANG=C.UTF-8
 
 USER agent
 ENV PATH=/home/agent/.local/bin:${PATH}

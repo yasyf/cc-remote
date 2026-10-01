@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-phase="${1:?usage: plugins.sh install|configure|verify}"
+phase="${1:?usage: plugins.sh install STAMP|ready STAMP|configure|verify}"
 
 state_dir="$HOME/.cc-remote"
 share_dir="$HOME/.local/share/cc-remote"
@@ -257,7 +257,8 @@ start_services() {
 }
 
 run_install() {
-  local github_token installed
+  local stamp="${1:?install needs the ready stamp}" github_token installed
+  rm -f "$state_dir/ready"
   IFS= read -r github_token
   mkdir -p "$bin_dir"
 {{- range .Tools}}
@@ -284,7 +285,25 @@ run_install() {
 {{- with .CaptainHook}}
   install_captain_hook {{q .Version}} {{q .URL}} {{q .SHA256}}
 {{- end}}
+{{- if .Prepare}}
+  (
+    cd "$HOME"
+{{- range .Prepare}}
+    {{.}}
+{{- end}}
+  )
+{{- end}}
   run_verify
+  mkdir -p "$state_dir"
+  printf '%s\n' "$stamp" > "$state_dir/ready"
+}
+
+run_ready() {
+  local stamp="${1:?ready needs the stamp to compare}"
+  if [ "$(cat "$state_dir/ready" 2> /dev/null)" != "$stamp" ]; then
+    echo "plugins: this host was not prepared from stamp $stamp" >&2
+    exit 1
+  fi
 }
 
 run_configure() {
@@ -359,11 +378,12 @@ run_verify() {
 }
 
 case "$phase" in
-  install) run_install ;;
+  install) run_install "${2:-}" ;;
+  ready) run_ready "${2:-}" ;;
   configure) run_configure ;;
   verify) run_verify ;;
   *)
-    echo "usage: plugins.sh install|configure|verify" >&2
+    echo "usage: plugins.sh install STAMP|ready STAMP|configure|verify" >&2
     exit 2
     ;;
 esac

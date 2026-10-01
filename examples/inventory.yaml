@@ -5,6 +5,8 @@ image:
   base: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
   user: agent
   workspaceDir: /workspaces
+  layer:
+    - ENV LANG=C.UTF-8
 
 apt:
   install:
@@ -181,6 +183,9 @@ services:
   - name: cookiesync
     command: [cookiesync, supervise]
 
+prepare:
+  - mkdir -p "$HOME/.cache/example"
+
 configure:
   env: [EXAMPLE_PORT]
   run:
@@ -199,3 +204,5 @@ profiles:
         url: https://github.com/jdx/mise/releases/download/v2026.9.18/mise-v2026.9.18-linux-x64
         sha256: d24fe0bf7e613824ad99f7b8dac3f2b381a37b9f75f84dd250855217095a8de4
         format: binary
+    prepare:
+      - mkdir -p "$HOME/.kube"

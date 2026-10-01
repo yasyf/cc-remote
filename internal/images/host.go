@@ -32,11 +32,21 @@ func (s Scripts) StagePlugins(ctx context.Context, exec Exec) error {
 	return nil
 }
 
-func (s Scripts) Install(ctx context.Context, exec Exec, githubToken string) error {
+func (s Scripts) Install(ctx context.Context, exec Exec, githubToken, stamp string) error {
 	if strings.ContainsAny(githubToken, "\r\n") {
 		return errors.New("plugins install: the GitHub token spans lines")
 	}
-	return runPlugins(ctx, exec, "install", nil, strings.NewReader(githubToken+"\n"))
+	if !sha256Pattern.MatchString(stamp) {
+		return fmt.Errorf("plugins install: stamp %q is not a fingerprint", stamp)
+	}
+	return runPlugins(ctx, exec, []string{"install", stamp}, nil, strings.NewReader(githubToken+"\n"))
+}
+
+func (s Scripts) Ready(ctx context.Context, exec Exec, stamp string) error {
+	if !sha256Pattern.MatchString(stamp) {
+		return fmt.Errorf("plugins ready: stamp %q is not a fingerprint", stamp)
+	}
+	return runPlugins(ctx, exec, []string{"ready", stamp}, nil, nil)
 }
 
 func (s Scripts) Configure(ctx context.Context, exec Exec, env map[string]string) error {
@@ -47,17 +57,17 @@ func (s Scripts) Configure(ctx context.Context, exec Exec, env map[string]string
 	for _, key := range slices.Sorted(maps.Keys(env)) {
 		assignments = append(assignments, key+"="+env[key])
 	}
-	return runPlugins(ctx, exec, "configure", assignments, nil)
+	return runPlugins(ctx, exec, []string{"configure"}, assignments, nil)
 }
 
 func (s Scripts) Verify(ctx context.Context, exec Exec) error {
-	return runPlugins(ctx, exec, "verify", nil, nil)
+	return runPlugins(ctx, exec, []string{"verify"}, nil, nil)
 }
 
-func runPlugins(ctx context.Context, exec Exec, phase string, env []string, stdin io.Reader) error {
-	argv := slices.Concat([]string{"env"}, env, []string{"bash", "-c", `exec bash "` + PluginsPath + `" "$0"`, phase})
+func runPlugins(ctx context.Context, exec Exec, args, env []string, stdin io.Reader) error {
+	argv := slices.Concat([]string{"env"}, env, []string{"bash", "-c", `exec bash "` + PluginsPath + `" "$@"`, "plugins.sh"}, args)
 	if err := exec(ctx, argv, stdin); err != nil {
-		return fmt.Errorf("plugins %s: %w", phase, err)
+		return fmt.Errorf("plugins %s: %w", args[0], err)
 	}
 	return nil
 }

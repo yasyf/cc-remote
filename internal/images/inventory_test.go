@@ -13,7 +13,7 @@ const (
 func validInventory() Inventory {
 	return Inventory{
 		Version: SchemaVersion,
-		Image:   &Image{Name: "agent-host", Base: "ubuntu:24.04@sha256:" + digest, User: "agent", WorkspaceDir: "/workspaces"},
+		Image:   &Image{Name: "agent-host", Base: "ubuntu:24.04@sha256:" + digest, User: "agent", WorkspaceDir: "/workspaces", Layer: []string{"ENV LANG=C.UTF-8"}},
 		System: []Artifact{
 			{Name: "uv", Version: "0.1.0", URL: "https://example.com/uv.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"uv": "uv/uv"}},
 			{Name: "claude", Version: "2.0.0", URL: "https://example.com/claude", SHA256: digest, Format: Binary},
@@ -27,7 +27,7 @@ func validInventory() Inventory {
 		Python: Python{
 			Version: "3.13",
 			System:  []PythonTool{{Name: "cc-transcript", Version: "1.0.0", Bins: []string{"cc-transcript"}}},
-			User:    []PythonTool{{Name: "wlm", Package: "wlm[lab]", Marketplace: "market", Bins: []string{"wlm"}}},
+			User:    []PythonTool{{Name: "example-tool", Package: "example-tool[cli]", Marketplace: "market", Bins: []string{"example-tool"}}},
 		},
 		Claude: Claude{
 			Env:          map[string]string{"DOMAIN": "example.com"},
@@ -41,9 +41,13 @@ func validInventory() Inventory {
 			{Name: "hooks", Plugin: "hooks@market", Command: []string{"bin/hooks", "serve"}, Env: map[string]string{"URL": "http://127.0.0.1:${PORT}"}},
 			{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}},
 		},
+		Prepare:   []string{"mkdir -p ~/.cache/example"},
 		Configure: Configure{Env: []string{"PORT"}, Run: []string{"mkdir -p ~/.example"}},
 		Profiles: map[string]Profile{
-			"stack": {Tools: []Artifact{{Name: "kind", Version: "0.29.0", URL: "https://example.com/kind", SHA256: digest, Format: Binary}}},
+			"stack": {
+				Tools:   []Artifact{{Name: "kind", Version: "0.29.0", URL: "https://example.com/kind", SHA256: digest, Format: Binary}},
+				Prepare: []string{"kind version"},
+			},
 		},
 	}
 }
@@ -118,12 +122,12 @@ func TestValidateRejects(t *testing.T) {
 			i.System = i.System[1:]
 			i.Python.System = nil
 		}, "python: no system or tools artifact provides the uv bin"},
-		{"python version and marketplace", func(i *Inventory) { i.Python.User[0].Version = "1.0.0" }, "python.user[wlm]: set exactly one of version and marketplace"},
+		{"python version and marketplace", func(i *Inventory) { i.Python.User[0].Version = "1.0.0" }, "python.user[example-tool]: set exactly one of version and marketplace"},
 		{"system python from marketplace", func(i *Inventory) {
 			i.Python.System[0].Version = ""
 			i.Python.System[0].Marketplace = "market"
 		}, "python.system[cc-transcript]: marketplace checkouts live in the user's home, so only python.user may install from one"},
-		{"python unknown marketplace", func(i *Inventory) { i.Python.User[0].Marketplace = "other" }, `python.user[wlm]: marketplace "other" is not under claude.marketplaces`},
+		{"python unknown marketplace", func(i *Inventory) { i.Python.User[0].Marketplace = "other" }, `python.user[example-tool]: marketplace "other" is not under claude.marketplaces`},
 		{"plugins without claude", func(i *Inventory) {
 			i.System = i.System[:1]
 			i.Links = nil
@@ -143,6 +147,12 @@ func TestValidateRejects(t *testing.T) {
 		{"service path command", func(i *Inventory) { i.Services[1].Command = []string{"/usr/bin/cookiesync"} }, `services[cookiesync]: command "/usr/bin/cookiesync" is not a bin name on PATH`},
 		{"service unknown plugin", func(i *Inventory) { i.Services[0].Plugin = "other@market" }, `services[hooks]: plugin "other@market" is not under claude.plugins`},
 		{"empty configure step", func(i *Inventory) { i.Configure.Run = []string{" "} }, "configure.run: a step is empty"},
+		{"empty profile prepare step", func(i *Inventory) {
+			i.Profiles["stack"] = Profile{Prepare: []string{""}}
+		}, "profiles.stack.prepare: a step is empty"},
+		{"layer FROM", func(i *Inventory) { i.Image.Layer = []string{"FROM scratch"} }, "image.layer: FROM would start a new stage after the provisioned one"},
+		{"layer multi-line", func(i *Inventory) { i.Image.Layer = []string{"RUN a\nRUN b"} }, `image.layer: "RUN a\nRUN b" is not one Dockerfile instruction on one line`},
+		{"layer lowercase", func(i *Inventory) { i.Image.Layer = []string{"run make"} }, `image.layer: "run make" is not one Dockerfile instruction on one line`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

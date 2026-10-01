@@ -24,6 +24,7 @@ const (
 
 	toolDomain  = "cc-remote/tools/v1"
 	imageDomain = "cc-remote/image/v1"
+	stampDomain = "cc-remote/ready/v1"
 )
 
 type Scripts struct {
@@ -41,7 +42,8 @@ type Context struct {
 
 type view struct {
 	Inventory
-	Tools []Artifact
+	Tools   []Artifact
+	Prepare []string
 }
 
 func Render(inv Inventory, profile string) (Scripts, error) {
@@ -49,7 +51,11 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	if err != nil {
 		return Scripts{}, err
 	}
-	data := view{Inventory: inv, Tools: slices.Concat(inv.Tools, inv.Profiles[profile].Tools)}
+	data := view{
+		Inventory: inv,
+		Tools:     slices.Concat(inv.Tools, inv.Profiles[profile].Tools),
+		Prepare:   slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
+	}
 	provision, err := execute(bound, "provision.sh", data)
 	if err != nil {
 		return Scripts{}, err
@@ -86,6 +92,14 @@ func RenderImage(inv Inventory) (Context, error) {
 
 func (s Scripts) Fingerprint() string {
 	return fingerprint(toolDomain, file{"provision.sh", s.Provision}, file{"plugins.sh", s.Plugins})
+}
+
+func Stamp(scripts Scripts, image *Context) string {
+	files := []file{{"tools", []byte(scripts.Fingerprint())}}
+	if image != nil {
+		files = append(files, file{"image", []byte(image.Fingerprint())})
+	}
+	return fingerprint(stampDomain, files...)
 }
 
 func (c Context) Fingerprint() string {
