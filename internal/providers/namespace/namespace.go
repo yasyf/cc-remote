@@ -110,6 +110,9 @@ func (p *Provider) Rate(spec providers.Spec) (providers.Rate, error) {
 	if !ok {
 		return providers.Rate{}, fmt.Errorf("namespace has no hourly rate for size %q", spec.Size)
 	}
+	if spec.Image == "" {
+		return providers.Rate{}, errors.New("a namespace spec needs an image")
+	}
 	return providers.Rate{HourlyUSD: hourly, StorageGB: float64(p.VolumeSizeGB), StorageGBMonthUSD: p.StorageGBMonthUSD}, nil
 }
 
@@ -119,9 +122,6 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 	}
 	if _, err := p.Rate(spec); err != nil {
 		return providers.Machine{}, err
-	}
-	if spec.Image == "" {
-		return providers.Machine{}, errors.New("a namespace spec needs an image")
 	}
 	switch _, err := p.Get(ctx, spec.Name); {
 	case err == nil:
