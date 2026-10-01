@@ -22,7 +22,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 ```json
 {
-  "tools": "8e55d2a0a2beec7a1baa5303d31af2a9842b8fe9a51153075a7fac952492301b",
+  "tools": "37899634b51762279bc0b69fc44bfd3ab7dfb882b05ed91be779f87789a1265f",
   "image": "a377d3eccaf38e09d1e85443838af36aa20136ba24760fb04e58c3188dde8553"
 }
 ```
@@ -76,19 +76,23 @@ requires a system `uv` artifact. Every Python tool declares its executable `bins
 | `claude.plugins[]` | `id` as `name@marketplace`, `version`, and optional `bins` relative to the plugin root. |
 | `services[]` | `name`, argument-vector `command`, optional `plugin`, and optional `env` map. A plugin service's command is relative to that plugin's root. |
 
-A `ref` marketplace uses a 40-character commit; cc-remote fetches it into its
-own checkout and registers that directory. A `branch` marketplace has no commit
-pin and is registered through Claude Code as `owner/repo#<branch>` because
-Claude Code clones sources with `git clone --branch` and cannot use a
+A `ref` marketplace uses a 40-character commit that cc-remote fetches into its
+own checkout for directory registration; Python tools cannot install from a
+`branch` marketplace because it has no pinned checkout. A `branch` marketplace
+has no commit pin and is registered through Claude Code as `owner/repo#<branch>`
+because Claude Code clones sources with `git clone --branch` and cannot use a
 40-character commit as a GitHub ref. `claude-plugins-official` publishes no tags
 and Claude Code refuses a local-directory source for that reserved name, so it
 must use `branch`. Plugin versions stay pinned, and install and verify fail when
 an installed version differs from the inventory; an upstream version bump fails
-closed until the inventory is bumped. An entry registered under the same name
-with a different source, repo, or branch, including Claude Code's automatically
-added unpinned entry, is removed and re-added at the pinned branch; verify checks
-that registration. Python tools cannot install from a `branch` marketplace
-because it has no pinned checkout.
+closed until the inventory is bumped. cc-remote rewrites each branch
+marketplace's declaration in `~/.claude/settings.json` under
+`extraKnownMarketplaces` with `autoUpdate: false` every install run because
+Claude Code auto-updates `claude-plugins-official` by default. An entry
+registered under the same name with a different source, repo, or branch,
+including Claude Code's automatically added unpinned entry, is removed and
+re-added at the pinned branch before this write; verify fails if the
+registration or declaration differs.
 
 `claude.env` and service `env` values may reference `${NAME}` when `NAME` is
 declared in `configure.env`. Configuration requires exactly those declared names
