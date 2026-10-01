@@ -39,12 +39,10 @@ type Config struct {
 	Providers  map[string]yaml.Node      `yaml:"providers"`
 	Roots      map[string]string         `yaml:"workspace_dirs"`
 	Profiles   map[string]Profile        `yaml:"profiles"`
-	Spares     map[string]map[string]int `yaml:"spares"`
 	Inventory  string                    `yaml:"inventory"`
 	Forwards   []Forward                 `yaml:"forwards"`
 	Tailnet    *Tailnet                  `yaml:"tailnet"`
 	Git        Git                       `yaml:"git"`
-	Identity   Identity                  `yaml:"identity"`
 
 	Path string `yaml:"-"`
 }
@@ -52,8 +50,6 @@ type Config struct {
 type Profile struct {
 	Checkout   Checkout           `yaml:"checkout"`
 	Prepare    []string           `yaml:"prepare"`
-	Warm       []string           `yaml:"warm"`
-	WarmInputs []string           `yaml:"warm_inputs"`
 	Machine    map[string]Machine `yaml:"machine"`
 }
 
@@ -76,10 +72,6 @@ type Tailnet struct {
 
 type Git struct {
 	TokenCommand []string `yaml:"token_command"`
-}
-
-type Identity struct {
-	ForbiddenPaths []string `yaml:"forbidden_paths"`
 }
 
 var (
@@ -189,7 +181,7 @@ func (c *Config) validate() error {
 	}
 	for name, profile := range c.Profiles {
 		if !Identifier.MatchString(name) {
-			return fmt.Errorf("profile %q: use up to 20 lowercase letters, digits and dashes; the name is part of file paths and every spare's machine name", name)
+			return fmt.Errorf("profile %q: use up to 20 lowercase letters, digits and dashes; the name is part of file paths", name)
 		}
 		if profile.Checkout != Shallow && profile.Checkout != Full {
 			return fmt.Errorf("profile %s: checkout %q is neither shallow nor full", name, profile.Checkout)
@@ -197,19 +189,6 @@ func (c *Config) validate() error {
 		for kind := range profile.Machine {
 			if _, ok := c.Providers[kind]; !ok {
 				return fmt.Errorf("profile %s: machine names provider %q, which is not under providers", name, kind)
-			}
-		}
-	}
-	for kind, counts := range c.Spares {
-		if _, ok := c.Providers[kind]; !ok {
-			return fmt.Errorf("spares names provider %q, which is not under providers", kind)
-		}
-		for profile, count := range counts {
-			if _, ok := c.Profiles[profile]; !ok {
-				return fmt.Errorf("spares.%s names profile %q, which is not under profiles", kind, profile)
-			}
-			if count < 0 {
-				return fmt.Errorf("spares.%s.%s is negative", kind, profile)
 			}
 		}
 	}
@@ -222,11 +201,6 @@ func (c *Config) validate() error {
 			return fmt.Errorf("forward %+v needs a unique label and a shell variable name in env", forward)
 		}
 		labels[forward.Label] = true
-	}
-	for _, path := range c.Identity.ForbiddenPaths {
-		if path == "" || strings.ContainsAny(path, "'\"`\\\n") || strings.Contains(path, "$(") {
-			return fmt.Errorf("identity.forbidden_paths entry %q is not a plain path", path)
-		}
 	}
 	return nil
 }
@@ -260,10 +234,6 @@ func (c *Config) ProfileNamed(name string) (Profile, error) {
 		return Profile{}, fmt.Errorf("config has no %s profile", name)
 	}
 	return profile, nil
-}
-
-func (c *Config) SpareCount(provider, profile string) int {
-	return c.Spares[provider][profile]
 }
 
 func (c *Config) ProjectRoot(provider string) string {

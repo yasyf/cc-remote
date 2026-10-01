@@ -64,7 +64,7 @@ func TestNewSprites(t *testing.T) {
 			if got != want {
 				t.Errorf("config = %+v, want %+v", got, want)
 			}
-			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, HostKeys: true}
+			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv}
 			if traits := provider.Traits(); traits != wantTraits {
 				t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)
 			}
@@ -85,7 +85,6 @@ func TestNewNamespace(t *testing.T) {
 	wantTraits := providers.Traits{
 		TailnetMode:      providers.TailnetUserspace,
 		Supervisor:       providers.SupervisorSetsid,
-		CredentialHelper: "/.namespace/devbox/git-credential-nsc",
 	}
 	if traits := provider.Traits(); traits != wantTraits {
 		t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)

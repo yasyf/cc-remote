@@ -23,8 +23,6 @@ func NewRootCmd() *cobra.Command {
 		newResumeCmd(),
 		newSuspendCmd(),
 		newDestroyCmd(),
-		newPrepareCmd(),
-		newDrainCmd(),
 		newStatusCmd(),
 		newVerifyCmd(),
 		newProxyCmd(),

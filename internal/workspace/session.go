@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
-	"github.com/yasyf/cc-remote/internal/identity"
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
@@ -24,7 +23,6 @@ import (
 
 const (
 	LabelWorkspace = "cc-remote/workspace"
-	LabelSpare     = "cc-remote/spare"
 	LabelProfile   = "cc-remote/profile"
 	tailnetTimeout = 60 * time.Second
 )
@@ -35,14 +33,12 @@ type Session struct {
 	Kind     string
 	Profile  string
 	Platform Platform
-	Pool     Pool
 	State    state.Dir
 	Enroller *tailnet.Enroller
 	Log      *slog.Logger
 	Stderr   io.Writer
 	Token    func(context.Context) (string, error)
 	Now      func() time.Time
-	Refill   func() error
 	Scripts  images.Scripts
 	Stamp    string
 
@@ -74,17 +70,12 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if err := coverEnv(cfg.Forwards, rendered.scripts.Env); err != nil {
 		return nil, err
 	}
-	pool, err := NewPool(cfg, kind, profile, rendered.stamp)
-	if err != nil {
-		return nil, err
-	}
 	s := &Session{
 		Config:         cfg,
 		Provider:       provider,
 		Kind:           kind,
 		Profile:        profile,
 		Platform:       platform,
-		Pool:           pool,
 		State:          cfg.State(),
 		Log:            slog.Default(),
 		Stderr:         os.Stderr,
@@ -277,39 +268,24 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 	if err := s.reconcile(name, recorded); err != nil {
 		return nil, err
 	}
-	if recorded == nil {
-		if err := s.unbound(name); err != nil {
-			return nil, err
-		}
-	}
-	now := s.Now()
-	machine, assignment, err := s.Pool.Assign(name, now)
-	if err != nil {
+	if err := s.unbound(name); err != nil {
 		return nil, err
 	}
-	if assignment == Reclaim {
-		s.Log.Info("reattaching the spare this workspace already claimed", "workspace", name, "machine", machine)
-		return s.restore(ctx, held, recorded)
-	}
-	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: machine, Image: s.image, ImageSpec: s.imageSpec, Claimed: assignment == NewClaim, Unverified: assignment != NewClaim, CreatedAt: now}
+	now := s.Now()
+	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: name, Image: s.image, ImageSpec: s.imageSpec, Unverified: true, CreatedAt: now}
 	if err := s.save(record); err != nil {
 		return nil, err
 	}
-	if !record.Claimed {
-		s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
-		if _, err := s.Provider.Create(ctx, s.spec(machine, map[string]string{LabelWorkspace: name})); err != nil {
-			return nil, s.unmade(record, err)
-		}
-		record.Unverified = false
-		if err := s.save(record); err != nil {
-			return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
-		}
-		s.Log.Info("created", "machine", machine)
+	s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
+	if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelWorkspace: name})); err != nil {
+		return nil, s.unmade(record, err)
 	}
+	record.Unverified = false
+	if err := s.save(record); err != nil {
+		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
+	}
+	s.Log.Info("created", "machine", name)
 	result, err := s.provision(ctx, held, record)
-	if err == nil && record.Claimed {
-		err = s.Pool.Activate(machine, s.Now())
-	}
 	if err == nil {
 		err = s.save(record)
 	}
@@ -321,22 +297,13 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 
 func (s *Session) unmade(record *Record, cause error) error {
 	if errors.Is(cause, providers.ErrExists) {
-		return errors.Join(cause, s.Pool.Remove(record.Machine), s.forget(record.Name))
+		return errors.Join(cause, s.forget(record.Name))
 	}
 	return fmt.Errorf("%w; whether %s came to exist at the provider is unverified, so its record is kept: run destroy %s once the provider answers", cause, record.Machine, record.Name)
 }
 
 func (s *Session) reconcile(name string, recorded *Record) error {
-	claimed, err := s.Pool.Claimed(name)
-	if err != nil {
-		return err
-	}
-	switch {
-	case recorded == nil && claimed != "":
-		return fmt.Errorf("%s holds a claim on %s from a create that never finished and left no record under %s, so destroy %s before creating again", name, claimed, s.State, name)
-	case recorded == nil:
-		return nil
-	case recorded.Claimed && claimed == recorded.Machine:
+	if recorded == nil {
 		return nil
 	}
 	return fmt.Errorf("%s already exists and is already recorded under %s as machine %s; resume it or destroy it before creating again", name, s.State, recorded.Machine)
@@ -358,29 +325,11 @@ func (s *Session) unbound(name string) error {
 
 func (s *Session) provision(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
 	machine := record.Machine
-	if record.Claimed {
-		s.Log.Info("claimed a prepared spare", "workspace", record.Name, "machine", machine, "provider", s.Kind, "profile", s.Profile)
-		s.replaceClaimed()
-		if err := s.Provider.Wake(ctx, machine); err != nil {
-			return nil, err
-		}
-		if _, err := s.run(ctx, machine, identity.FreshScript(s.Platform.HostKeys), nil); err != nil {
-			return nil, err
-		}
-		s.Log.Info("renewed its identity", "machine", machine)
-		if err := s.readyTools(ctx, record); err != nil {
-			return nil, err
-		}
-	} else if err := s.installTools(ctx, machine); err != nil {
+	if err := s.installTools(ctx, machine); err != nil {
 		return nil, err
 	}
 	if err := s.checkout(ctx, record); err != nil {
 		return nil, err
-	}
-	if record.Claimed {
-		if err := s.warm(ctx, machine); err != nil {
-			return nil, err
-		}
 	}
 	if err := s.configure(ctx, record); err != nil {
 		return nil, err
@@ -490,14 +439,6 @@ func (s *Session) forwards(record *Record) (map[string]string, error) {
 	return ForwardEnv(forwards, s.labels), nil
 }
 
-func (s *Session) warm(ctx context.Context, machine string) error {
-	if _, err := s.run(ctx, machine, WarmScript(s.ProjectRoot(), s.profile.WarmInputs, s.profile.Warm), nil); err != nil {
-		return err
-	}
-	s.Log.Info("warmed", "machine", machine)
-	return nil
-}
-
 func (s *Session) enroll(ctx context.Context, held *state.Held, record *Record) error {
 	if s.Enroller == nil {
 		return nil
@@ -553,12 +494,8 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 	case err != nil:
 		return fmt.Errorf("could not tell whether %s is still there, so check the provider for it: %w", machine, err)
 	default:
-		label, value, err := s.receipt(machine, owner)
-		if err != nil {
-			return err
-		}
-		if found.Labels[label] != value {
-			return fmt.Errorf("%s exists at the provider without a label proving this workspace state made it (want %s=%s, labels %v, created %s), so it was left running and its record is kept: if it is yours, remove it at the provider, then run this again", machine, label, value, found.Labels, found.CreatedAt.Format(time.RFC3339))
+		if found.Labels[LabelWorkspace] != owner {
+			return fmt.Errorf("%s exists at the provider without a label proving this workspace state made it (want %s=%s, labels %v, created %s), so it was left running and its record is kept: if it is yours, remove it at the provider, then run this again", machine, LabelWorkspace, owner, found.Labels, found.CreatedAt.Format(time.RFC3339))
 		}
 		if err := s.Provider.Destroy(ctx, machine); err != nil {
 			return fmt.Errorf("removing %s failed, so check the provider for it: %w", machine, err)
@@ -567,18 +504,7 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 			return fmt.Errorf("%s is still at the provider after its destroy, so check the provider for it: %w", machine, err)
 		}
 	}
-	return s.Pool.Remove(machine)
-}
-
-func (s *Session) receipt(machine, owner string) (string, string, error) {
-	spares, err := s.Pool.Store.Read()
-	if err != nil {
-		return "", "", err
-	}
-	if spare, ok := spares[machine]; ok {
-		return LabelSpare, spare.Fingerprint, nil
-	}
-	return LabelWorkspace, owner, nil
+	return nil
 }
 
 func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
@@ -666,9 +592,6 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	defer held.Release()
 	record, err := s.record(name)
 	if errors.Is(err, errNotRecorded) {
-		record, err = s.orphanedClaim(name, err)
-	}
-	if errors.Is(err, errNotRecorded) {
 		return s.forgetBinding(ctx, held, err)
 	}
 	if err != nil {
@@ -698,102 +621,4 @@ func (s *Session) forgetBinding(ctx context.Context, held *state.Held, missing e
 	}
 	s.Log.Info("revoking the tailnet node an earlier attempt left bound to this name", "workspace", held.Name, "bound", binding)
 	return s.Enroller.Forget(ctx, held)
-}
-
-func (s *Session) orphanedClaim(name string, missing error) (*Record, error) {
-	machine, resource, err := s.Pool.Store.ClaimedFor(name)
-	if err != nil {
-		return nil, err
-	}
-	if machine == "" {
-		return nil, missing
-	}
-	if resource.Provider != s.Kind || resource.Profile != s.Profile {
-		return nil, fmt.Errorf("%s holds a claim on %s, a %s/%s spare, not %s/%s", name, machine, resource.Provider, resource.Profile, s.Kind, s.Profile)
-	}
-	s.Log.Info("destroying the spare a create claimed for this name but never recorded", "workspace", name, "machine", machine)
-	return &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Machine: machine, Claimed: true}, nil
-}
-
-func (s *Session) Prepare(ctx context.Context) error {
-	if err := s.drainWhere(ctx, false); err != nil {
-		return err
-	}
-	for {
-		name := s.Pool.SpareName()
-		reserved, err := s.Pool.BeginPrepare(name, os.Getpid())
-		if err != nil || !reserved {
-			return err
-		}
-		s.Log.Info("preparing a spare", "machine", name, "provider", s.Kind, "profile", s.Profile)
-		if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelSpare: s.Pool.Fingerprint})); err != nil {
-			if errors.Is(err, providers.ErrExists) {
-				return errors.Join(err, s.Pool.Remove(name))
-			}
-			return fmt.Errorf("%w; whether spare %s came to exist at the provider is unknown, so its preparation record is kept for the next drain to settle", err, name)
-		}
-		s.Log.Info("created", "machine", name)
-		if err := s.prepareSpare(ctx, name); err != nil {
-			s.Log.Error("preparing the spare failed; removing it", "machine", name)
-			return errors.Join(err, s.discard(context.WithoutCancel(ctx), name, name))
-		}
-		if err := s.Pool.MarkReady(name, s.Now()); err != nil {
-			return err
-		}
-		s.Log.Info("spare ready", "machine", name)
-	}
-}
-
-func (s *Session) prepareSpare(ctx context.Context, name string) error {
-	if err := s.unjoined(ctx, name); err != nil {
-		return err
-	}
-	if err := s.installTools(ctx, name); err != nil {
-		return err
-	}
-	if err := s.checkout(ctx, &Record{Machine: name, Source: Source{Ref: s.Config.Ref}}); err != nil {
-		return err
-	}
-	if err := s.warm(ctx, name); err != nil {
-		return err
-	}
-	clean := identity.CleanScript(s.ProjectRoot(), s.Config.Repository, s.Platform.CredentialHelper, s.Config.Identity.ForbiddenPaths)
-	if _, err := s.run(ctx, name, clean, nil); err != nil {
-		return err
-	}
-	return s.Provider.Suspend(ctx, name)
-}
-
-func (s *Session) unjoined(ctx context.Context, machine string) error {
-	if s.Enroller == nil {
-		return nil
-	}
-	_, err := s.run(ctx, machine, s.Platform.Daemon.FreshScript(), nil)
-	return err
-}
-
-func (s *Session) replaceClaimed() {
-	if s.Pool.Spares == 0 || s.Refill == nil {
-		return
-	}
-	if err := s.Refill(); err != nil {
-		s.Log.Error("could not start refilling the pool", "err", err)
-	}
-}
-
-func (s *Session) Drain(ctx context.Context, all bool) error {
-	return s.drainWhere(ctx, all)
-}
-
-func (s *Session) drainWhere(ctx context.Context, all bool) error {
-	drained, err := s.Pool.Drain(all)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, name := range drained {
-		s.Log.Info("destroying a spare", "machine", name)
-		errs = append(errs, s.discard(ctx, name, name))
-	}
-	return errors.Join(errs...)
 }

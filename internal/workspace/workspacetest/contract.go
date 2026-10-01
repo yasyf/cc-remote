@@ -14,7 +14,6 @@ import (
 
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/providers"
-	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
@@ -27,7 +26,6 @@ type Harness struct {
 	Platform workspace.Platform
 	Root     string
 	Machine  config.Machine
-	Spares   int
 }
 
 func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
@@ -37,8 +35,6 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 	}{
 		{"CreateSuspendResumeDestroy", createSuspendResumeDestroy},
 		{"CreateRefusesADuplicateName", createRefusesADuplicate},
-		{"PrepareFillsThePoolAndCreateClaims", prepareFillsThePoolAndCreateClaims},
-		{"DrainDestroysUnclaimedSpares", drainDestroysUnclaimedSpares},
 		{"TokenNeverReachesAScriptOrDisk", tokenNeverReachesAScriptOrDisk},
 		{"VerifyReportsEveryCheck", verifyReportsEveryCheck},
 		{"CreateWorksFromEmptyState", createWorksFromEmptyState},
@@ -93,16 +89,12 @@ profiles:
   lean:
     checkout: shallow
     prepare: ["echo prepared >> \"$HOME/steps\""]
-    warm: ["echo warmed >> \"$HOME/steps\""]
-    warm_inputs: [README]
     machine:
       %s: { image: %q, size: %q, region: %q }
-spares:
-  %s: { lean: %d }
 inventory: ./inventory.yaml
 forwards:
   - { label: web, env: WEB_PORT }
-`, GitRepository(t), h.Kind, t.TempDir(), h.Kind, h.Kind, h.Root, h.Kind, h.Machine.Image, h.Machine.Size, h.Machine.Region, h.Kind, h.Spares)))
+`, GitRepository(t), h.Kind, t.TempDir(), h.Kind, h.Kind, h.Root, h.Kind, h.Machine.Image, h.Machine.Size, h.Machine.Region)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,15 +123,6 @@ func (w *testWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func spares(t *testing.T, s *workspace.Session) sparestate.Spares {
-	t.Helper()
-	spares, err := s.Pool.Store.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return spares
-}
-
 func record(t *testing.T, s *workspace.Session, name string) (workspace.Record, bool) {
 	t.Helper()
 	var record workspace.Record
@@ -166,7 +149,7 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if err != nil || machine.Labels[workspace.LabelWorkspace] != "ws-1" || machine.Labels[workspace.LabelProfile] != "lean" {
 		t.Errorf("machine = %+v, %v", machine, err)
 	}
-	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != "ws-1" || rec.Source.Ref != "main" || rec.Claimed || len(rec.Forwards) != 1 {
+	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != "ws-1" || rec.Source.Ref != "main" || len(rec.Forwards) != 1 {
 		t.Errorf("record = %+v, found %v", rec, found)
 	}
 	if err := s.Suspend(ctx, "ws-1"); err != nil {
@@ -209,14 +192,12 @@ func createWorksFromEmptyState(t *testing.T, h Harness, _ *workspace.Session) {
 	if _, err := s.Create(t.Context(), "ws-5", workspace.Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Prepare(t.Context()); err != nil {
-		t.Fatal(err)
+	machine, err := h.Provider.Get(t.Context(), "ws-5")
+	if err != nil || machine.Labels[workspace.LabelWorkspace] != "ws-5" {
+		t.Fatalf("fresh machine = %+v, %v", machine, err)
 	}
-	if _, err := h.Provider.Get(t.Context(), "ws-5"); err != nil {
-		t.Fatal(err)
-	}
-	if len(spares(t, s)) != h.Spares {
-		t.Fatalf("spares = %v", spares(t, s))
+	if rec, found := record(t, s, "ws-5"); !found || rec.Machine != "ws-5" || rec.Unverified {
+		t.Fatalf("fresh record = %+v, found %v", rec, found)
 	}
 }
 
@@ -236,72 +217,6 @@ func createRefusesADuplicate(t *testing.T, _ Harness, s *workspace.Session) {
 	}
 }
 
-func prepareFillsThePoolAndCreateClaims(t *testing.T, h Harness, s *workspace.Session) {
-	if h.Spares == 0 {
-		t.Skip("the harness keeps no spares")
-	}
-	ctx := t.Context()
-	if err := s.Prepare(ctx); err != nil {
-		t.Fatalf("Prepare = %v", err)
-	}
-	pooled := spares(t, s)
-	if len(pooled) != h.Spares {
-		t.Fatalf("the pool holds %d spares, want %d", len(pooled), h.Spares)
-	}
-	for id, spare := range pooled {
-		if spare.State != sparestate.Ready || spare.Fingerprint != s.Pool.Fingerprint || !strings.HasPrefix(id, "cc-remote-spare-lean-") {
-			t.Errorf("spare %s = %+v", id, spare)
-		}
-		if machine, err := h.Provider.Get(ctx, id); err != nil || machine.State != providers.StateSuspended || machine.Labels[workspace.LabelSpare] != s.Pool.Fingerprint {
-			t.Errorf("spare machine %s = %+v, %v", id, machine, err)
-		}
-	}
-	refills := 0
-	s.Refill = func() error { refills++; return nil }
-	result, err := s.Create(ctx, "ws-3", workspace.Source{Ref: "feature"})
-	if err != nil {
-		t.Fatalf("Create = %v", err)
-	}
-	if _, isSpare := pooled[result.Machine]; !isSpare || result.Name != "ws-3" || result.Source.Ref != "feature" {
-		t.Errorf("create did not claim a spare: %+v", result)
-	}
-	if refills != 1 {
-		t.Errorf("a claim started %d refills", refills)
-	}
-	if spare := spares(t, s)[result.Machine]; spare == nil || spare.State != sparestate.Claimed || spare.Request != "ws-3" || spare.ActivatedAt == nil {
-		t.Errorf("the claimed spare is %+v", spare)
-	}
-	if rec, found := record(t, s, "ws-3"); !found || !rec.Claimed || rec.Machine != result.Machine {
-		t.Errorf("record = %+v, found %v", rec, found)
-	}
-	if err := s.Destroy(ctx, "ws-3"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := spares(t, s)[result.Machine]; ok {
-		t.Error("the destroyed workspace is still in the pool")
-	}
-}
-
-func drainDestroysUnclaimedSpares(t *testing.T, h Harness, s *workspace.Session) {
-	if h.Spares == 0 {
-		t.Skip("the harness keeps no spares")
-	}
-	ctx := t.Context()
-	if err := s.Prepare(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Drain(ctx, true); err != nil {
-		t.Fatalf("Drain = %v", err)
-	}
-	if left := spares(t, s); len(left) != 0 {
-		t.Errorf("the pool still holds %v", left)
-	}
-	machines, err := h.Provider.List(ctx, map[string]string{workspace.LabelSpare: s.Pool.Fingerprint})
-	if err != nil || len(machines) != 0 {
-		t.Errorf("drained spares still exist: %v, %v", machines, err)
-	}
-}
-
 func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Session) {
 	ctx := t.Context()
 	seen := &capture{Provider: h.Provider}
@@ -317,7 +232,7 @@ func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Sessio
 	if !seen.stdin {
 		t.Error("no command read stdin, so the token reached the machine some other way")
 	}
-	for _, path := range []string{s.State.Workspace("ws-4"), s.State.Spares()} {
+	for _, path := range []string{s.State.Workspace("ws-4"), s.State.SSH("ws-4")} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

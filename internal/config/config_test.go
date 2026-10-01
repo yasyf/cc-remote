@@ -35,8 +35,8 @@ func TestExampleConfigLoadsWithDefaults(t *testing.T) {
 	if cfg.Profiles["lean"].Checkout != Shallow || cfg.Profiles["full"].Checkout != Full {
 		t.Errorf("checkouts = %q, %q", cfg.Profiles["lean"].Checkout, cfg.Profiles["full"].Checkout)
 	}
-	if cfg.SpareCount("sprites", "lean") != 1 || cfg.SpareCount("namespace", "lean") != 0 {
-		t.Errorf("spares = %v", cfg.Spares)
+	if got := strings.Join(cfg.Profiles["full"].Prepare, "\n"); got != "./tools/bootstrap-project.sh\n./tools/install-project-deps.sh" {
+		t.Errorf("full prepare = %q", got)
 	}
 	if cfg.Tailnet == nil || cfg.Tailnet.Tag != "tag:cc-remote" || cfg.Tailnet.API != DefaultTailnetAPI || cfg.Tailnet.KeychainService != DefaultKeychainService {
 		t.Errorf("tailnet = %+v", cfg.Tailnet)
@@ -129,8 +129,14 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"machine for unknown provider", func(s string) string {
 			return strings.Replace(s, "fake: { size: s }", "fake: { size: s }\n      other: {}", 1)
 		}, "machine names provider"},
-		{"spares for unknown profile", func(s string) string { return s + "spares:\n  fake: { full: 1 }\n" }, "spares.fake names profile"},
-		{"negative spares", func(s string) string { return s + "spares:\n  fake: { lean: -1 }\n" }, "negative"},
+		{"removed spares", func(s string) string { return s + "spares:\n  fake: { lean: 1 }\n" }, "field spares not found"},
+		{"removed warm", func(s string) string {
+			return strings.Replace(s, "prepare: [true]", "prepare: [true]\n    warm: [true]", 1)
+		}, "field warm not found"},
+		{"removed warm inputs", func(s string) string {
+			return strings.Replace(s, "prepare: [true]", "prepare: [true]\n    warm_inputs: [package.json]", 1)
+		}, "field warm_inputs not found"},
+		{"removed identity", func(s string) string { return s + "identity:\n  forbidden_paths: []\n" }, "field identity not found"},
 		{"second document", func(s string) string { return s + "---\nrepository: https://github.com/x/y\n" }, "one YAML document"},
 		{"provider name with a slash", func(s string) string { return strings.ReplaceAll(s, "fake", "fa/ke") }, "provider \"fa/ke\""},
 		{"provider name with a dot", func(s string) string { return strings.ReplaceAll(s, "fake", "fa.ke") }, "provider \"fa.ke\""},
@@ -140,8 +146,6 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"duplicate forward label", func(s string) string {
 			return s + "forwards:\n  - { label: a, env: A }\n  - { label: a, env: B }\n"
 		}, "forward"},
-		{"forbidden path with a quote", func(s string) string { return s + "identity:\n  forbidden_paths: [\"it's\"]\n" }, "forbidden_paths"},
-		{"forbidden path with a backslash", func(s string) string { return s + "identity:\n  forbidden_paths: ['$HOME/a\\\\\"']\n" }, "forbidden_paths"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

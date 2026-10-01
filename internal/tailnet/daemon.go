@@ -122,7 +122,7 @@ func (d Daemon) ensureRunning() string {
 }
 
 func (d Daemon) FreshScript() string {
-	return remote.Script(`! ` + d.stateExists() + ` || { echo "` + remote.Prefix + `: this machine already carries ` + d.State() + `, so its image or spare joined a tailnet before this claim; rebuild it unenrolled" >&2; exit 1; }`)
+	return remote.Script(`! ` + d.stateExists() + ` || { echo "` + remote.Prefix + `: this machine already carries ` + d.State() + `, so its image joined a tailnet before this workspace was created; rebuild it unenrolled" >&2; exit 1; }`)
 }
 
 func (d Daemon) UpScript(hostname string) string {

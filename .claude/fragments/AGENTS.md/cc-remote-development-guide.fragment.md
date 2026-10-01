@@ -8,8 +8,8 @@ profile commands. A full platform on Namespace over SSH requires opt-in config.
 
 Read `docs/orca-workspaces.md` for the native composer flow and
 `docs/tool-inventory.md` for tool preparation. Recipe generation and waiting
-must use the same config and lifecycle binary. Preserve resource ownership
-and exclusive workspace claims.
+must use the same config and lifecycle binary. Preserve resource and workspace
+ownership.
 
 ## Repository Structure
 

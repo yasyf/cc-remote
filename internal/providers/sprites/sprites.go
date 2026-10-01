@@ -61,7 +61,6 @@ func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
 		TailnetMode: providers.TailnetKernel,
 		Supervisor:  providers.SupervisorSpriteEnv,
-		HostKeys:    true,
 	}
 }
 

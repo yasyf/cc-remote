@@ -19,8 +19,8 @@ func TestTheExampleConfigOpensEveryShippedProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	for kind, want := range map[string]providers.Traits{
-		"sprites":   {TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, HostKeys: true},
-		"namespace": {TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid, CredentialHelper: "/.namespace/devbox/git-credential-nsc"},
+		"sprites":   {TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv},
+		"namespace": {TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid},
 	} {
 		provider, err := openProvider(cfg, kind)
 		if err != nil {
@@ -40,15 +40,15 @@ func TestTheExampleConfigOpensEveryShippedProvider(t *testing.T) {
 }
 
 func TestPlatformFollowsTheProviderTraits(t *testing.T) {
-	got := platform(providers.Traits{TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid, CredentialHelper: "/h"})
-	if got.Daemon != (tailnet.Daemon{Mode: tailnet.Userspace, Supervisor: tailnet.Setsid}) || got.HostKeys || got.CredentialHelper != "/h" {
+	got := platform(providers.Traits{TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid})
+	if got.Daemon != (tailnet.Daemon{Mode: tailnet.Userspace, Supervisor: tailnet.Setsid}) {
 		t.Errorf("platform = %+v", got)
 	}
 }
 
 func TestEveryLifecycleCommandTakesTheSelectionFlags(t *testing.T) {
 	root := NewRootCmd()
-	for _, name := range []string{"create", "resume", "suspend", "destroy", "prepare", "drain", "status", "verify"} {
+	for _, name := range []string{"create", "resume", "suspend", "destroy", "status", "verify"} {
 		cmd, _, err := root.Find([]string{name})
 		if err != nil || cmd.Name() != name {
 			t.Fatalf("no %s command: %v", name, err)
@@ -65,8 +65,10 @@ func TestEveryLifecycleCommandTakesTheSelectionFlags(t *testing.T) {
 			t.Errorf("%s lacks --connection, which Orca's recipes pass", name)
 		}
 	}
-	if cmd, _, _ := root.Find([]string{"warm"}); cmd.Name() != "prepare" {
-		t.Error("warm is not an alias of prepare")
+	for _, name := range []string{"prepare", "warm", "drain"} {
+		if cmd, _, err := root.Find([]string{name}); err == nil && cmd.Name() == name {
+			t.Errorf("removed command %s is still available", name)
+		}
 	}
 	if cmd, _, _ := root.Find([]string{"proxy"}); !cmd.Hidden {
 		t.Error("proxy is not hidden")
