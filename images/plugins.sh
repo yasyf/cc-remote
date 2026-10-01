@@ -285,6 +285,10 @@ synckit_state() {
     chmod 700 "$synckit"
     (umask 077 && printf '{"host_registry":{"self":"%s@%s","hosts":[]},"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"%s"},"synckit":{}}\n' "$(id -un)" "$(hostname)" "$1" > "$synckit/state.json")
   fi
+  if ! jq -e --arg fingerprint "$1" '.schema.identity == "synckit-state-v1" and .schema.fingerprint == $fingerprint' "$synckit/state.json" > /dev/null; then
+    echo "cc-remote: $synckit/state.json is not synckit-state-v1 at schema fingerprint $1" >&2
+    exit 1
+  fi
 }
 
 service() {
@@ -387,6 +391,9 @@ run_configure() {
 {{- range $key, $value := .Claude.Env}}
   claude_env {{q $key}} {{expand $value}}
 {{- end}}
+{{- with .Cookiesync}}
+  synckit_state {{q .SchemaFingerprint}}
+{{- end}}
 {{- range .Configure.Run}}
   {{.}}
 {{- end}}
@@ -399,8 +406,7 @@ run_configure() {
 {{- end}}
   start_services{{range .Services}} {{q .Name}}{{end}}
 {{- end}}
-{{- with .Cookiesync}}
-  synckit_state {{q .SchemaFingerprint}}
+{{- if .Cookiesync}}
   cookiesync install
 {{- end}}
 }

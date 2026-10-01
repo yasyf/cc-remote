@@ -40,7 +40,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | `claude` | `managedSettings`, `env`, `marketplaces`, `plugins` | Claude settings and pinned marketplace/plugin inventory. |
 | `codexRuntime` | `version`, `url`, `sha256`, `plugins` | Pinned Codex runtime archive and selected runtime plugin names. Requires the `codex` executable in the artifact inventory. |
 | `captainHook` | `version`, `url`, `sha256` | Pinned Captain Hook host archive, installed through `capt-hookd package-install`. Requires `uv`. |
-| `cookiesync` | `schemaFingerprint` | Expected CookieSync schema fingerprint. Requires the `cookiesync` executable. |
+| `cookiesync` | `schemaFingerprint` | Expected CookieSync schema fingerprint. Requires the `cookiesync` executable. Before starting services, configuration writes `synckit/state.json` at this fingerprint if missing. An existing state with another fingerprint fails configuration. |
 | `services` | Service list | User services started during configuration; fields are below. |
 | `prepare` | Shell command list | Runs as the user from `$HOME` after installation, before verification. Empty by default. |
 | `configure` | `env`, `run` | Declared runtime environment names and shell commands run during configuration. |
