@@ -28,8 +28,26 @@ require_env() {
   fi
 }
 
+claude_json() {
+  local output
+  output="$(claude "$@")"
+  if ! jq -se 'length == 1' <<< "$output" > /dev/null; then
+    echo "plugins: claude $* did not print exactly one JSON document" >&2
+    exit 1
+  fi
+  printf '%s\n' "$output"
+}
+
 plugin_root() {
-  claude plugin list --json | jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath'
+  local plugins
+  plugins="$(claude_json plugin list --json)"
+  jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath' <<< "$plugins"
+}
+
+verify_plugin_bin() {
+  local root
+  root="$(plugin_root "$1")"
+  "$root/$2" --version > /dev/null
 }
 
 pinned() {
@@ -41,7 +59,7 @@ PINS
 
 healthy() {
   local plugins
-  plugins="$(claude plugin list --json)"
+  plugins="$(claude_json plugin list --json)"
   jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$plugins" \
     | sort
 }
@@ -92,8 +110,8 @@ checkout() {
 
 recorded_source() {
   local known
-  known="$(claude plugin marketplace list --json)"
-  jq -sr --arg name "$1" 'if length == 1 then .[0][] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ") else error("expected one JSON document") end' <<< "$known"
+  known="$(claude_json plugin marketplace list --json)"
+  jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$known"
 }
 
 pin_marketplace() {
@@ -144,8 +162,9 @@ verify_branch_marketplace() {
 }
 
 install_plugin() {
-  local current
-  current="$(claude plugin list --json | jq -r --arg id "$1" '.[] | select(.id == $id) | .version')"
+  local plugins current
+  plugins="$(claude_json plugin list --json)"
+  current="$(jq -r --arg id "$1" '.[] | select(.id == $id) | .version' <<< "$plugins")"
   if [ -z "$current" ]; then
     claude plugin install "$1"
   elif [ "$current" != "$2" ]; then
@@ -420,7 +439,7 @@ run_verify() {
 {{- range .Claude.Plugins}}
 {{- $plugin := .}}
 {{- range .Bins}}
-  "$(plugin_root {{q $plugin.ID}})/"{{q .}} --version > /dev/null
+  verify_plugin_bin {{q $plugin.ID}} {{q .}}
 {{- end}}
 {{- end}}
 {{- end}}
