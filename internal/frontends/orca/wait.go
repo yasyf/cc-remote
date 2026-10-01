@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -33,11 +34,13 @@ type Poll struct {
 }
 
 type Preflight struct {
-	Recipe    Recipe
-	Lifecycle Lifecycle
-	Workspace string
-	RepoID    string
-	Checkout  string
+	Recipe     Recipe
+	Lifecycle  Lifecycle
+	Workspace  string
+	RepoID     string
+	Checkout   string
+	SSHConfig  string
+	SSHInclude string
 }
 
 type SSHWorkspace struct {
@@ -103,6 +106,9 @@ func (c Client) preflight(ctx context.Context, p Preflight) (Repo, error) {
 		return Repo{}, err
 	}
 	if err := report.err(p.Lifecycle); err != nil {
+		return Repo{}, err
+	}
+	if err := checkSSHInclude(p.SSHConfig, p.SSHInclude); err != nil {
 		return Repo{}, err
 	}
 	return repo, nil
@@ -175,6 +181,31 @@ func checkOrcaYAML(path string, l Lifecycle, r Recipe) error {
 		return fmt.Errorf("%s: %w; rewrite it with `cc-remote orca recipes --orca-yaml %s`", r.ID(), ErrStaleRecipe, path)
 	}
 	return nil
+}
+
+func checkSSHInclude(path, include string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	for line := range strings.Lines(string(data)) {
+		line = strings.TrimSpace(line)
+		if line == include {
+			return nil
+		}
+		if keyword := sshKeyword(line); keyword == "host" || keyword == "match" {
+			break
+		}
+	}
+	return fmt.Errorf("add %q to %s above every Host and Match block, so Orca resolves workspace hosts through the Host blocks cc-remote writes", include, path)
+}
+
+func sshKeyword(line string) string {
+	fields := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' || r == '=' })
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.ToLower(fields[0])
 }
 
 func poll[T any](ctx context.Context, p Poll, check func(context.Context) (T, bool, error)) (T, error) {

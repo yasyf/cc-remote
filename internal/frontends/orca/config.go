@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -26,6 +27,14 @@ func SourceOf(cfg *config.Config) Source {
 		Providers: slices.Sorted(maps.Keys(cfg.Providers)),
 		Profiles:  slices.Sorted(maps.Keys(cfg.Profiles)),
 	}
+}
+
+func SSHIncludeOf(cfg *config.Config) string {
+	fragments := filepath.Join(string(cfg.State()), "ssh", "*.ssh")
+	if strings.ContainsAny(fragments, " \t") {
+		fragments = `"` + fragments + `"`
+	}
+	return "Include " + fragments
 }
 
 func PluginOf(cfg *config.Config, version string) (Plugin, error) {

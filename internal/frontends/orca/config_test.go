@@ -84,3 +84,22 @@ func TestPluginOf(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHIncludeOf(t *testing.T) {
+	tests := []struct {
+		stateDir string
+		want     string
+	}{
+		{"/srv/cc-remote", "Include /srv/cc-remote/ssh/*.ssh"},
+		{"/Users/me/Library/Application Support/cc-remote", `Include "/Users/me/Library/Application Support/cc-remote/ssh/*.ssh"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.stateDir, func(t *testing.T) {
+			cfg := exampleConfig(t)
+			cfg.StateDir = tt.stateDir
+			if got := orca.SSHIncludeOf(cfg); got != tt.want {
+				t.Errorf("SSHIncludeOf() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

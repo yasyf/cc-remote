@@ -83,6 +83,20 @@ Pass the same `--config` to `wait`.
 Run `cc-remote ledger init` once on the Mac before the first create.
 cc-remote refuses every create until a budget ledger exists.
 
+cc-remote writes each workspace's SSH settings as a `Host` block in
+`<state>/ssh/<workspace>.ssh`. `<state>` is the config's `state_dir`, or
+`$XDG_STATE_HOME/cc-remote` when it is unset, where `$XDG_STATE_HOME` defaults
+to `~/.local/state`. Orca resolves a workspace's host through your SSH config,
+so add an `Include` of those blocks above every `Host` and `Match` block in
+`~/.ssh/config`, with the state path spelled out in full:
+
+```sshconfig
+Include /Users/<you>/.local/state/cc-remote/ssh/*.ssh
+```
+
+`wait` refuses to start until that exact line is there, and prints it when it
+is missing.
+
 `cc-remote orca recipes --plugin <dir>` writes the same recipes as an Orca
 plugin, an `orca-plugin.json` that lists them under `contributes.vmRecipes`.
 Prefer `orca.yaml`: `orca vm recipe doctor` reads only `orca.yaml`, so `wait`

@@ -136,14 +136,18 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 		Use:   "wait <recipe-id> <workspace>",
 		Short: "Preflight a recipe, then wait for Orca to list the SSH workspace it creates from it",
 		Long: "Check that the Orca runtime is ready, that orca.yaml carries the recipe as cc-remote generates it, " +
-			"and that orca vm recipe doctor reports no failure. " +
+			"that orca vm recipe doctor reports no failure, and that ~/.ssh/config includes the Host blocks cc-remote writes for each workspace. " +
 			"Then wait until Orca lists an SSH workspace with that name.\n\n" +
 			"Orca alone creates the workspace: pick the recipe under Run on in the New Workspace composer. " +
 			"Orca runs the recipe's create and registers the SSH target it returns. The orca CLI has no " +
 			"recipe flag on worktree create and no command that adds an SSH host, so this command only waits.",
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, recipes, lifecycle, err := source.load()
+			cfg, recipes, lifecycle, err := source.load()
+			if err != nil {
+				return err
+			}
+			home, err := os.UserHomeDir()
 			if err != nil {
 				return err
 			}
@@ -158,11 +162,13 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 				}
 			}
 			preflight := orca.Preflight{
-				Recipe:    recipe,
-				Lifecycle: lifecycle,
-				Workspace: args[1],
-				RepoID:    repoID,
-				Checkout:  checkout,
+				Recipe:     recipe,
+				Lifecycle:  lifecycle,
+				Workspace:  args[1],
+				RepoID:     repoID,
+				Checkout:   checkout,
+				SSHConfig:  filepath.Join(home, ".ssh", "config"),
+				SSHInclude: orca.SSHIncludeOf(cfg),
 			}
 			workspace, err := orca.NewClient(runner).Wait(cmd.Context(), preflight, orca.Poll{Interval: 10 * time.Second, Timeout: timeout})
 			if err != nil {

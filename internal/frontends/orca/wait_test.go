@@ -14,6 +14,7 @@ import (
 
 const (
 	statusReady  = `{"result":{"runtime":{"state":"ready"},"app":{"desktopWindowStatus":"available"}}}`
+	include      = "Include /state/cc-remote/ssh/*.ssh"
 	doctorCall   = "vm recipe doctor sprites-agents-ssh --repo-path %s --json"
 	doctorPassed = `{"recipeId":"sprites-agents-ssh","ok":true,"checks":[
 		{"id":"recipe.exists","status":"pass","message":"Found recipe \"Sprites agents over SSH (default).\""},
@@ -24,6 +25,7 @@ const (
 
 type waitFixture struct {
 	checkout  string
+	sshConfig string
 	preflight orca.Preflight
 }
 
@@ -37,13 +39,20 @@ func newWaitFixture(t *testing.T) waitFixture {
 	if err := os.WriteFile(filepath.Join(checkout, "orca.yaml"), orcaYAML, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	sshConfig := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(sshConfig, []byte("# keys\n"+include+"\n\nHost *\n  ServerAliveInterval 30\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return waitFixture{
-		checkout: checkout,
+		checkout:  checkout,
+		sshConfig: sshConfig,
 		preflight: orca.Preflight{
-			Recipe:    defaultSprites,
-			Lifecycle: orca.DefaultLifecycle(),
-			Workspace: "feature",
-			Checkout:  checkout,
+			Recipe:     defaultSprites,
+			Lifecycle:  orca.DefaultLifecycle(),
+			Workspace:  "feature",
+			Checkout:   checkout,
+			SSHConfig:  sshConfig,
+			SSHInclude: include,
 		},
 	}
 }
@@ -183,6 +192,45 @@ func TestWaitPreflightFailures(t *testing.T) {
 			},
 			want: "orca vm recipe doctor sprites-agents-ssh: doctor warn: recipe.create: Command exists but is not executable: ./bin/cc-remote",
 		},
+		{
+			name: "ssh include scoped to a Host block",
+			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
+				if err := os.WriteFile(f.sshConfig, []byte("Host=other\n  "+include+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return f.preflight, newFakeOrca(t).
+					on("status --json", statusReady).
+					on("repo list --json", f.reposJSON()).
+					on(f.doctorCall(), doctorPassed)
+			},
+			want: `add "` + include + `" to %SSHCONFIG% above every Host and Match block, so Orca resolves workspace hosts through the Host blocks cc-remote writes`,
+		},
+		{
+			name: "ssh include missing",
+			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
+				if err := os.WriteFile(f.sshConfig, []byte("Match host *.internal\n  User me\n"+include+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return f.preflight, newFakeOrca(t).
+					on("status --json", statusReady).
+					on("repo list --json", f.reposJSON()).
+					on(f.doctorCall(), doctorPassed)
+			},
+			want: `add "` + include + `" to %SSHCONFIG% above every Host and Match block, so Orca resolves workspace hosts through the Host blocks cc-remote writes`,
+		},
+		{
+			name: "no ssh config",
+			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
+				if err := os.Remove(f.sshConfig); err != nil {
+					t.Fatal(err)
+				}
+				return f.preflight, newFakeOrca(t).
+					on("status --json", statusReady).
+					on("repo list --json", f.reposJSON()).
+					on(f.doctorCall(), doctorPassed)
+			},
+			want: `add "` + include + `" to %SSHCONFIG% above every Host and Match block, so Orca resolves workspace hosts through the Host blocks cc-remote writes`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -195,7 +243,7 @@ func TestWaitPreflightFailures(t *testing.T) {
 				}
 				return
 			}
-			want := strings.NewReplacer("%CHECKOUT%", f.checkout).Replace(tt.want)
+			want := strings.NewReplacer("%CHECKOUT%", f.checkout, "%SSHCONFIG%", f.sshConfig).Replace(tt.want)
 			if err == nil || err.Error() != want {
 				t.Errorf("Wait() error = %v, want %q", err, want)
 			}
