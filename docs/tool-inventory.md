@@ -22,7 +22,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 ```json
 {
-  "tools": "4c8c254ac479ddc6ffd5440d384362d6bd2799bb1718ef37cd6e2af968957c0a",
+  "tools": "9016102f13c35f640daacd804a04f6a6b9bc3e4772bcb206cf8b20f26bbb602a",
   "image": "42e68f9e3d982894c97fa0ef9dfd88b84daeae37934a3b5d5ecbea68bc1b23c5"
 }
 ```
@@ -36,7 +36,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | `system` | Artifact list | Root artifacts under `/opt/cc-remote/tools`, linked into `/usr/local/bin`. |
 | `tools` | Artifact list | User artifacts under `$HOME/.local/share/cc-remote/tools`, or their explicit `dest`, linked into `$HOME/.local/bin`. |
 | `links` | Executable names | Adds user links to installed system executables. |
-| `python` | `version`, `system`, `user` | Python tool installations through `uv`; fields are below. |
+| `python` | `version`, `system`, `user` | System Python tools and user tool launchers through `uv`; fields are below. |
 | `claude` | `managedSettings`, `env`, `marketplaces`, `plugins` | Claude settings and pinned marketplace/plugin inventory. |
 | `codexRuntime` | `version`, `url`, `sha256`, `plugins` | Pinned Codex runtime archive and selected runtime plugin names. Requires the `codex` executable in the artifact inventory. |
 | `captainHook` | `version`, `url`, `sha256` | Pinned Captain Hook host archive, installed through `capt-hookd package-install`. Requires `uv`. |
@@ -70,6 +70,14 @@ Python tools use `name`, `package`, `version`, `marketplace`, `args`, `bins`, an
 is required. Marketplace sources belong under `python.user`; `python.system`
 requires a system `uv` artifact. Every Python tool declares its executable `bins`.
 
+`python.system` installs tool environments during provisioning and runs
+their `verify` arguments. `python.user` creates a launcher for each declared bin
+without installing a tool environment. Each launcher runs `uv tool run` with the
+configured Python version, package extras, source pin, and `args`, followed by the
+bin name and the caller's arguments. The first invocation materializes the tool
+environment. Verification compares the executable launcher with its expected
+contents and does not run the tool or its `verify` arguments.
+
 | Entry | Fields |
 | --- | --- |
 | `claude.marketplaces[]` | `name`, `github` as `owner/repo`, exactly one of `ref` or `branch`, and optional `private` for `ref` only. |
@@ -94,6 +102,12 @@ declaration in `~/.claude/settings.json` under `extraKnownMarketplaces` with
 registrations and fails if a registration or declaration differs; install and
 verify reject versions that differ from their plugin pins, so upstream version
 bumps fail closed until the inventory is bumped.
+
+Verification also checks each `ref` checkout's commit. Declared plugin binaries
+normally run `--version`. A pinned local binrun release launcher instead
+receives executable and content checks against its marketplace source, including
+the descriptor's version, sizes, and SHA-256 pins. Verification leaves its payload
+for first use. Captain Hook binaries retain their runtime probes.
 
 `claude.env` and service `env` values may reference `${NAME}` when `NAME` is
 declared in `configure.env`. Configuration requires exactly those declared names
