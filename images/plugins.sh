@@ -27,8 +27,26 @@ require_env() {
   fi
 }
 
+claude_json() {
+  local output
+  output="$(claude "$@")" || exit
+  if ! jq -se 'length == 1' <<< "$output" > /dev/null; then
+    echo "plugins: claude $* did not print exactly one JSON document" >&2
+    exit 1
+  fi
+  printf '%s\n' "$output"
+}
+
 plugin_root() {
-  claude plugin list --json | jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath'
+  local plugins
+  plugins="$(claude_json plugin list --json)" || exit
+  jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath' <<< "$plugins"
+}
+
+verify_plugin_bin() {
+  local root
+  root="$(plugin_root "$1")"
+  "$root/$2" --version > /dev/null
 }
 
 pinned() {
@@ -40,7 +58,7 @@ PINS
 
 healthy() {
   local plugins
-  plugins="$(claude plugin list --json)"
+  plugins="$(claude_json plugin list --json)" || exit
   jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$plugins" \
     | sort
 }
@@ -90,7 +108,9 @@ checkout() {
 }
 
 recorded_source() {
-  jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$(claude plugin marketplace list --json)"
+  local known
+  known="$(claude_json plugin marketplace list --json)" || exit
+  jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$known"
 }
 
 pin_marketplace() {
@@ -105,7 +125,9 @@ pin_marketplace() {
 }
 
 verify_marketplace() {
-  if [ "$(recorded_source "$1")" != "$2" ]; then
+  local recorded
+  recorded="$(recorded_source "$1")"
+  if [ "$recorded" != "$2" ]; then
     echo "cc-remote: marketplace $1 is not registered from $2" >&2
     exit 1
   fi
@@ -132,15 +154,16 @@ pin_branch_marketplace() {
 verify_branch_marketplace() {
   local name="$1" repo="$2" branch="$3"
   verify_marketplace "$name" "github $repo $branch"
-  if ! jq -e --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" '.extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
+  if ! jq -se --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" 'length == 1 and .[0].extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
     echo "cc-remote: marketplace $name is not declared in Claude settings at branch $branch with auto-update off" >&2
     exit 1
   fi
 }
 
 install_plugin() {
-  local current
-  current="$(claude plugin list --json | jq -r --arg id "$1" '.[] | select(.id == $id) | .version')"
+  local plugins current
+  plugins="$(claude_json plugin list --json)"
+  current="$(jq -r --arg id "$1" '.[] | select(.id == $id) | .version' <<< "$plugins")"
   if [ -z "$current" ]; then
     claude plugin install "$1"
   elif [ "$current" != "$2" ]; then
@@ -415,7 +438,7 @@ run_verify() {
 {{- range .Claude.Plugins}}
 {{- $plugin := .}}
 {{- range .Bins}}
-  "$(plugin_root {{q $plugin.ID}})/"{{q .}} --version > /dev/null
+  verify_plugin_bin {{q $plugin.ID}} {{q .}}
 {{- end}}
 {{- end}}
 {{- end}}

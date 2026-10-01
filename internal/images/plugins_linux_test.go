@@ -49,6 +49,12 @@ def fail(message):
 
 if args == ["plugin", "marketplace", "list", "--json"]:
     print(json.dumps([{k: v for k, v in m.items() if k not in ("key", "snapshot")} for m in state["marketplaces"]]))
+    tail_path = os.path.join(os.path.dirname(state_path), "list-tail")
+    tail = open(tail_path).read() if os.path.exists(tail_path) else ""
+    if tail == "garbage":
+        print("garbage")
+    elif tail == "exit":
+        sys.exit(42)
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = args[3]
     if source.startswith("/"):
@@ -91,14 +97,28 @@ elif args[:3] == ["plugin", "marketplace", "remove"]:
     save_settings(declared)
 elif args == ["plugin", "list", "--json"]:
     print(json.dumps(state["plugins"]))
+    tail_path = os.path.join(os.path.dirname(state_path), "plugin-list-tail")
+    if os.path.exists(tail_path):
+        mode, skip = open(tail_path).read().split()
+        if int(skip) > 0:
+            open(tail_path, "w").write(mode + " " + str(int(skip) - 1))
+        elif mode == "garbage":
+            print("garbage")
+        elif mode == "exit":
+            sys.exit(42)
 elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
     name, _, market = args[2].partition("@")
     source = marketplace(market)
     if not source:
         fail("no marketplace " + market)
     version = source["snapshot"][name]
+    root = os.path.join(os.path.dirname(state_path), "plugins", name)
+    os.makedirs(os.path.join(root, "bin"), exist_ok=True)
+    with open(os.path.join(root, "bin", name), "w") as tool:
+        tool.write("#!/bin/sh\n")
+    os.chmod(os.path.join(root, "bin", name), 0o755)
     state["plugins"] = [p for p in state["plugins"] if p["id"] != args[2]]
-    state["plugins"].append({"id": args[2], "version": version, "enabled": True, "errors": []})
+    state["plugins"].append({"id": args[2], "version": version, "enabled": True, "errors": [], "installPath": root})
     save()
 elif args == ["auto-update"]:
     declared = settings().get("extraKnownMarketplaces", {})
@@ -149,9 +169,8 @@ type pluginsHost struct {
 	fakes string
 }
 
-func newPluginsHost(t *testing.T, marketplaces []Marketplace, catalog map[string]any, state fakeState, settings map[string]any) pluginsHost {
-	h := pluginsHost{t: t, home: t.TempDir(), fakes: t.TempDir()}
-	scripts, err := Render(Inventory{
+func marketplaceInventory(marketplaces []Marketplace) Inventory {
+	return Inventory{
 		Version: SchemaVersion,
 		Claude: Claude{
 			Marketplaces: marketplaces,
@@ -160,7 +179,12 @@ func newPluginsHost(t *testing.T, marketplaces []Marketplace, catalog map[string
 				{ID: "datadog@claude-plugins-official", Version: "0.7.17"},
 			},
 		},
-	}, "agents")
+	}
+}
+
+func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, state fakeState, settings map[string]any) pluginsHost {
+	h := pluginsHost{t: t, home: t.TempDir(), fakes: t.TempDir()}
+	scripts, err := Render(inventory, "agents")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +456,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			if tt.catalog != nil {
 				tt.catalog(catalog)
 			}
-			h := newPluginsHost(t, tt.marketplaces, catalog, tt.state, tt.settings)
+			h := newPluginsHost(t, marketplaceInventory(tt.marketplaces), catalog, tt.state, tt.settings)
 			if tt.loose {
 				settings := filepath.Join(h.home, ".claude", "settings.json")
 				if err := os.Chmod(settings, 0o644); err != nil {
@@ -497,7 +521,7 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newPluginsHost(t, []Marketplace{toolsRef, officialBranch}, marketplaceCatalog("0.7.17"), fakeState{}, nil)
+			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
 			if out, err := h.plugins("install", digest); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
@@ -570,7 +594,7 @@ func TestPluginsVerifyRegistrations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newPluginsHost(t, []Marketplace{toolsRef, officialBranch}, marketplaceCatalog("0.7.17"), fakeState{}, nil)
+			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
 			if out, err := h.plugins("install", digest); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
@@ -582,6 +606,62 @@ func TestPluginsVerifyRegistrations(t *testing.T) {
 			if err == nil || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("verify = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 			}
+		})
+	}
+}
+
+func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
+	for _, tail := range []string{"exit", "garbage"} {
+		t.Run(tail, func(t *testing.T) {
+			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
+			if out, err := h.plugins("install", digest); err != nil {
+				t.Fatalf("install failed: %v\n%s", err, out)
+			}
+			if err := os.WriteFile(filepath.Join(h.fakes, "list-tail"), []byte(tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := h.plugins("verify"); err == nil {
+				t.Errorf("verify passed on a failed marketplace list:\n%s", out)
+			}
+			if out, err := h.plugins("install", digest); err == nil {
+				t.Errorf("install passed on a failed marketplace list:\n%s", out)
+			}
+			h.unready()
+		})
+	}
+}
+
+func TestPluginsFailClosedOnPluginReads(t *testing.T) {
+	tests := []struct {
+		name string
+		tail string
+	}{
+		{name: "plugin list exits non-zero", tail: "exit 0"},
+		{name: "plugin list prints trailing garbage", tail: "garbage 0"},
+		{name: "plugin root read exits non-zero", tail: "exit 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inventory := marketplaceInventory([]Marketplace{toolsRef, officialBranch})
+			inventory.Claude.Plugins[1].Bins = []string{"bin/datadog"}
+			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), fakeState{}, nil)
+			if out, err := h.plugins("install", digest); err != nil {
+				t.Fatalf("install failed: %v\n%s", err, out)
+			}
+			tail := filepath.Join(h.fakes, "plugin-list-tail")
+			if err := os.WriteFile(tail, []byte(tt.tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := h.plugins("verify"); err == nil {
+				t.Errorf("verify passed on a failed plugin list:\n%s", out)
+			}
+			if err := os.WriteFile(tail, []byte(tt.tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := h.plugins("install", digest); err == nil {
+				t.Errorf("install passed on a failed plugin list:\n%s", out)
+			}
+			h.unready()
 		})
 	}
 }
