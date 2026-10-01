@@ -60,7 +60,6 @@ func TestPreparationFillsThePoolToItsTarget(t *testing.T) {
 	if spares := readSpares(t, pool); len(spares) != 2 || spares["c"] != nil {
 		t.Errorf("spares = %v", spares)
 	}
-
 }
 
 func TestAssignClaimsAReadySpare(t *testing.T) {
@@ -73,7 +72,6 @@ func TestAssignClaimsAReadySpare(t *testing.T) {
 	if item := readSpares(t, pool)[name]; item.State != sparestate.Claimed || item.Request != "ws-req" {
 		t.Errorf("claim = %+v", item)
 	}
-
 }
 
 func TestAssignFallsThroughToAFreshCreate(t *testing.T) {
@@ -85,7 +83,7 @@ func TestAssignFallsThroughToAFreshCreate(t *testing.T) {
 }
 
 func TestAssignPreservesExistingSpareMachineNames(t *testing.T) {
-	for _, existing := range []sparestate.SpareState{sparestate.Preparing, sparestate.Ready, sparestate.Claimed, sparestate.Draining} {
+	for _, existing := range []sparestate.State{sparestate.Preparing, sparestate.Ready, sparestate.Claimed, sparestate.Draining} {
 		t.Run(string(existing), func(t *testing.T) {
 			pool := testPool(t, 1)
 			prepared(t, pool, "existing")

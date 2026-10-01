@@ -9,20 +9,20 @@ import (
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
-type SpareState string
+type State string
 
 const (
-	Preparing SpareState = "preparing"
-	Ready     SpareState = "ready"
-	Claimed   SpareState = "claimed"
-	Draining  SpareState = "draining"
+	Preparing State = "preparing"
+	Ready     State = "ready"
+	Claimed   State = "claimed"
+	Draining  State = "draining"
 )
 
 type Spare struct {
 	Provider    string     `json:"provider"`
 	Profile     string     `json:"profile"`
 	Fingerprint string     `json:"fingerprint"`
-	State       SpareState `json:"state"`
+	State       State      `json:"state"`
 	Preparer    int        `json:"preparerPid,omitempty"`
 	Request     string     `json:"request,omitempty"`
 	ReadyAt     *time.Time `json:"readyAt,omitempty"`
