@@ -291,3 +291,23 @@ func TestCreateLosingARaceReportsErrExists(t *testing.T) {
 		t.Errorf("Create = %v, want ErrExists", err)
 	}
 }
+
+func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
+	for name, fail := range map[string]func(*fakeNamespace){
+		"create":        func(f *fakeNamespace) { f.createFails = true },
+		"configure-ssh": func(f *fakeNamespace) { f.sshConfigFail = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			fail(fake)
+			_, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"}))
+			if err == nil || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "rpc error") {
+				t.Fatalf("Create = %v, want the CLI failure without ErrExists", err)
+			}
+			machine, err := p.Get(t.Context(), "alpha")
+			if err != nil || len(machine.Labels) != 0 {
+				t.Errorf("after the failed create, Get = %+v, %v; want the allocated devbox without labels", machine, err)
+			}
+		})
+	}
+}

@@ -28,6 +28,7 @@ const (
 	LabelSpare     = "cc-remote/spare"
 	LabelProfile   = "cc-remote/profile"
 	tailnetTimeout = 60 * time.Second
+	clockSkew      = 5 * time.Minute
 )
 
 type Session struct {
@@ -47,9 +48,14 @@ type Session struct {
 	Scripts  images.Scripts
 	Stamp    string
 
-	profile config.Profile
-	labels  []LabelledEnv
-	inPlace bool
+	profile   config.Profile
+	labels    []LabelledEnv
+	image     string
+	imageSpec string
+}
+
+func (s *Session) inPlace() bool {
+	return s.image == ""
 }
 
 func Open(cfg *config.Config, provider providers.Provider, kind, profile string, platform Platform) (*Session, error) {
@@ -62,32 +68,33 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if err != nil {
 		return nil, err
 	}
-	scripts, stamp, err := render(cfg, profile, machine.Image != "")
+	rendered, err := render(cfg, profile, machine.Image != "")
 	if err != nil {
 		return nil, err
 	}
-	if err := coverEnv(cfg.Forwards, scripts.Env); err != nil {
+	if err := coverEnv(cfg.Forwards, rendered.scripts.Env); err != nil {
 		return nil, err
 	}
-	pool, err := NewPool(cfg, kind, profile, budget.Rate(rate), stamp)
+	pool, err := NewPool(cfg, kind, profile, budget.Rate(rate), rendered.stamp)
 	if err != nil {
 		return nil, err
 	}
 	s := &Session{
-		Config:   cfg,
-		Provider: provider,
-		Kind:     kind,
-		Profile:  profile,
-		Platform: platform,
-		Pool:     pool,
-		State:    cfg.State(),
-		Log:      slog.Default(),
-		Stderr:   os.Stderr,
-		Now:      time.Now,
-		Scripts:  scripts,
-		Stamp:    stamp,
-		profile:  spec,
-		inPlace:  machine.Image == "",
+		Config:    cfg,
+		Provider:  provider,
+		Kind:      kind,
+		Profile:   profile,
+		Platform:  platform,
+		Pool:      pool,
+		State:     cfg.State(),
+		Log:       slog.Default(),
+		Stderr:    os.Stderr,
+		Now:       time.Now,
+		Scripts:   rendered.scripts,
+		Stamp:     rendered.stamp,
+		profile:   spec,
+		image:     machine.Image,
+		imageSpec: rendered.imageSpec,
 	}
 	s.Token = s.gitToken
 	for _, forward := range cfg.Forwards {
@@ -104,24 +111,29 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	return s, nil
 }
 
-func render(cfg *config.Config, profile string, imaged bool) (images.Scripts, string, error) {
+type rendered struct {
+	scripts   images.Scripts
+	stamp     string
+	imageSpec string
+}
+
+func render(cfg *config.Config, profile string, imaged bool) (rendered, error) {
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
 	if err != nil {
-		return images.Scripts{}, "", err
+		return rendered{}, err
 	}
 	scripts, err := images.Render(inventory, profile)
 	if err != nil {
-		return images.Scripts{}, "", err
+		return rendered{}, err
 	}
-	var image *images.Context
-	if imaged {
-		rendered, err := images.RenderImage(inventory)
-		if err != nil {
-			return images.Scripts{}, "", err
-		}
-		image = &rendered
+	if !imaged {
+		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil)}, nil
 	}
-	return scripts, images.Stamp(scripts, image), nil
+	image, err := images.RenderImage(inventory)
+	if err != nil {
+		return rendered{}, err
+	}
+	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image), imageSpec: image.Fingerprint()}, nil
 }
 
 func coverEnv(forwards []config.Forward, declared []string) error {
@@ -277,7 +289,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 		s.Log.Info("reattaching the spare this workspace already claimed", "workspace", name, "machine", machine)
 		return s.restore(ctx, held, recorded)
 	}
-	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: machine, Claimed: assignment == NewClaim, CreatedAt: now}
+	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: machine, Image: s.image, ImageSpec: s.imageSpec, Claimed: assignment == NewClaim, CreatedAt: now}
 	if err := s.save(record); err != nil {
 		return nil, err
 	}
@@ -356,7 +368,7 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 			return nil, err
 		}
 		s.Log.Info("renewed its identity", "machine", machine)
-		if err := s.readyTools(ctx, machine); err != nil {
+		if err := s.readyTools(ctx, record); err != nil {
 			return nil, err
 		}
 	} else if err := s.installTools(ctx, machine); err != nil {
@@ -380,7 +392,7 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
-	if s.inPlace {
+	if s.inPlace() {
 		if err := s.Scripts.ProvisionInPlace(ctx, s.exec(machine)); err != nil {
 			return err
 		}
@@ -405,13 +417,18 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 	return nil
 }
 
-func (s *Session) readyTools(ctx context.Context, machine string) error {
-	if err := s.Scripts.Ready(ctx, s.exec(machine), s.Stamp); err != nil {
-		s.Log.Info("the tools are not at the current stamp; installing them", "machine", machine, "stamp", s.Stamp[:12], "err", err)
-		return s.installPlugins(ctx, machine)
+func (s *Session) readyTools(ctx context.Context, record *Record) error {
+	machine := record.Machine
+	err := s.Scripts.Ready(ctx, s.exec(machine), s.Stamp)
+	if err == nil {
+		s.Log.Info("the tools are ready at the current stamp", "machine", machine, "stamp", s.Stamp[:12])
+		return nil
 	}
-	s.Log.Info("the tools are ready at the current stamp", "machine", machine, "stamp", s.Stamp[:12])
-	return nil
+	if record.Image != s.image || record.ImageSpec != s.imageSpec {
+		return fmt.Errorf("the tools on %s are not at the current stamp and the image of profile %s changed since %s was created (image %q with declaration %.12s, now %q with %.12s); a machine cannot change its image in place, so destroy %s and create it again: %w", machine, s.Profile, record.Name, record.Image, record.ImageSpec, s.image, s.imageSpec, record.Name, err)
+	}
+	s.Log.Info("the tools are not at the current stamp; provisioning them again", "machine", machine, "stamp", s.Stamp[:12], "err", err)
+	return s.installTools(ctx, machine)
 }
 
 func (s *Session) checkout(ctx context.Context, record *Record) error {
@@ -520,24 +537,50 @@ func (s *Session) abandon(ctx context.Context, held *state.Held, record *Record)
 			left = fmt.Errorf("removing the tailnet node of %s after the failed create also failed, so delete it from the tailnet by hand: %w", record.Name, err)
 		}
 	}
-	if err := errors.Join(left, s.discard(ctx, record.Machine)); err != nil {
+	if err := errors.Join(left, s.discard(ctx, record.Machine, record.Name)); err != nil {
 		return fmt.Errorf("%w; the record of %s is kept so that destroy can retry", err, record.Name)
 	}
 	return s.forget(record.Name)
 }
 
-func (s *Session) discard(ctx context.Context, machine string) error {
-	_, err := s.Provider.Get(ctx, machine)
+func (s *Session) discard(ctx context.Context, machine, owner string) error {
+	found, err := s.Provider.Get(ctx, machine)
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
 	case err != nil:
 		return fmt.Errorf("could not tell whether %s is still there, so check the provider for it: %w", machine, err)
 	default:
+		ours, err := s.made(found, owner)
+		if err != nil {
+			return err
+		}
+		if !ours {
+			s.Log.Warn("leaving a machine this ledger did not make; releasing its name", "machine", machine, "labels", found.Labels, "created", found.CreatedAt)
+			break
+		}
 		if err := s.Provider.Destroy(ctx, machine); err != nil {
 			return fmt.Errorf("removing %s failed, so check the provider for it: %w", machine, err)
 		}
 	}
 	return s.Pool.Retire(machine, s.Now())
+}
+
+func (s *Session) made(found providers.Machine, owner string) (bool, error) {
+	if workspace, labelled := found.Labels[LabelWorkspace]; labelled {
+		return workspace == owner, nil
+	}
+	if _, spare := found.Labels[LabelSpare]; spare {
+		return true, nil
+	}
+	ledger, err := s.Pool.Ledger.Read()
+	if err != nil {
+		return false, err
+	}
+	resource := ledger.Resources[found.ID]
+	if resource == nil {
+		return false, nil
+	}
+	return found.CreatedAt.IsZero() || !found.CreatedAt.Before(resource.Created.Add(-clockSkew)), nil
 }
 
 func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
@@ -592,7 +635,7 @@ func (s *Session) reopen(ctx context.Context, record *Record) error {
 	if err := s.Provider.Wake(ctx, machine); err != nil {
 		return err
 	}
-	if err := s.readyTools(ctx, machine); err != nil {
+	if err := s.readyTools(ctx, record); err != nil {
 		return err
 	}
 	if err := s.prepare(ctx, record); err != nil {
@@ -638,10 +681,7 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 			return err
 		}
 	}
-	if err := s.Provider.Destroy(ctx, record.Machine); err != nil && !errors.Is(err, providers.ErrNotFound) {
-		return err
-	}
-	if err := s.Pool.Retire(record.Machine, s.Now()); err != nil {
+	if err := s.discard(ctx, record.Machine, name); err != nil {
 		return err
 	}
 	return s.forget(name)
@@ -697,7 +737,7 @@ func (s *Session) Prepare(ctx context.Context) error {
 		s.Log.Info("created", "machine", name)
 		if err := s.prepareSpare(ctx, name); err != nil {
 			s.Log.Error("preparing the spare failed; removing it", "machine", name)
-			return errors.Join(err, s.discard(context.WithoutCancel(ctx), name))
+			return errors.Join(err, s.discard(context.WithoutCancel(ctx), name, name))
 		}
 		if err := s.Pool.MarkReady(name, s.Now()); err != nil {
 			return err
@@ -743,7 +783,7 @@ func (s *Session) drainWhere(ctx context.Context, all bool) error {
 	}
 	for _, name := range drained {
 		s.Log.Info("destroying a spare", "machine", name)
-		if err := s.discard(ctx, name); err != nil {
+		if err := s.discard(ctx, name, name); err != nil {
 			return err
 		}
 	}

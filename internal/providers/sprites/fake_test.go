@@ -33,6 +33,7 @@ type fakeSprites struct {
 	pageSize      int
 	status        int
 	takenAtCreate bool
+	createFails   bool
 
 	mu      sync.Mutex
 	sprites map[string]*fakeSprite
@@ -73,6 +74,9 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 			return providers.Result{Stderr: []byte("sprite already exists"), ExitCode: 1}, nil
 		}
 		f.sprites[args[1]] = &fakeSprite{status: "running", createdAt: time.Date(2026, 9, 30, 12, 0, len(f.sprites), 0, time.UTC)}
+		if f.createFails {
+			return providers.Result{Stderr: []byte("error: waiting for the sprite console timed out"), ExitCode: 1}, nil
+		}
 		return providers.Result{}, nil
 	case "destroy":
 		if len(args) != 3 || args[0] != "-s" || args[2] != "--force" {

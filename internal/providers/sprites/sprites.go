@@ -123,10 +123,10 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		return providers.Machine{}, err
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "create", "-o", p.Org, "--skip-console", spec.Name)); err != nil {
-		if _, taken := p.Get(ctx, spec.Name); taken == nil {
+		if providers.IsConflict(err) {
 			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
-		return providers.Machine{}, err
+		return providers.Machine{}, fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)
 	}
 	if err := p.records().Save(spec.Name, spec.Labels); err != nil {
 		return providers.Machine{}, err

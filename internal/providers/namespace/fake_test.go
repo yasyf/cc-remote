@@ -29,6 +29,8 @@ type fakeNamespace struct {
 	loggedIn      bool
 	sshFails      providers.Result
 	takenAtCreate bool
+	createFails   bool
+	sshConfigFail bool
 	noIdentity    bool
 
 	mu     sync.Mutex
@@ -70,8 +72,14 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 			return providers.Result{Stderr: []byte("rpc error: code = AlreadyExists desc = devbox exists"), ExitCode: 1}, nil
 		}
 		f.boxes[name] = &fakeDevbox{createdAt: time.Date(2026, 9, 30, 9, 28, len(f.boxes), 231641000, time.UTC)}
+		if f.createFails {
+			return providers.Result{Stderr: []byte("rpc error: code = DeadlineExceeded desc = waiting for the devbox to boot"), ExitCode: 1}, nil
+		}
 		return providers.Result{}, nil
 	case len(args) == 2 && args[0] == "configure-ssh":
+		if f.sshConfigFail {
+			return providers.Result{Stderr: []byte("rpc error: code = Unavailable desc = ssh proxy unreachable"), ExitCode: 1}, nil
+		}
 		return f.configureSSH(args[1]), nil
 	case len(args) == 3 && args[0] == "shutdown" && args[2] == "--force":
 		f.boxes[args[1]].stopped = true

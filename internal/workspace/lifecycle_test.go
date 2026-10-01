@@ -44,6 +44,8 @@ const (
 	readies    = "plugins.sh ready "
 	configures = "plugins.sh configure"
 	inventory  = "version: 1\nconfigure:\n  env: [WEB_PORT]\n"
+	imaged     = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
+	sha        = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
 )
 
 func running(nodeID string) string {
@@ -115,6 +117,12 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 		m.setStatus(noState)
 	}
 	return providers.Result{}
+}
+
+func (m *scripted) lose(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.ready, id)
 }
 
 func (m *scripted) ran(id, fragment string) int {
@@ -226,21 +234,33 @@ func (f *flaky) SSHTarget(ctx context.Context, id string) (providers.Target, err
 }
 
 type harness struct {
-	t        *testing.T
-	session  *Session
-	fake     *providertest.Fake
-	provider *flaky
-	machine  *scripted
-	api      *fakeTailnet
+	t         *testing.T
+	session   *Session
+	fake      *providertest.Fake
+	provider  *flaky
+	machine   *scripted
+	api       *fakeTailnet
+	cfg       *config.Config
+	inventory string
 }
 
 func newHarness(t *testing.T, spares int, withTailnet bool) *harness {
+	t.Helper()
+	return build(t, spares, withTailnet, inventory, "")
+}
+
+func newImagedHarness(t *testing.T) *harness {
+	t.Helper()
+	return build(t, 0, false, imaged, "agent-host")
+}
+
+func build(t *testing.T, spares int, withTailnet bool, tools, image string) *harness {
 	t.Helper()
 	machine := &scripted{status: noState, minted: "nNEW"}
 	fake := &providertest.Fake{Rates: providers.Rate{HourlyUSD: 1}, Handle: machine.Handle}
 	provider := &flaky{Provider: fake}
 	inventoryPath := filepath.Join(t.TempDir(), "inventory.yaml")
-	if err := os.WriteFile(inventoryPath, []byte(inventory), 0o600); err != nil {
+	if err := os.WriteFile(inventoryPath, []byte(tools), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
@@ -259,7 +279,7 @@ profiles:
     warm: ["yarn install"]
     warm_inputs: [yarn.lock]
     machine:
-      fake: {}
+      fake: { image: %q }
 spares:
   fake: { lean: %d }
 inventory: %s
@@ -269,7 +289,7 @@ budget:
   cap_usd: 100
   reserve_usd: 10
   trial_hours: 1
-`, t.TempDir(), spares, inventoryPath)
+`, t.TempDir(), image, spares, inventoryPath)
 	if withTailnet {
 		text += "tailnet:\n  tag: " + tag + "\n"
 	}
@@ -278,23 +298,42 @@ budget:
 		t.Fatal(err)
 	}
 	cfg.Path = filepath.Join(t.TempDir(), "config.yaml")
-	session, err := Open(cfg, provider, "fake", "lean", Platform{Daemon: tailnet.Daemon{Mode: tailnet.Kernel, Supervisor: tailnet.SpriteEnv}, HostKeys: true})
-	if err != nil {
+	h := &harness{t: t, fake: fake, provider: provider, machine: machine, cfg: cfg, inventory: inventoryPath}
+	h.session = h.open()
+	if err := h.session.Pool.Ledger.Init(time.Now()); err != nil {
 		t.Fatal(err)
+	}
+	h.api = &fakeTailnet{devices: []tailnet.Device{owned("nNEW")}}
+	if withTailnet {
+		client := h.api.serve(t)
+		h.session.Enroller.Connect = func(context.Context) (*tailnet.Client, error) { return client, nil }
+		h.session.Enroller.Log = h.session.Log
+	}
+	return h
+}
+
+func (h *harness) open() *Session {
+	h.t.Helper()
+	session, err := Open(h.cfg, h.provider, "fake", "lean", Platform{Daemon: tailnet.Daemon{Mode: tailnet.Kernel, Supervisor: tailnet.SpriteEnv}, HostKeys: true})
+	if err != nil {
+		h.t.Fatal(err)
 	}
 	session.Log = slog.New(slog.DiscardHandler)
 	session.Stderr = io.Discard
 	session.Token = func(context.Context) (string, error) { return token, nil }
-	if err := session.Pool.Ledger.Init(time.Now()); err != nil {
-		t.Fatal(err)
+	return session
+}
+
+func (h *harness) drift(tools string) *Session {
+	h.t.Helper()
+	if err := os.WriteFile(h.inventory, []byte(tools), 0o600); err != nil {
+		h.t.Fatal(err)
 	}
-	api := &fakeTailnet{devices: []tailnet.Device{owned("nNEW")}}
-	if withTailnet {
-		client := api.serve(t)
-		session.Enroller.Connect = func(context.Context) (*tailnet.Client, error) { return client, nil }
-		session.Enroller.Log = session.Log
+	drifted := h.open()
+	if drifted.Stamp == h.session.Stamp {
+		h.t.Fatal("the inventory drift left the stamp unchanged")
 	}
-	return &harness{t: t, session: session, fake: fake, provider: provider, machine: machine, api: api}
+	return drifted
 }
 
 func (h *harness) bound() tailnet.Binding {
@@ -1071,26 +1110,170 @@ func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testin
 	}
 }
 
-func TestAClaimInstallsTheToolsWhenTheStampMoved(t *testing.T) {
+func TestAClaimProvisionsASpareThatLostItsReadyStamp(t *testing.T) {
 	h := newHarness(t, 1, false)
 	spare := h.prepared()
-	h.session.Stamp = strings.Repeat("b", 64)
+	h.machine.lose(spare)
 	before := len(h.machine.scripts[spare])
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order(spare, before, readies, installs, checkout)
+	order := h.machine.order(spare, before, readies, provisions, installs, checkout)
 	for i := 1; i < len(order); i++ {
 		if order[i-1] < 0 || order[i] <= order[i-1] {
 			t.Fatalf("the claim ran scripts out of order: %v", order)
 		}
 	}
-	if strings.Contains(strings.Join(h.machine.scripts[spare][before:], "\n"), provisions) {
-		t.Error("a claim provisioned a spare that was already provisioned")
-	}
 	if h.machine.ready[spare] != h.session.Stamp {
 		t.Errorf("the claim left the spare at stamp %q", h.machine.ready[spare])
 	}
+}
+
+func TestResumeProvisionsInPlaceWhenTheInventoryDrifted(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	drifted := h.drift("version: 1\napt:\n  install: [ripgrep]\nprepare: [\"echo drifted\"]\nconfigure:\n  env: [WEB_PORT]\n")
+	before := len(h.machine.scripts["ws-1"])
+	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	order := h.machine.order("ws-1", before, readies, provisions, installs, prepares, configures)
+	for i := 1; i < len(order); i++ {
+		if order[i-1] < 0 || order[i] <= order[i-1] {
+			t.Fatalf("the resume ran scripts out of order: %v", order)
+		}
+	}
+	if h.machine.ready["ws-1"] != drifted.Stamp || !strings.Contains(h.machine.stdins["ws-1"][order[1]], "ripgrep") {
+		t.Errorf("the resume left stamp %q and provisioned with %q", h.machine.ready["ws-1"], h.machine.stdins["ws-1"][order[1]])
+	}
+	if h.machine.ran("ws-1", checkout) != 1 {
+		t.Error("the resume checked out again")
+	}
+}
+
+func TestResumeRefusesWhenTheImageDeclarationChanged(t *testing.T) {
+	h := newImagedHarness(t)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.machine.ran("ws-1", provisions) != 0 || h.machine.ran("ws-1", installs) != 1 {
+		t.Fatalf("an image host ran %q", h.machine.scripts["ws-1"])
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	drifted := h.drift(strings.Replace(imaged, "user: agent", "user: worker", 1))
+	before := len(h.machine.scripts["ws-1"])
+	_, err := drifted.Resume(ctx, "ws-1")
+	if err == nil || !strings.Contains(err.Error(), "destroy ws-1 and create it again") || !strings.Contains(err.Error(), "agent-host") {
+		t.Fatalf("Resume = %v", err)
+	}
+	if after := strings.Join(h.machine.scripts["ws-1"][before:], "\n"); !strings.Contains(after, readies) || strings.Contains(after, installs) || strings.Contains(after, provisions) {
+		t.Errorf("the refused resume ran %q", after)
+	}
+	if h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the refused resume moved the stamp to %q", h.machine.ready["ws-1"])
+	}
+}
+
+func TestResumeInstallsPluginsWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T) {
+	h := newImagedHarness(t)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	drifted := h.drift(imaged + "prepare: [\"echo drifted\"]\n")
+	before := len(h.machine.scripts["ws-1"])
+	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	order := h.machine.order("ws-1", before, readies, installs, prepares, configures)
+	for i := 1; i < len(order); i++ {
+		if order[i-1] < 0 || order[i] <= order[i-1] {
+			t.Fatalf("the resume ran scripts out of order: %v", order)
+		}
+	}
+	if strings.Contains(strings.Join(h.machine.scripts["ws-1"][before:], "\n"), provisions) || h.machine.ready["ws-1"] != drifted.Stamp {
+		t.Errorf("the resume provisioned an image host in place, or left stamp %q", h.machine.ready["ws-1"])
+	}
+}
+
+func TestDestroyLeavesAMachineMadeBeforeTheAttemptAndReleasesItsName(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	h.fake.Now = func() time.Time { return time.Now().Add(-time.Hour) }
+	if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.fake.Now = nil
+	h.session.Provider = &createFailed{Provider: h.provider}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, found := h.record("ws-1"); !found || !h.ledger().Running("ws-1") {
+		t.Fatal("an ambiguous create dropped its accounting")
+	}
+	h.session.Provider = h.provider
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
+		t.Error("destroy removed a machine that predates the attempt")
+	}
+	if strings.Contains(h.calls(), "destroy") {
+		t.Errorf("destroy called the provider: %s", h.calls())
+	}
+	if _, found := h.record("ws-1"); found || h.ledger().Resources["ws-1"].Destroyed == nil {
+		t.Error("destroy did not release the name")
+	}
+}
+
+type createFailed struct {
+	providers.Provider
+}
+
+func (c *createFailed) Create(context.Context, providers.Spec) (providers.Machine, error) {
+	return providers.Machine{}, errors.New("the provider api timed out before answering")
+}
+
+func TestDestroyRemovesAnUnlabelledMachineMadeDuringTheAttempt(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	h.session.Provider = &createdUnlabelledThenFailed{Provider: h.provider}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
+		t.Fatalf("err = %v", err)
+	}
+	h.session.Provider = h.provider
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+		t.Error("destroy left the machine the attempt allocated")
+	}
+	if _, found := h.record("ws-1"); found || h.ledger().Resources["ws-1"].Destroyed == nil {
+		t.Error("destroy did not release the name")
+	}
+}
+
+type createdUnlabelledThenFailed struct {
+	providers.Provider
+}
+
+func (c *createdUnlabelledThenFailed) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	if _, err := c.Provider.Create(ctx, providers.Spec{Name: spec.Name}); err != nil {
+		return providers.Machine{}, err
+	}
+	return providers.Machine{}, errors.New("the provider api timed out after allocating")
 }
 
 func TestAPartialCreateKeepsItsRecordUntilDestroyVerifiesTheMachine(t *testing.T) {

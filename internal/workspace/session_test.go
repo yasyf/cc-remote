@@ -14,15 +14,15 @@ func TestTheExampleConfigRendersItsInventoryForEveryProfileAndProvider(t *testin
 	}
 	for profile, spec := range cfg.Profiles {
 		for provider, machine := range spec.Machine {
-			scripts, stamp, err := render(cfg, profile, machine.Image != "")
+			r, err := render(cfg, profile, machine.Image != "")
 			if err != nil {
 				t.Errorf("%s on %s: %v", profile, provider, err)
 				continue
 			}
-			if len(stamp) != 64 || len(scripts.Provision) == 0 || len(scripts.Plugins) == 0 {
-				t.Errorf("%s on %s rendered stamp %q with %d provision and %d plugin bytes", profile, provider, stamp, len(scripts.Provision), len(scripts.Plugins))
+			if len(r.stamp) != 64 || len(r.scripts.Provision) == 0 || len(r.scripts.Plugins) == 0 || (machine.Image != "") != (r.imageSpec != "") {
+				t.Errorf("%s on %s rendered stamp %q, image spec %q, %d provision and %d plugin bytes", profile, provider, r.stamp, r.imageSpec, len(r.scripts.Provision), len(r.scripts.Plugins))
 			}
-			if err := coverEnv(cfg.Forwards, scripts.Env); err != nil {
+			if err := coverEnv(cfg.Forwards, r.scripts.Env); err != nil {
 				t.Errorf("%s on %s: %v", profile, provider, err)
 			}
 		}

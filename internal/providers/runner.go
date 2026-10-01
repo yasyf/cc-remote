@@ -72,3 +72,12 @@ func (e *CommandError) Error() string {
 	}
 	return fmt.Sprintf("%s: exit %d: %s", e.Command, e.Result.ExitCode, detail)
 }
+
+func IsConflict(err error) bool {
+	var command *CommandError
+	if !errors.As(err, &command) {
+		return false
+	}
+	text := strings.ToLower(string(command.Result.Stderr) + string(command.Result.Stdout))
+	return strings.Contains(text, "already exists") || strings.Contains(text, "alreadyexists")
+}

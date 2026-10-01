@@ -33,6 +33,8 @@ type Record struct {
 	Profile   string        `json:"profile"`
 	Source    Source        `json:"source"`
 	Machine   string        `json:"machine"`
+	Image     string        `json:"image,omitempty"`
+	ImageSpec string        `json:"imageSpec,omitempty"`
 	Claimed   bool          `json:"claimed,omitempty"`
 	Ready     bool          `json:"ready,omitempty"`
 	CreatedAt time.Time     `json:"createdAt"`
