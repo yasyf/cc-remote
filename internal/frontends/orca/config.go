@@ -20,11 +20,12 @@ var (
 )
 
 func SourceOf(cfg *config.Config) Source {
-	profiles := make(map[string][]string, len(cfg.Profiles))
-	for name, profile := range cfg.Profiles {
-		profiles[name] = slices.Sorted(maps.Keys(profile.Machine))
+	return Source{
+		Provider:  cfg.Provider,
+		Profile:   cfg.Profile,
+		Providers: slices.Sorted(maps.Keys(cfg.Providers)),
+		Profiles:  slices.Sorted(maps.Keys(cfg.Profiles)),
 	}
-	return Source{Provider: cfg.Provider, Profile: cfg.Profile, Profiles: profiles}
 }
 
 func PluginOf(cfg *config.Config, version string) (Plugin, error) {

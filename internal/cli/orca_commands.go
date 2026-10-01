@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/version"
 )
 
@@ -38,8 +40,8 @@ type orcaConfig struct {
 }
 
 func (o *orcaConfig) bind(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&o.path, "config", "", "config file (default $CC_REMOTE_CONFIG or ~/.config/cc-remote/config.yaml); "+
-		"recipes pass this path to cc-remote as given, so name it relative to the repo root")
+	cmd.Flags().StringVar(&o.path, "config", "", "config file (default $CC_REMOTE_CONFIG or ~/.config/cc-remote/config.yaml, which recipes pin by absolute path); "+
+		"recipes pass an explicit path to cc-remote as given, so name it relative to the repo root")
 }
 
 func (o *orcaConfig) load() (*config.Config, []orca.Recipe, orca.Lifecycle, error) {
@@ -52,9 +54,35 @@ func (o *orcaConfig) load() (*config.Config, []orca.Recipe, orca.Lifecycle, erro
 		return nil, nil, orca.Lifecycle{}, err
 	}
 	recipes, err := orca.Recipes(orca.SourceOf(cfg))
+	if err != nil {
+		return nil, nil, orca.Lifecycle{}, err
+	}
+	if err := rateRecipes(cfg, recipes); err != nil {
+		return nil, nil, orca.Lifecycle{}, err
+	}
 	lifecycle := orca.DefaultLifecycle()
-	lifecycle.Config = o.path
-	return cfg, recipes, lifecycle, err
+	lifecycle.Config = cmp.Or(o.path, cfg.Path)
+	return cfg, recipes, lifecycle, nil
+}
+
+func rateRecipes(cfg *config.Config, recipes []orca.Recipe) error {
+	opened := map[string]providers.Provider{}
+	for _, recipe := range recipes {
+		provider, ok := opened[recipe.Provider]
+		if !ok {
+			var err error
+			if provider, err = openProvider(cfg, recipe.Provider); err != nil {
+				return err
+			}
+			opened[recipe.Provider] = provider
+		}
+		machine := cfg.Profiles[recipe.Profile].Machine[recipe.Provider]
+		spec := providers.Spec{Name: "rate", Profile: recipe.Profile, Image: machine.Image, Size: machine.Size, Region: machine.Region}
+		if _, err := provider.Rate(spec); err != nil {
+			return fmt.Errorf("profile %s on %s: %w", recipe.Profile, recipe.Provider, err)
+		}
+	}
+	return nil
 }
 
 func newOrcaRecipesCmd() *cobra.Command {

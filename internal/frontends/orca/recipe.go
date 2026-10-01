@@ -30,9 +30,10 @@ const (
 var recipeID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
 type Source struct {
-	Provider string
-	Profile  string
-	Profiles map[string][]string
+	Provider  string
+	Profile   string
+	Providers []string
+	Profiles  []string
 }
 
 type Recipe struct {
@@ -57,13 +58,13 @@ func DefaultLifecycle() Lifecycle {
 }
 
 func Recipes(src Source) ([]Recipe, error) {
-	if !slices.Contains(src.Profiles[src.Profile], src.Provider) {
-		return nil, fmt.Errorf("default profile %q configures no %s machine", src.Profile, src.Provider)
+	if !slices.Contains(src.Providers, src.Provider) || !slices.Contains(src.Profiles, src.Profile) {
+		return nil, fmt.Errorf("default provider %q and profile %q must be among the configured ones", src.Provider, src.Profile)
 	}
 	fallback := machine{provider: src.Provider, profile: src.Profile}
-	var machines []machine
-	for profile, providers := range src.Profiles {
-		for _, provider := range providers {
+	machines := make([]machine, 0, len(src.Providers)*len(src.Profiles))
+	for _, provider := range src.Providers {
+		for _, profile := range src.Profiles {
 			if !config.Identifier.MatchString(provider) || !config.Identifier.MatchString(profile) {
 				return nil, fmt.Errorf("provider %q and profile %q must match %s", provider, profile, config.Identifier)
 			}

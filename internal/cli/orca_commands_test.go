@@ -2,8 +2,10 @@ package cli_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yasyf/cc-remote/internal/cli"
@@ -16,15 +18,47 @@ var exampleConfig = filepath.Join("..", "..", "examples", "config.yaml")
 
 func runCLI(t *testing.T, args ...string) string {
 	t.Helper()
+	out, err := execCLI(args...)
+	if err != nil {
+		t.Fatalf("cc-remote %v: %v", args, err)
+	}
+	return out
+}
+
+func execCLI(args ...string) (string, error) {
 	var out bytes.Buffer
 	root := cli.NewRootCmd()
 	root.SetOut(&out)
 	root.SetErr(&out)
 	root.SetArgs(args)
-	if err := root.Execute(); err != nil {
-		t.Fatalf("cc-remote %v: %v", args, err)
+	err := root.Execute()
+	return out.String(), err
+}
+
+const leanSprites = `repository: https://github.com/example/app
+ref: main
+provider: sprites
+profile: lean
+providers:
+  sprites:
+    org: example
+    rate: { hourlyUSD: 1 }
+%s
+workspace_dirs:
+  sprites: /home/sprite
+%s
+profiles:
+  lean: {}
+budget: { ledger: default, cap_usd: 10, trial_hours: 1 }
+`
+
+func writeConfig(t *testing.T, providers, roots string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, fmt.Appendf(nil, leanSprites, providers, roots), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	return out.String()
+	return path
 }
 
 func TestOrcaRecipes(t *testing.T) {
@@ -46,14 +80,27 @@ func TestOrcaRecipes(t *testing.T) {
 			t.Errorf("stdout =\n%s\nwant\n%s", got, want)
 		}
 	})
-	t.Run("defaults to the user config path and passes no --config", func(t *testing.T) {
-		t.Setenv(config.EnvPath, exampleConfig)
-		bare, err := orca.MergeYAML(nil, orca.DefaultLifecycle(), recipes)
+	t.Run("pins the config it resolved from the environment", func(t *testing.T) {
+		raw, err := os.ReadFile(exampleConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := runCLI(t, "orca", "recipes"); got != string(bare) {
-			t.Errorf("stdout =\n%s\nwant\n%s", got, bare)
+		custom := filepath.Join(t.TempDir(), "custom.yaml")
+		if err := os.WriteFile(custom, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(config.EnvPath, custom)
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		pinned, err := orca.MergeYAML(nil, orca.Lifecycle{Binary: "cc-remote", Config: custom}, recipes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := runCLI(t, "orca", "recipes")
+		if got != string(pinned) {
+			t.Errorf("stdout =\n%s\nwant\n%s", got, pinned)
+		}
+		if !strings.Contains(got, "--config "+custom) {
+			t.Errorf("recipes omit --config %s, so Orca's environment would pick another config:\n%s", custom, got)
 		}
 	})
 	t.Run("rewrites orca.yaml in place and keeps other keys", func(t *testing.T) {
@@ -91,6 +138,37 @@ func TestOrcaRecipes(t *testing.T) {
 			if !bytes.Equal(got, f.Data) {
 				t.Errorf("%s differs from the generator", f.Path)
 			}
+		}
+	})
+}
+
+func TestOrcaRecipesFromProfiles(t *testing.T) {
+	t.Run("a profile with no machine entries still yields its Sprites recipe", func(t *testing.T) {
+		path := writeConfig(t, "", "")
+		recipes, err := orca.Recipes(orca.Source{Provider: "sprites", Profile: "lean", Providers: []string{"sprites"}, Profiles: []string{"lean"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := orca.MergeYAML(nil, orca.Lifecycle{Binary: "cc-remote", Config: path}, recipes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := runCLI(t, "orca", "recipes", "--config", path); got != string(want) {
+			t.Errorf("stdout =\n%s\nwant\n%s", got, want)
+		}
+	})
+	t.Run("a Namespace pairing the profile cannot run is an error", func(t *testing.T) {
+		namespace := `  namespace:
+    platform: linux/amd64
+    volumeSizeGB: 125
+    idleTimeout: 30m
+    callTimeout: 60s
+    readyTimeout: 10m
+    hourlyUSD: { l: 0.96 }`
+		path := writeConfig(t, namespace, "  namespace: /workspaces")
+		_, err := execCLI("orca", "recipes", "--config", path)
+		if err == nil || !strings.Contains(err.Error(), "profile lean on namespace: a namespace spec needs a size") {
+			t.Errorf("recipes error = %v, want the Namespace spec error", err)
 		}
 	})
 }

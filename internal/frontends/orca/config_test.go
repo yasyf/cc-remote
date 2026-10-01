@@ -21,9 +21,10 @@ func exampleConfig(t *testing.T) *config.Config {
 
 func TestSourceOf(t *testing.T) {
 	want := orca.Source{
-		Provider: "sprites",
-		Profile:  "lean",
-		Profiles: map[string][]string{"lean": {"namespace", "sprites"}, "full": {"namespace"}},
+		Provider:  "sprites",
+		Profile:   "lean",
+		Providers: []string{"namespace", "sprites"},
+		Profiles:  []string{"full", "lean"},
 	}
 	if got := orca.SourceOf(exampleConfig(t)); !reflect.DeepEqual(got, want) {
 		t.Errorf("SourceOf() = %+v, want %+v", got, want)
