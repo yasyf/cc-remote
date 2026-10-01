@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -32,6 +35,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		{"SSHTarget", sshTarget},
 		{"Destroy", destroy},
 		{"Rate", rate},
+		{"Traits", traits},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) { tt.run(t, newHarness(t)) })
@@ -186,8 +190,8 @@ func sshTarget(t *testing.T, h Harness) {
 	if err != nil {
 		t.Fatalf("SSHTarget = %v", err)
 	}
-	if target.Host == "" || target.Port != 22 || target.User == "" || target.IdentityFile == "" || target.ProxyCommand == "" {
-		t.Errorf("target = %+v, want a host, port 22, a user, an identity, and a proxy command", target)
+	if target.Host == "" || target.Port <= 0 || target.User == "" {
+		t.Errorf("target = %+v, want a host, a port, and a user", target)
 	}
 	switch policy := target.HostKeyPolicy; policy.Mode {
 	case providers.HostKeyPinned:
@@ -195,12 +199,36 @@ func sshTarget(t *testing.T, h Harness) {
 			t.Errorf("pinned policy = %+v, want an alias and a known_hosts file", policy)
 		}
 	case providers.HostKeyProxyTrusted:
+		if target.ProxyCommand == "" {
+			t.Errorf("target = %+v trusts a proxy it does not name", target)
+		}
 	default:
 		t.Errorf("host key mode = %q", policy.Mode)
 	}
-	if !slices.Contains(target.SSHOptions(), "ProxyCommand="+target.ProxyCommand) {
-		t.Errorf("SSHOptions() = %v, want the proxy command", target.SSHOptions())
+	parsed := OpenSSHConfig(t, target)
+	if parsed["hostname"] != target.Host || parsed["user"] != target.User {
+		t.Errorf("ssh -G read hostname %q and user %q, want %q and %q", parsed["hostname"], parsed["user"], target.Host, target.User)
 	}
+}
+
+func OpenSSHConfig(t testing.TB, target providers.Target) map[string]string {
+	t.Helper()
+	const alias = "cc-remote-target"
+	config := "Host " + alias + "\n  " + strings.Join(target.SSHOptions(), "\n  ") + "\n"
+	path := filepath.Join(t.TempDir(), "ssh_config")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("ssh", "-G", "-F", path, alias).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G rejected\n%s\n%v: %s", config, err, out)
+	}
+	parsed := map[string]string{}
+	for line := range strings.Lines(string(out)) {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
+		parsed[key] = value
+	}
+	return parsed
 }
 
 func destroy(t *testing.T, h Harness) {
@@ -221,6 +249,14 @@ func destroy(t *testing.T, h Harness) {
 	recreated := create(t, h, "alpha", nil)
 	if len(recreated.Labels) != 0 {
 		t.Errorf("recreated alpha carries labels %v from the destroyed one", recreated.Labels)
+	}
+}
+
+func traits(t *testing.T, h Harness) {
+	traits := h.Provider.Traits()
+	if !slices.Contains([]providers.TailnetMode{providers.TailnetKernel, providers.TailnetUserspace}, traits.TailnetMode) ||
+		!slices.Contains([]providers.Supervisor{providers.SupervisorSpriteEnv, providers.SupervisorSetsid}, traits.Supervisor) {
+		t.Errorf("Traits() = %+v, want a known tailnet mode and supervisor", traits)
 	}
 }
 

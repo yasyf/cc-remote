@@ -2,7 +2,6 @@ package namespace
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,19 +23,30 @@ const (
 )
 
 type Config struct {
-	CLI               string
-	SSHDir            string
-	StateDir          string
-	Platform          string
-	Image             string
-	VolumeSizeGB      int
-	IdleTimeout       time.Duration
-	Site              string
-	Sizes             map[string]string
-	HourlyUSD         map[string]float64
-	StorageGBMonthUSD float64
-	CallTimeout       time.Duration
-	ReadyTimeout      time.Duration
+	CLI               string             `yaml:"cli"`
+	SSHDir            string             `yaml:"sshDir"`
+	StateDir          string             `yaml:"-"`
+	Platform          string             `yaml:"platform"`
+	VolumeSizeGB      int                `yaml:"volumeSizeGB"`
+	IdleTimeout       time.Duration      `yaml:"idleTimeout"`
+	HourlyUSD         map[string]float64 `yaml:"hourlyUSD"`
+	StorageGBMonthUSD float64            `yaml:"storageGBMonthUSD"`
+	CallTimeout       time.Duration      `yaml:"callTimeout"`
+	ReadyTimeout      time.Duration      `yaml:"readyTimeout"`
+}
+
+func (c Config) validate() error {
+	switch {
+	case c.CLI == "" || c.SSHDir == "" || !filepath.IsAbs(c.StateDir):
+		return errors.New("namespace needs a cli, an sshDir, and an absolute state directory")
+	case c.Platform == "" || c.VolumeSizeGB <= 0 || c.IdleTimeout <= 0:
+		return errors.New("namespace needs a platform, a positive volumeSizeGB, and a positive idleTimeout")
+	case len(c.HourlyUSD) == 0 || c.StorageGBMonthUSD < 0:
+		return errors.New("namespace needs hourlyUSD by size and a non-negative storageGBMonthUSD")
+	case c.CallTimeout <= 0 || c.ReadyTimeout <= 0:
+		return errors.New("namespace needs a positive callTimeout and readyTimeout")
+	}
+	return nil
 }
 
 type Provider struct {
@@ -46,8 +56,20 @@ type Provider struct {
 
 var _ providers.Provider = (*Provider)(nil)
 
-func New(config Config) *Provider {
-	return &Provider{Config: config, Runner: providers.OSRunner{}}
+func New(config Config) (*Provider, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	return &Provider{Config: config, Runner: providers.OSRunner{}}, nil
+}
+
+func (p *Provider) Traits() providers.Traits {
+	return providers.Traits{
+		TailnetMode:      providers.TailnetUserspace,
+		Supervisor:       providers.SupervisorSetsid,
+		HostKeys:         false,
+		CredentialHelper: "/.namespace/devbox/git-credential-nsc",
+	}
 }
 
 func (p *Provider) records() providers.Records {
@@ -55,11 +77,8 @@ func (p *Provider) records() providers.Records {
 }
 
 func (p *Provider) devbox(ctx context.Context, args ...string) ([]byte, error) {
-	if p.CallTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, p.CallTimeout)
-		defer cancel()
-	}
+	ctx, cancel := context.WithTimeout(ctx, p.CallTimeout)
+	defer cancel()
 	return p.devboxUnbounded(ctx, args...)
 }
 
@@ -79,25 +98,13 @@ func (p *Provider) Check(ctx context.Context) error {
 	return err
 }
 
-func (p *Provider) size(spec providers.Spec) (string, error) {
-	if spec.Size != "" {
-		return spec.Size, nil
-	}
-	size, ok := p.Sizes[spec.Profile]
-	if !ok {
-		return "", fmt.Errorf("namespace has no size for profile %q and the spec names none", spec.Profile)
-	}
-	return size, nil
-}
-
 func (p *Provider) Rate(spec providers.Spec) (providers.Rate, error) {
-	size, err := p.size(spec)
-	if err != nil {
-		return providers.Rate{}, err
+	if spec.Size == "" {
+		return providers.Rate{}, errors.New("a namespace spec needs a size")
 	}
-	hourly, ok := p.HourlyUSD[size]
+	hourly, ok := p.HourlyUSD[spec.Size]
 	if !ok {
-		return providers.Rate{}, fmt.Errorf("namespace has no hourly rate for size %q", size)
+		return providers.Rate{}, fmt.Errorf("namespace has no hourly rate for size %q", spec.Size)
 	}
 	return providers.Rate{HourlyUSD: hourly, StorageGB: float64(p.VolumeSizeGB), StorageGBMonthUSD: p.StorageGBMonthUSD}, nil
 }
@@ -106,13 +113,11 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 	if err := providers.CheckName(spec.Name, nameLimit); err != nil {
 		return providers.Machine{}, err
 	}
-	size, err := p.size(spec)
-	if err != nil {
+	if _, err := p.Rate(spec); err != nil {
 		return providers.Machine{}, err
 	}
-	image := cmp.Or(spec.Image, p.Image)
-	if image == "" {
-		return providers.Machine{}, errors.New("namespace needs an image; set one in the namespace config or the spec")
+	if spec.Image == "" {
+		return providers.Machine{}, errors.New("a namespace spec needs an image")
 	}
 	switch _, err := p.Get(ctx, spec.Name); {
 	case err == nil:
@@ -124,15 +129,15 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		"create",
 		"--name", spec.Name,
 		"--platform", p.Platform,
-		"--size", size,
-		imageFlag(image), image,
+		"--size", spec.Size,
+		imageFlag(spec.Image), spec.Image,
 		"--volume_size_gb", fmt.Sprint(p.VolumeSizeGB),
 		"--auto_stop_idle_timeout", p.IdleTimeout.String(),
 		"--no_checkout",
 		"--persistent",
 	}
-	if site := cmp.Or(spec.Region, p.Site); site != "" {
-		args = append(args, "--site", site)
+	if spec.Region != "" {
+		args = append(args, "--site", spec.Region)
 	}
 	if _, err := p.devboxUnbounded(ctx, args...); err != nil {
 		if _, taken := p.Get(ctx, spec.Name); taken == nil {

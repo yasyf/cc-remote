@@ -13,6 +13,7 @@ import (
 )
 
 type Fake struct {
+	Facts  providers.Traits
 	Rates  providers.Rate
 	Handle func(id string, cmd []string, stdin []byte) providers.Result
 	Now    func() time.Time
@@ -33,6 +34,8 @@ func (f *Fake) Calls() []string {
 	defer f.mu.Unlock()
 	return slices.Clone(f.calls)
 }
+
+func (f *Fake) Traits() providers.Traits { return f.Facts }
 
 func (f *Fake) Check(context.Context) error { return nil }
 

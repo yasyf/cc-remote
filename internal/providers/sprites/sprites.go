@@ -9,7 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os/exec"
-	"slices"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,12 +26,23 @@ const (
 )
 
 type Config struct {
-	Org      string
-	CLI      string
-	Profiles []string
-	Rate     providers.Rate
-	StateDir string
-	Helper   string
+	Org      string         `yaml:"org"`
+	CLI      string         `yaml:"cli"`
+	Rate     providers.Rate `yaml:"rate"`
+	StateDir string         `yaml:"-"`
+	Helper   string         `yaml:"-"`
+}
+
+func (c Config) validate() error {
+	switch {
+	case c.Org == "":
+		return errors.New("sprites needs an org; set it in the sprites config")
+	case c.CLI == "" || c.Helper == "" || !filepath.IsAbs(c.StateDir):
+		return errors.New("sprites needs a cli, a helper binary, and an absolute state directory")
+	case c.Rate.HourlyUSD <= 0 || c.Rate.StorageGB < 0 || c.Rate.StorageGBMonthUSD < 0:
+		return errors.New("sprites needs a positive rate.hourlyUSD and non-negative storage rates")
+	}
+	return nil
 }
 
 type Provider struct {
@@ -41,8 +52,19 @@ type Provider struct {
 
 var _ providers.Provider = (*Provider)(nil)
 
-func New(config Config) *Provider {
-	return &Provider{Config: config, Runner: providers.OSRunner{}}
+func New(config Config) (*Provider, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	return &Provider{Config: config, Runner: providers.OSRunner{}}, nil
+}
+
+func (p *Provider) Traits() providers.Traits {
+	return providers.Traits{
+		TailnetMode: providers.TailnetKernel,
+		Supervisor:  providers.SupervisorSpriteEnv,
+		HostKeys:    true,
+	}
 }
 
 func (p *Provider) command(stdin io.Reader, args ...string) providers.Command {
@@ -50,13 +72,10 @@ func (p *Provider) command(stdin io.Reader, args ...string) providers.Command {
 }
 
 func (p *Provider) records() providers.Records {
-	return providers.Records{Dir: p.StateDir + "/" + Name + "/machines"}
+	return providers.Records{Dir: filepath.Join(p.StateDir, Name, "machines")}
 }
 
 func (p *Provider) Check(ctx context.Context) error {
-	if p.Org == "" {
-		return errors.New("sprites needs an org; set it in the sprites config")
-	}
 	status, body, err := p.api(ctx, "/v1/sprites?max_results=1")
 	switch {
 	case errors.Is(err, exec.ErrNotFound):
@@ -80,8 +99,6 @@ func (p *Provider) Rate(spec providers.Spec) (providers.Rate, error) {
 
 func (p *Provider) admits(spec providers.Spec) error {
 	switch {
-	case !slices.Contains(p.Profiles, spec.Profile):
-		return fmt.Errorf("sprites serves profiles %v, not %q", p.Profiles, spec.Profile)
 	case spec.Image != "":
 		return fmt.Errorf("a sprite boots no image; provision %s after create instead of naming %q", spec.Name, spec.Image)
 	case spec.Size != "":

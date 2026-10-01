@@ -29,6 +29,7 @@ type fakeNamespace struct {
 	loggedIn      bool
 	sshFails      providers.Result
 	takenAtCreate bool
+	noIdentity    bool
 
 	mu     sync.Mutex
 	boxes  map[string]*fakeDevbox
@@ -134,10 +135,14 @@ func (f *fakeNamespace) configureSSH(name string) providers.Result {
 		return providers.Result{Stderr: []byte("rpc error: code = NotFound desc = no such devbox"), ExitCode: 1}
 	}
 	alias := Alias(name)
+	identity := "  IdentityFile " + filepath.Join(f.sshDir, alias+".key")
+	if f.noIdentity {
+		identity = "  ForwardAgent yes"
+	}
 	config := strings.Join([]string{
 		"Host " + alias,
 		"  ForwardAgent yes",
-		"  IdentityFile " + filepath.Join(f.sshDir, alias+".key"),
+		identity,
 		"  IdentitiesOnly yes",
 		"  ProxyCommand " + f.proxy() + " ssh-proxy " + name,
 		"  StrictHostKeyChecking no",

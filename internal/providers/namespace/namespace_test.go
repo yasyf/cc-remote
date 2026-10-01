@@ -16,27 +16,28 @@ import (
 func newProvider(t *testing.T) (*Provider, *fakeNamespace) {
 	t.Helper()
 	dir := t.TempDir()
-	p := New(Config{
+	p, err := New(Config{
 		CLI:               DefaultCLI,
 		SSHDir:            DefaultSSHDir(dir),
 		StateDir:          filepath.Join(dir, "state"),
 		Platform:          "linux/amd64",
-		Image:             "cc-remote-linux",
 		VolumeSizeGB:      125,
 		IdleTimeout:       30 * time.Minute,
-		Sizes:             map[string]string{"agents": "l", "stack": "xl"},
 		HourlyUSD:         map[string]float64{"l": 0.96, "xl": 1.92},
 		StorageGBMonthUSD: 0.2,
 		CallTimeout:       time.Minute,
 		ReadyTimeout:      time.Minute,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	fake := newFakeNamespace(t, DefaultCLI, p.SSHDir)
 	p.Runner = fake
 	return p, fake
 }
 
 func spec(name string, labels map[string]string) providers.Spec {
-	return providers.Spec{Name: name, Profile: "agents", Labels: labels}
+	return providers.Spec{Name: name, Profile: "agents", Size: "l", Image: "cc-remote-linux", Labels: labels}
 }
 
 func TestNamespaceSatisfiesTheContract(t *testing.T) {
@@ -50,38 +51,27 @@ func TestCreateArguments(t *testing.T) {
 	tests := []struct {
 		name string
 		spec providers.Spec
-		site string
 		want []string
 	}{
 		{
 			"lean default",
 			spec("alpha", nil),
-			"",
 			[]string{"create", "--name", "alpha", "--platform", "linux/amd64", "--size", "l", "--image", "cc-remote-linux", "--volume_size_gb", "125", "--auto_stop_idle_timeout", "30m0s", "--no_checkout", "--persistent"},
 		},
 		{
 			"full stack opt-in",
-			providers.Spec{Name: "alpha", Profile: "stack"},
-			"",
+			providers.Spec{Name: "alpha", Profile: "stack", Size: "xl", Image: "cc-remote-linux"},
 			[]string{"create", "--name", "alpha", "--platform", "linux/amd64", "--size", "xl", "--image", "cc-remote-linux", "--volume_size_gb", "125", "--auto_stop_idle_timeout", "30m0s", "--no_checkout", "--persistent"},
 		},
 		{
-			"explicit size, image reference, and region",
-			providers.Spec{Name: "alpha", Profile: "agents", Size: "m", Image: "nscr.io/tenant/custom@sha256:abc", Region: "eu-west"},
-			"us-east",
-			[]string{"create", "--name", "alpha", "--platform", "linux/amd64", "--size", "m", "--image_ref", "nscr.io/tenant/custom@sha256:abc", "--volume_size_gb", "125", "--auto_stop_idle_timeout", "30m0s", "--no_checkout", "--persistent", "--site", "eu-west"},
-		},
-		{
-			"configured site",
-			spec("alpha", nil),
-			"us-east",
-			[]string{"create", "--name", "alpha", "--platform", "linux/amd64", "--size", "l", "--image", "cc-remote-linux", "--volume_size_gb", "125", "--auto_stop_idle_timeout", "30m0s", "--no_checkout", "--persistent", "--site", "us-east"},
+			"image reference and region",
+			providers.Spec{Name: "alpha", Profile: "agents", Size: "l", Image: "nscr.io/tenant/custom@sha256:abc", Region: "eu-west"},
+			[]string{"create", "--name", "alpha", "--platform", "linux/amd64", "--size", "l", "--image_ref", "nscr.io/tenant/custom@sha256:abc", "--volume_size_gb", "125", "--auto_stop_idle_timeout", "30m0s", "--no_checkout", "--persistent", "--site", "eu-west"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, fake := newProvider(t)
-			p.Site = tt.site
 			if _, err := p.Create(t.Context(), tt.spec); err != nil {
 				t.Fatal(err)
 			}
@@ -95,6 +85,16 @@ func TestCreateArguments(t *testing.T) {
 	}
 }
 
+func TestCreateNeedsAnImage(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), providers.Spec{Name: "alpha", Size: "l"}); err == nil || err.Error() != "a namespace spec needs an image" {
+		t.Errorf("Create = %v", err)
+	}
+	if got := fake.call("create"); got != nil {
+		t.Errorf("an imageless spec reached devbox create: %q", got)
+	}
+}
+
 func TestRate(t *testing.T) {
 	p, _ := newProvider(t)
 	tests := []struct {
@@ -103,10 +103,9 @@ func TestRate(t *testing.T) {
 		want    providers.Rate
 		wantErr string
 	}{
-		{"agents profile", spec("a", nil), providers.Rate{HourlyUSD: 0.96, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
-		{"stack profile", providers.Spec{Profile: "stack"}, providers.Rate{HourlyUSD: 1.92, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
-		{"explicit size", providers.Spec{Profile: "agents", Size: "xl"}, providers.Rate{HourlyUSD: 1.92, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
-		{"unknown profile", providers.Spec{Profile: "gpu"}, providers.Rate{}, `namespace has no size for profile "gpu" and the spec names none`},
+		{"lean size", spec("a", nil), providers.Rate{HourlyUSD: 0.96, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
+		{"full stack size", providers.Spec{Profile: "stack", Size: "xl"}, providers.Rate{HourlyUSD: 1.92, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
+		{"no size", providers.Spec{Profile: "agents"}, providers.Rate{}, "a namespace spec needs a size"},
 		{"unpriced size", providers.Spec{Profile: "agents", Size: "s"}, providers.Rate{}, `namespace has no hourly rate for size "s"`},
 	}
 	for _, tt := range tests {
@@ -172,6 +171,27 @@ func TestSSHTargetTrustsTheDevboxProxy(t *testing.T) {
 	}
 	if target != want {
 		t.Errorf("SSHTarget =\n%+v\nwant\n%+v", target, want)
+	}
+}
+
+func TestSSHTargetWithoutAnIdentityFile(t *testing.T) {
+	p, fake := newProvider(t)
+	fake.noIdentity = true
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	target, err := p.SSHTarget(t.Context(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.IdentityFile != "" {
+		t.Errorf("IdentityFile = %q, want none", target.IdentityFile)
+	}
+	if parsed := providertest.OpenSSHConfig(t, target); parsed["proxycommand"] != target.ProxyCommand {
+		t.Errorf("ssh -G read proxycommand %q, want %q", parsed["proxycommand"], target.ProxyCommand)
+	}
+	if _, err := p.Exec(t.Context(), "alpha", []string{"true"}, nil); err != nil {
+		t.Errorf("Exec without an identity file = %v", err)
 	}
 }
 

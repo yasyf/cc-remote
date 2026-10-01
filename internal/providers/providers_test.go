@@ -1,4 +1,4 @@
-package providers
+package providers_test
 
 import (
 	"context"
@@ -8,27 +8,50 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/providers/providertest"
 )
 
 func TestSSHOptions(t *testing.T) {
-	base := Target{Host: "h", Port: 22, User: "u", IdentityFile: "/k", ProxyCommand: "proxy h"}
-	common := []string{"HostName=h", "Port=22", "User=u", `IdentityFile="/k"`, "IdentitiesOnly=yes", "ProxyCommand=proxy h"}
 	tests := []struct {
 		name   string
-		policy HostKeyPolicy
+		target providers.Target
 		want   []string
 	}{
-		{"pinned", HostKeyPolicy{Mode: HostKeyPinned, Alias: "h.alias", KnownHostsFile: "/known"}, []string{"HostKeyAlias=h.alias", `UserKnownHostsFile="/known"`, "StrictHostKeyChecking=yes"}},
-		{"proxy trusted", HostKeyPolicy{Mode: HostKeyProxyTrusted}, []string{"UserKnownHostsFile=/dev/null", "StrictHostKeyChecking=no"}},
+		{
+			"pinned behind a proxy",
+			providers.Target{
+				Host: "h", Port: 22, User: "u", IdentityFile: "/k", ProxyCommand: "proxy h",
+				HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyPinned, Alias: "h.alias", KnownHostsFile: "/known"},
+			},
+			[]string{"HostName=h", "Port=22", "User=u", `IdentityFile="/k"`, "IdentitiesOnly=yes", "ProxyCommand=proxy h", "HostKeyAlias=h.alias", `UserKnownHostsFile="/known"`, "StrictHostKeyChecking=yes"},
+		},
+		{
+			"proxy trusted with no key of its own",
+			providers.Target{Host: "h", Port: 22, User: "u", ProxyCommand: "proxy h", HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyProxyTrusted}},
+			[]string{"HostName=h", "Port=22", "User=u", "ProxyCommand=proxy h", "UserKnownHostsFile=/dev/null", "StrictHostKeyChecking=no"},
+		},
+		{
+			"direct and pinned",
+			providers.Target{
+				Host: "h.tailnet", Port: 2222, User: "u",
+				HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyPinned, Alias: "h.alias", KnownHostsFile: "/known"},
+			},
+			[]string{"HostName=h.tailnet", "Port=2222", "User=u", "HostKeyAlias=h.alias", `UserKnownHostsFile="/known"`, "StrictHostKeyChecking=yes"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			target := base
-			target.HostKeyPolicy = tt.policy
-			if got, want := target.SSHOptions(), append(slices.Clone(common), tt.want...); !slices.Equal(got, want) {
-				t.Errorf("SSHOptions() = %q, want %q", got, want)
+			if got := tt.target.SSHOptions(); !slices.Equal(got, tt.want) {
+				t.Errorf("SSHOptions() =\n%q\nwant\n%q", got, tt.want)
+			}
+			parsed := providertest.OpenSSHConfig(t, tt.target)
+			if parsed["hostname"] != tt.target.Host || parsed["port"] != strconv.Itoa(tt.target.Port) {
+				t.Errorf("ssh -G read %s:%s", parsed["hostname"], parsed["port"])
 			}
 		})
 	}
@@ -37,41 +60,24 @@ func TestSSHOptions(t *testing.T) {
 			t.Error("SSHOptions with no host key mode did not panic")
 		}
 	}()
-	base.SSHOptions()
+	providers.Target{Host: "h", Port: 22, User: "u"}.SSHOptions()
 }
 
-func TestSSHOptionsSurviveOpenSSHParsing(t *testing.T) {
-	target := Target{
+func TestSSHOptionsKeepSpacesAndPercentSigns(t *testing.T) {
+	target := providers.Target{
 		Host:         "h",
-		Port:         2222,
+		Port:         22,
 		User:         "u",
 		IdentityFile: "/tmp/a b/100%/k",
-		ProxyCommand: ShellQuote("/tmp/100%/cc-remote", "proxy", "--", "/x y/sprite", "-W", ":22"),
-		HostKeyPolicy: HostKeyPolicy{
-			Mode:           HostKeyPinned,
+		ProxyCommand: providers.ShellQuote("/tmp/100%/cc-remote", "proxy", "--", "/x y/sprite", "-W", ":22"),
+		HostKeyPolicy: providers.HostKeyPolicy{
+			Mode:           providers.HostKeyPinned,
 			Alias:          "h.alias",
 			KnownHostsFile: "/tmp/a b/known_hosts",
 		},
 	}
-	options := target.SSHOptions()
-	args := make([]string, 0, 2*len(options)+4)
-	args = append(args, "-G", "-F", "/dev/null")
-	for _, option := range options {
-		args = append(args, "-o", option)
-	}
-	out, err := exec.Command("ssh", append(args, "h")...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("ssh -G = %v: %s", err, out)
-	}
-	parsed := map[string]string{}
-	for line := range strings.Lines(string(out)) {
-		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
-		parsed[key] = value
-	}
+	parsed := providertest.OpenSSHConfig(t, target)
 	want := map[string]string{
-		"hostname":              "h",
-		"port":                  "2222",
-		"user":                  "u",
 		"identityfile":          "/tmp/a b/100%%/k",
 		"proxycommand":          "/tmp/100%%/cc-remote proxy -- '/x y/sprite' -W :22",
 		"hostkeyalias":          "h.alias",
@@ -95,15 +101,15 @@ func TestShellQuote(t *testing.T) {
 		{[]string{"$HOME", "*", "x;y"}, `'$HOME' '*' 'x;y'`},
 	}
 	for _, tt := range tests {
-		if got := ShellQuote(tt.words...); got != tt.want {
-			t.Errorf("ShellQuote(%q) = %s, want %s", tt.words, got, tt.want)
+		if got := providers.ShellQuote(tt.words...); got != tt.want {
+			t.Errorf("providers.ShellQuote(%q) = %s, want %s", tt.words, got, tt.want)
 		}
-		out, err := exec.Command("sh", "-c", `for w in `+ShellQuote(tt.words...)+`; do printf '%s\0' "$w"; done`).Output()
+		out, err := exec.Command("sh", "-c", `for w in `+providers.ShellQuote(tt.words...)+`; do printf '%s\0' "$w"; done`).Output()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00"); !slices.Equal(got, tt.words) {
-			t.Errorf("sh split %s into %q, want %q", ShellQuote(tt.words...), got, tt.words)
+			t.Errorf("sh split %s into %q, want %q", providers.ShellQuote(tt.words...), got, tt.words)
 		}
 	}
 }
@@ -127,14 +133,14 @@ func TestCheckName(t *testing.T) {
 		{"a/b", false},
 	}
 	for _, tt := range tests {
-		if err := CheckName(tt.name, 5); (err == nil) != tt.ok {
-			t.Errorf("CheckName(%q) = %v, want ok %v", tt.name, err, tt.ok)
+		if err := providers.CheckName(tt.name, 5); (err == nil) != tt.ok {
+			t.Errorf("providers.CheckName(%q) = %v, want ok %v", tt.name, err, tt.ok)
 		}
 	}
 }
 
 func TestRecords(t *testing.T) {
-	records := Records{Dir: filepath.Join(t.TempDir(), "machines")}
+	records := providers.Records{Dir: filepath.Join(t.TempDir(), "machines")}
 	labels, err := records.Labels("alpha")
 	if err != nil || labels != nil {
 		t.Fatalf("Labels of an unrecorded machine = %v, %v", labels, err)
@@ -162,28 +168,28 @@ func TestRecords(t *testing.T) {
 }
 
 func TestOSRunner(t *testing.T) {
-	result, err := OSRunner{}.Run(t.Context(), Command{Name: "sh", Args: []string{"-c", "cat; echo e >&2; exit 4"}, Stdin: strings.NewReader("in")})
+	result, err := providers.OSRunner{}.Run(t.Context(), providers.Command{Name: "sh", Args: []string{"-c", "cat; echo e >&2; exit 4"}, Stdin: strings.NewReader("in")})
 	if err != nil || string(result.Stdout) != "in" || string(result.Stderr) != "e\n" || result.ExitCode != 4 {
 		t.Errorf("Run = %+v, %v", result, err)
 	}
-	if _, err := (OSRunner{}).Run(t.Context(), Command{Name: "cc-remote-no-such-binary"}); !errors.Is(err, exec.ErrNotFound) {
+	if _, err := (providers.OSRunner{}).Run(t.Context(), providers.Command{Name: "cc-remote-no-such-binary"}); !errors.Is(err, exec.ErrNotFound) {
 		t.Errorf("Run of a missing binary = %v, want exec.ErrNotFound", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := (OSRunner{}).Run(ctx, Command{Name: "sleep", Args: []string{"5"}}); !errors.Is(err, context.Canceled) {
+	if _, err := (providers.OSRunner{}).Run(ctx, providers.Command{Name: "sleep", Args: []string{"5"}}); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run with a canceled context = %v, want context.Canceled", err)
 	}
 }
 
 func TestOutput(t *testing.T) {
-	out, err := Output(t.Context(), OSRunner{}, Command{Name: "printf", Args: []string{"ok"}})
+	out, err := providers.Output(t.Context(), providers.OSRunner{}, providers.Command{Name: "printf", Args: []string{"ok"}})
 	if err != nil || string(out) != "ok" {
 		t.Errorf("Output = %q, %v", out, err)
 	}
-	_, err = Output(t.Context(), OSRunner{}, Command{Name: "sh", Args: []string{"-c", "echo boom >&2; exit 2"}})
-	var failed *CommandError
+	_, err = providers.Output(t.Context(), providers.OSRunner{}, providers.Command{Name: "sh", Args: []string{"-c", "echo boom >&2; exit 2"}})
+	var failed *providers.CommandError
 	if !errors.As(err, &failed) || err.Error() != "sh -c echo boom >&2; exit 2: exit 2: boom" {
-		t.Errorf("Output = %v, want a CommandError", err)
+		t.Errorf("Output = %v, want a providers.CommandError", err)
 	}
 }

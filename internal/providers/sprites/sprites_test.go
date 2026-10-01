@@ -41,14 +41,16 @@ func newProvider(t *testing.T) (*Provider, *fakeSprites) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := New(Config{
+	p, err := New(Config{
 		Org:      "acme",
 		CLI:      cli,
-		Profiles: []string{"agents"},
 		Rate:     providers.Rate{HourlyUSD: 1.26, StorageGB: 50, StorageGBMonthUSD: 0.5},
 		StateDir: filepath.Join(dir, "state"),
 		Helper:   helper,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	fake := newFakeSprites(t, cli, "acme")
 	p.Runner = fake
 	return p, fake
@@ -73,7 +75,6 @@ func TestSpecAdmission(t *testing.T) {
 		want string
 	}{
 		{"lean", spec("alpha", nil), ""},
-		{"full stack", providers.Spec{Name: "alpha", Profile: "stack"}, `sprites serves profiles [agents], not "stack"`},
 		{"image", providers.Spec{Name: "alpha", Profile: "agents", Image: "ubuntu"}, `a sprite boots no image; provision alpha after create instead of naming "ubuntu"`},
 		{"size", providers.Spec{Name: "alpha", Profile: "agents", Size: "xl"}, `sprites have one size, not "xl"`},
 		{"region", providers.Spec{Name: "alpha", Profile: "agents", Region: "ord"}, `sprites choose no region, not "ord"`},
@@ -116,7 +117,6 @@ func TestCheck(t *testing.T) {
 		want  string
 	}{
 		{"logged in", func(*Provider, *fakeSprites) {}, ""},
-		{"no org", func(p *Provider, _ *fakeSprites) { p.Org = "" }, "sprites needs an org; set it in the sprites config"},
 		{"logged out", func(_ *Provider, f *fakeSprites) { f.status = 401 }, "not logged in to sprites org acme; run 'sprite login -o acme'"},
 		{"no CLI", func(_ *Provider, f *fakeSprites) { f.cli = "elsewhere" }, "not found; install it from https://sprites.dev"},
 	}
@@ -352,7 +352,7 @@ func readPID(t *testing.T, path string) int {
 func TestHelperOutlivesTheBinaryThatInstalledIt(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "cache", "cc-remote")
-	p := New(Config{Helper: source, StateDir: filepath.Join(dir, "state")})
+	p := &Provider{Config: Config{Helper: source, StateDir: filepath.Join(dir, "state")}}
 	install := func(content string) os.FileInfo {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {

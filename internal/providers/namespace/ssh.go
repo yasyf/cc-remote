@@ -34,7 +34,7 @@ func (p *Provider) SSHTarget(ctx context.Context, id string) (providers.Target, 
 		return providers.Target{}, err
 	}
 	options := sshConfig(raw)
-	for _, key := range []string{"user", "identityfile", "proxycommand"} {
+	for _, key := range []string{"user", "proxycommand"} {
 		if options[key] == "" {
 			return providers.Target{}, fmt.Errorf("%s sets no %s", path, key)
 		}

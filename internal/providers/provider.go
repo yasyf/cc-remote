@@ -11,6 +11,7 @@ import (
 )
 
 type Provider interface {
+	Traits() Traits
 	Check(ctx context.Context) error
 	Rate(spec Spec) (Rate, error)
 	Create(ctx context.Context, spec Spec) (Machine, error)
@@ -27,6 +28,27 @@ var (
 	ErrNotFound = errors.New("machine not found")
 	ErrExists   = errors.New("machine already exists")
 )
+
+type TailnetMode string
+
+const (
+	TailnetKernel    TailnetMode = "kernel"
+	TailnetUserspace TailnetMode = "userspace"
+)
+
+type Supervisor string
+
+const (
+	SupervisorSpriteEnv Supervisor = "sprite-env"
+	SupervisorSetsid    Supervisor = "setsid"
+)
+
+type Traits struct {
+	TailnetMode      TailnetMode
+	Supervisor       Supervisor
+	HostKeys         bool
+	CredentialHelper string
+}
 
 type Spec struct {
 	Name    string
@@ -69,9 +91,9 @@ type Result struct {
 }
 
 type Rate struct {
-	HourlyUSD         float64
-	StorageGB         float64
-	StorageGBMonthUSD float64
+	HourlyUSD         float64 `yaml:"hourlyUSD"`
+	StorageGB         float64 `yaml:"storageGB"`
+	StorageGBMonthUSD float64 `yaml:"storageGBMonthUSD"`
 }
 
 type HostKeyMode string
@@ -97,13 +119,12 @@ type Target struct {
 }
 
 func (t Target) SSHOptions() []string {
-	options := []string{
-		"HostName=" + t.Host,
-		"Port=" + strconv.Itoa(t.Port),
-		"User=" + t.User,
-		"IdentityFile=" + sshPath(t.IdentityFile),
-		"IdentitiesOnly=yes",
-		"ProxyCommand=" + sshTokens(t.ProxyCommand),
+	options := []string{"HostName=" + t.Host, "Port=" + strconv.Itoa(t.Port), "User=" + t.User}
+	if t.IdentityFile != "" {
+		options = append(options, "IdentityFile="+sshPath(t.IdentityFile), "IdentitiesOnly=yes")
+	}
+	if t.ProxyCommand != "" {
+		options = append(options, "ProxyCommand="+sshTokens(t.ProxyCommand))
 	}
 	switch t.HostKeyPolicy.Mode {
 	case HostKeyPinned:
