@@ -221,7 +221,7 @@ func seedAgentIdentity(t *testing.T, home string) (forgotten, kept []string) {
 func TestFreshScriptReplacesHostKeysAndForgetsAgentState(t *testing.T) {
 	bin, home := t.TempDir(), t.TempDir()
 	calls := filepath.Join(t.TempDir(), "sudo.log")
-	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\necho \"$@\" >> "+calls+"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+calls+"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	forgotten, kept := seedAgentIdentity(t, home)
