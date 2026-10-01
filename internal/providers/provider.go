@@ -25,8 +25,9 @@ type Provider interface {
 }
 
 var (
-	ErrNotFound = errors.New("machine not found")
-	ErrExists   = errors.New("machine already exists")
+	ErrNotFound  = errors.New("machine not found")
+	ErrExists    = errors.New("machine already exists")
+	ErrAmbiguous = errors.New("the create failed after the machine came to exist")
 )
 
 type TailnetMode string

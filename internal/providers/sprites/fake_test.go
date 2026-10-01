@@ -27,12 +27,14 @@ type fakeSprite struct {
 }
 
 type fakeSprites struct {
-	t             *testing.T
-	cli           string
-	org           string
-	pageSize      int
-	status        int
-	takenAtCreate bool
+	t               *testing.T
+	cli             string
+	org             string
+	pageSize        int
+	status          int
+	takenAtCreate   bool
+	createFails     string
+	destroySurvives bool
 
 	mu      sync.Mutex
 	sprites map[string]*fakeSprite
@@ -70,15 +72,20 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 			f.sprites[args[1]] = &fakeSprite{status: "running", createdAt: time.Now().UTC()}
 		}
 		if _, ok := f.sprites[args[1]]; ok {
-			return providers.Result{Stderr: []byte("sprite already exists"), ExitCode: 1}, nil
+			return providers.Result{Stderr: []byte("error: sprite " + args[1] + " already exists"), ExitCode: 1}, nil
 		}
 		f.sprites[args[1]] = &fakeSprite{status: "running", createdAt: time.Date(2026, 9, 30, 12, 0, len(f.sprites), 0, time.UTC)}
+		if f.createFails != "" {
+			return providers.Result{Stderr: []byte(f.createFails), ExitCode: 1}, nil
+		}
 		return providers.Result{}, nil
 	case "destroy":
 		if len(args) != 3 || args[0] != "-s" || args[2] != "--force" {
 			f.t.Fatalf("sprite destroy %q", args)
 		}
-		delete(f.sprites, args[1])
+		if !f.destroySurvives {
+			delete(f.sprites, args[1])
+		}
 		return providers.Result{}, nil
 	case "exec":
 		return f.exec(ctx, args, cmd.Stdin)

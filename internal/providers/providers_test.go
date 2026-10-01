@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
@@ -141,16 +142,20 @@ func TestCheckName(t *testing.T) {
 
 func TestRecords(t *testing.T) {
 	records := providers.Records{Dir: filepath.Join(t.TempDir(), "machines")}
-	labels, err := records.Labels("alpha")
+	created := time.Date(2026, 9, 30, 12, 0, 0, 231641000, time.UTC)
+	labels, err := records.Labels("alpha", created)
 	if err != nil || labels != nil {
 		t.Fatalf("Labels of an unrecorded machine = %v, %v", labels, err)
 	}
 	want := map[string]string{"team": "a", "cc-remote/workspace": "w1"}
-	if err := records.Save("alpha", want); err != nil {
+	if err := records.Save("alpha", want, created); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := records.Labels("alpha"); err != nil || !maps.Equal(got, want) {
+	if got, err := records.Labels("alpha", created); err != nil || !maps.Equal(got, want) {
 		t.Errorf("Labels = %v, %v; want %v", got, err, want)
+	}
+	if got, err := records.Labels("alpha", created.Add(time.Second)); err != nil || got != nil {
+		t.Errorf("Labels of a machine created at another time = %v, %v; want none, the record is another machine's receipt", got, err)
 	}
 	entries, err := os.ReadDir(records.Dir)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "alpha.json" {
@@ -162,7 +167,7 @@ func TestRecords(t *testing.T) {
 	if err := records.Remove("alpha"); err != nil {
 		t.Errorf("removing a missing record = %v", err)
 	}
-	if got, err := records.Labels("alpha"); err != nil || got != nil {
+	if got, err := records.Labels("alpha", created); err != nil || got != nil {
 		t.Errorf("Labels after Remove = %v, %v", got, err)
 	}
 }

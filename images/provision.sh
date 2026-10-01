@@ -6,10 +6,6 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "provision: run as root" >&2
   exit 1
 fi
-if [ -e /var/lib/tailscale ]; then
-  echo "provision: /var/lib/tailscale exists, so this machine already joined a tailnet; every workspace enrolls its own node after its claim" >&2
-  exit 1
-fi
 
 tool_dir=/opt/cc-remote/tools
 bin_dir=/usr/local/bin

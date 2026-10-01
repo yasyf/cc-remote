@@ -1,0 +1,65 @@
+repository: https://github.com/<org>/<repo>
+ref: main
+provider: sprites
+profile: lean
+
+providers:
+  sprites:
+    org: <sprites-org>
+    rate: { hourlyUSD: 1.26, storageGB: 50, storageGBMonthUSD: 0.5 }
+  namespace:
+    platform: linux/amd64
+    volumeSizeGB: 125
+    idleTimeout: 30m
+    callTimeout: 60s
+    readyTimeout: 10m
+    hourlyUSD: { s: 0.24, m: 0.48, l: 0.96, xl: 1.92 }
+    storageGBMonthUSD: 0.2
+
+workspace_dirs:
+  sprites: /home/sprite
+  namespace: /workspaces
+
+profiles:
+  lean:
+    checkout: shallow
+    machine:
+      sprites: {}
+      namespace: { image: <image-name-or-digest>, size: l }
+  full:
+    checkout: full
+    prepare:
+      - ./tools/bootstrap-project.sh
+    warm:
+      - ./tools/install-project-deps.sh
+    warm_inputs:
+      - package.json
+      - "*.lock"
+    machine:
+      namespace: { image: <image-name-or-digest>, size: xl }
+
+spares:
+  sprites: { lean: 1 }
+  namespace: { full: 0 }
+
+inventory: ./inventory.yaml
+
+forwards:
+  - { label: example, env: EXAMPLE_PORT }
+
+budget:
+  ledger: default
+  cap_usd: 100
+  reserve_usd: 10
+  trial_hours: 3
+
+tailnet:
+  tag: tag:cc-remote
+  keychain_service: cc-remote-tailnet
+  api: https://api.tailscale.com/api/v2
+
+git:
+  token_command: [gh, auth, token]
+
+identity:
+  forbidden_paths: []

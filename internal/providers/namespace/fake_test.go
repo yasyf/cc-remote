@@ -23,13 +23,16 @@ type fakeDevbox struct {
 }
 
 type fakeNamespace struct {
-	t             *testing.T
-	cli           string
-	sshDir        string
-	loggedIn      bool
-	sshFails      providers.Result
-	takenAtCreate bool
-	noIdentity    bool
+	t               *testing.T
+	cli             string
+	sshDir          string
+	loggedIn        bool
+	sshFails        providers.Result
+	takenAtCreate   bool
+	createFails     string
+	sshConfigFail   bool
+	destroySurvives bool
+	noIdentity      bool
 
 	mu     sync.Mutex
 	boxes  map[string]*fakeDevbox
@@ -67,17 +70,25 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 			f.boxes[name] = &fakeDevbox{createdAt: time.Now().UTC()}
 		}
 		if _, ok := f.boxes[name]; ok {
-			return providers.Result{Stderr: []byte("rpc error: code = AlreadyExists desc = devbox exists"), ExitCode: 1}, nil
+			return providers.Result{Stderr: []byte("rpc error: code = AlreadyExists desc = devbox " + name + " already exists"), ExitCode: 1}, nil
 		}
 		f.boxes[name] = &fakeDevbox{createdAt: time.Date(2026, 9, 30, 9, 28, len(f.boxes), 231641000, time.UTC)}
+		if f.createFails != "" {
+			return providers.Result{Stderr: []byte(f.createFails), ExitCode: 1}, nil
+		}
 		return providers.Result{}, nil
 	case len(args) == 2 && args[0] == "configure-ssh":
+		if f.sshConfigFail {
+			return providers.Result{Stderr: []byte("rpc error: code = Unavailable desc = ssh proxy unreachable"), ExitCode: 1}, nil
+		}
 		return f.configureSSH(args[1]), nil
 	case len(args) == 3 && args[0] == "shutdown" && args[2] == "--force":
 		f.boxes[args[1]].stopped = true
 		return providers.Result{}, nil
 	case len(args) == 3 && args[0] == "expire" && args[2] == "--force":
-		delete(f.boxes, args[1])
+		if !f.destroySurvives {
+			delete(f.boxes, args[1])
+		}
 		return providers.Result{}, nil
 	}
 	f.t.Fatalf("unexpected devbox %q", args)

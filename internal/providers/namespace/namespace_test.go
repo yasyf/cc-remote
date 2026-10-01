@@ -283,11 +283,72 @@ func TestSSHConfigReadsLiteralValues(t *testing.T) {
 	}
 }
 
-func TestCreateLosingARaceReportsErrExists(t *testing.T) {
+func TestDestroyKeepsTheReceiptUntilTheDevboxIsGone(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"})); err != nil {
+		t.Fatal(err)
+	}
+	fake.destroySurvives = true
+	if err := p.Destroy(t.Context(), "alpha"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.Labels["owner"] != "me" {
+		t.Fatalf("after the expire the devbox survived, Get = %+v, %v; want its labels kept", machine, err)
+	}
+	fake.destroySurvives = false
+	if err := p.Destroy(t.Context(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(t.Context(), "alpha"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("after the devbox went, Get = %v", err)
+	}
+}
+
+func TestCreateLosingARaceIsAmbiguous(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true
 	_, err := p.Create(t.Context(), spec("alpha", nil))
-	if !errors.Is(err, providers.ErrExists) {
-		t.Errorf("Create = %v, want ErrExists", err)
+	if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "code = AlreadyExists") {
+		t.Errorf("Create = %v, want ErrAmbiguous carrying the CLI conflict, never ErrExists", err)
+	}
+}
+
+func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
+	for name, fail := range map[string]func(*fakeNamespace){
+		"create": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = DeadlineExceeded desc = waiting for the devbox to boot"
+		},
+		"create naming the requested devbox": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = AlreadyExists desc = devbox alpha already exists"
+		},
+		"create naming another devbox": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = AlreadyExists desc = devbox alpha-2 already exists"
+		},
+		"create naming another resource of the requested devbox": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = AlreadyExists desc = volume already exists while creating devbox alpha"
+		},
+		"create with existence text": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = DeadlineExceeded desc = devbox alpha: file already exists"
+		},
+		"create with the code elsewhere": func(f *fakeNamespace) {
+			f.createFails = "creating devbox alpha\nrpc error: code = AlreadyExists desc = volume exists"
+		},
+		"create with the name before the code": func(f *fakeNamespace) {
+			f.createFails = "creating devbox alpha: rpc error: code = AlreadyExists desc = volume exists"
+		},
+		"configure-ssh": func(f *fakeNamespace) { f.sshConfigFail = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			fail(fake)
+			_, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"}))
+			if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "rpc error") {
+				t.Fatalf("Create = %v, want ErrAmbiguous carrying the CLI failure, never ErrExists", err)
+			}
+			machine, err := p.Get(t.Context(), "alpha")
+			if err != nil || len(machine.Labels) != 0 {
+				t.Errorf("after the failed create, Get = %+v, %v; want the allocated devbox without labels", machine, err)
+			}
+		})
 	}
 }
