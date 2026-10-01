@@ -72,9 +72,23 @@ requires a system `uv` artifact. Every Python tool declares its executable `bins
 
 | Entry | Fields |
 | --- | --- |
-| `claude.marketplaces[]` | `name`, `github` as `owner/repo`, a 40-character commit `ref`, and optional `private`. |
+| `claude.marketplaces[]` | `name`, `github` as `owner/repo`, exactly one of `ref` or `branch`, and optional `private` for `ref` only. |
 | `claude.plugins[]` | `id` as `name@marketplace`, `version`, and optional `bins` relative to the plugin root. |
 | `services[]` | `name`, argument-vector `command`, optional `plugin`, and optional `env` map. A plugin service's command is relative to that plugin's root. |
+
+A `ref` marketplace uses a 40-character commit; cc-remote fetches it into its
+own checkout and registers that directory. A `branch` marketplace has no commit
+pin and is registered through Claude Code as `owner/repo#<branch>` because
+Claude Code clones sources with `git clone --branch` and cannot use a
+40-character commit as a GitHub ref. `claude-plugins-official` publishes no tags
+and Claude Code refuses a local-directory source for that reserved name, so it
+must use `branch`. Plugin versions stay pinned, and install and verify fail when
+an installed version differs from the inventory; an upstream version bump fails
+closed until the inventory is bumped. An entry registered under the same name
+with a different source, repo, or branch, including Claude Code's automatically
+added unpinned entry, is removed and re-added at the pinned branch; verify checks
+that registration. Python tools cannot install from a `branch` marketplace
+because it has no pinned checkout.
 
 `claude.env` and service `env` values may reference `${NAME}` when `NAME` is
 declared in `configure.env`. Configuration requires exactly those declared names
