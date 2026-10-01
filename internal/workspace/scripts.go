@@ -2,17 +2,18 @@ package workspace
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/yasyf/cc-remote/internal/remote"
 )
 
 const (
-	warmStamp     = remote.StateDir + "/warm-head"
-	bootstrapPath = remote.StateDir + "/bootstrap.sh"
-	githubOrigin  = "https://github.com/"
+	warmStamp    = remote.StateDir + "/warm-head"
+	githubOrigin = "https://github.com/"
 )
 
 var (
@@ -61,23 +62,29 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 		"export GIT_TERMINAL_PROMPT=0",
 		"root=" + remote.Quote(root),
 		"ref=" + remote.Quote(source.Ref),
+	}
+	if source.pinned() {
+		return remote.Script(append(lines,
+			"head="+remote.Quote(source.Head),
+			`if [ ! -d "$root/.git" ]; then`,
+			`  mkdir -p "$(dirname "$root")"`,
+			`  git init --quiet "$root"`,
+			`  git -C "$root" remote add origin `+remote.Quote(repository),
+			"fi",
+			`git "$@" -C "$root" fetch --quiet`+depth+` origin "$head" || { echo "`+remote.Prefix+`: $ref no longer offers the pinned commit $head" >&2; exit 1; }`,
+			`git -C "$root" checkout --quiet --force -B `+remote.Quote(source.Branch)+` "$head"`,
+		)...)
+	}
+	return remote.Script(append(lines,
 		`if [ ! -d "$root/.git" ]; then`,
 		`  mkdir -p "$(dirname "$root")"`,
-		`  git "$@" clone --quiet` + depth + ` --branch "$ref" --single-branch ` + remote.Quote(repository) + ` "$root"`,
+		`  git "$@" clone --quiet`+depth+` --branch "$ref" --single-branch `+remote.Quote(repository)+` "$root"`,
 		"else",
-		`  git "$@" -C "$root" fetch --quiet --prune` + depth + ` origin "$ref"`,
+		`  git "$@" -C "$root" fetch --quiet --prune`+depth+` origin "$ref"`,
 		`  git -C "$root" checkout --quiet --force -B "$ref" FETCH_HEAD`,
 		"fi",
 		`if git -C "$root" rev-parse --quiet --verify "refs/remotes/origin/$ref" > /dev/null; then git -C "$root" branch --quiet --set-upstream-to "origin/$ref"; fi`,
-	}
-	if source.pinned() {
-		lines = append(lines,
-			"head="+remote.Quote(source.Head),
-			`git -C "$root" cat-file -e "$head^{commit}" || { echo "`+remote.Prefix+`: $ref no longer holds the pinned commit $head" >&2; exit 1; }`,
-			`git -C "$root" checkout --quiet --force -B `+remote.Quote(source.Branch)+` "$head"`,
-		)
-	}
-	return remote.Script(lines...)
+	)...)
 }
 
 func RefreshScript(root string, env, steps []string) string {
@@ -103,25 +110,24 @@ func WarmScript(root string, inputs, steps []string) string {
 	))
 }
 
-const WriteBootstrapScript = `set -eu
-mkdir -p "` + remote.StateDir + `"
-cat > "` + bootstrapPath + `"
-chmod 700 "` + bootstrapPath + `"`
-
-func BootstrapScript(root string, env []string) string {
-	return RefreshScript(root, env, []string{`"` + bootstrapPath + `"`})
-}
-
-func ForwardEnv(forwards []Forward, labels []LabelledEnv) []string {
+func ForwardEnv(forwards []Forward, labels []LabelledEnv) map[string]string {
 	ports := map[string]int{}
 	for _, forward := range forwards {
 		ports[forward.Label] = forward.Port
 	}
-	env := make([]string, 0, len(labels))
+	env := make(map[string]string, len(labels))
 	for _, label := range labels {
-		env = append(env, fmt.Sprintf("%s=%d", label.Env, ports[label.Label]))
+		env[label.Env] = strconv.Itoa(ports[label.Label])
 	}
 	return env
+}
+
+func ExportEnv(env map[string]string) []string {
+	lines := make([]string, 0, len(env))
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		lines = append(lines, key+"="+env[key])
+	}
+	return lines
 }
 
 func TokenAllowed(repository string) bool {

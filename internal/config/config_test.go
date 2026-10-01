@@ -21,6 +21,7 @@ profiles:
     prepare: [true]
     machine:
       fake: { size: s }
+inventory: inventory.yaml
 budget:
   cap_usd: 100
   reserve_usd: 10
@@ -116,6 +117,7 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"unknown field", func(s string) string { return s + "bogus: 1\n" }, "bogus"},
 		{"non-https repository", func(s string) string { return strings.Replace(s, "https://", "git@", 1) }, "https"},
 		{"no ref", func(s string) string { return strings.Replace(s, "ref: main\n", "", 1) }, "ref"},
+		{"no inventory", func(s string) string { return strings.Replace(s, "inventory: inventory.yaml\n", "", 1) }, "inventory"},
 		{"unknown default provider", func(s string) string { return strings.Replace(s, "provider: fake", "provider: other", 1) }, "provider \"other\""},
 		{"unknown default profile", func(s string) string { return strings.Replace(s, "profile: lean", "profile: full", 1) }, "profile \"full\""},
 		{"bad checkout", func(s string) string {

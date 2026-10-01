@@ -137,19 +137,6 @@ func TestRefreshScriptExportsTheForwardPortsBeforeTheSteps(t *testing.T) {
 	}
 }
 
-func TestBootstrapScriptsInstallThenRunTheShippedScript(t *testing.T) {
-	home := t.TempDir()
-	if out, err := runScript(t, home, workspace.WriteBootstrapScript, "#!/bin/sh\nIFS= read -r token\nprintf 'ran %s %s' \"$WEB_PORT\" \"$token\" > \"$HOME/ran\"\n"); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	if out, err := runScript(t, home, workspace.BootstrapScript(home, []string{"WEB_PORT=7"}), "tok\n"); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	if got, err := os.ReadFile(filepath.Join(home, "ran")); err != nil || string(got) != "ran 7 tok" {
-		t.Errorf("the bootstrap ran %q, %v", got, err)
-	}
-}
-
 func TestAllocateForwardsKeepsHeldPortsAndAllocatesTheRest(t *testing.T) {
 	labels := []workspace.LabelledEnv{{Label: "a", Env: "A_PORT"}, {Label: "b", Env: "B_PORT"}}
 	forwards, err := workspace.AllocateForwards(labels, []workspace.Forward{{Label: "b", Port: 40001}})
@@ -160,8 +147,11 @@ func TestAllocateForwardsKeepsHeldPortsAndAllocatesTheRest(t *testing.T) {
 		t.Errorf("forwards = %+v", forwards)
 	}
 	env := workspace.ForwardEnv(forwards, labels)
-	if len(env) != 2 || env[0] != fmt.Sprintf("A_PORT=%d", forwards[0].Port) || env[1] != "B_PORT=40001" {
+	if len(env) != 2 || env["A_PORT"] != fmt.Sprint(forwards[0].Port) || env["B_PORT"] != "40001" {
 		t.Errorf("env = %v", env)
+	}
+	if exported := workspace.ExportEnv(env); len(exported) != 2 || exported[0] != fmt.Sprintf("A_PORT=%d", forwards[0].Port) || exported[1] != "B_PORT=40001" {
+		t.Errorf("exported = %v", exported)
 	}
 }
 
@@ -179,15 +169,32 @@ func TestCheckoutScriptPinsTheRequestedCommitOnTheRequestedBranch(t *testing.T) 
 	home := t.TempDir()
 	root := filepath.Join(home, "app")
 	pinned := workspace.Source{Ref: "main", Head: head, Branch: "orca/ws-1"}
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, pinned, false), "\n"); err != nil {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, pinned, true), workspacetest.Token+"\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "HEAD") != head || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "orca/ws-1" {
-		t.Errorf("checked out %s on %s", git(t, root, "rev-parse", "HEAD"), git(t, root, "rev-parse", "--abbrev-ref", "HEAD"))
+		t.Errorf("checked out %s on %s after the branch advanced past the pin", git(t, root, "rev-parse", "HEAD"), git(t, root, "rev-parse", "--abbrev-ref", "HEAD"))
+	}
+	if git(t, root, "rev-parse", "--is-shallow-repository") != "true" || git(t, root, "rev-list", "--count", "HEAD") != "1" {
+		t.Error("the pinned checkout deepened past one commit")
+	}
+	if git(t, root, "remote", "get-url", "origin") != repository {
+		t.Error("the pinned checkout has no origin to refresh from")
+	}
+	git(t, origin, "commit", "-q", "--allow-empty", "-m", "moved again")
+	later := git(t, origin, "rev-parse", "main")
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main", Head: later, Branch: "orca/ws-1"}, true), "\n"); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if git(t, root, "rev-parse", "HEAD") != later {
+		t.Error("a second pin on the same clone did not move to the new commit")
 	}
 	gone := workspace.Source{Ref: "main", Head: strings.Repeat("0", 40), Branch: "orca/ws-2"}
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, gone, false), "\n"); err == nil || !strings.Contains(string(out), "pinned commit") {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, gone, true), "\n"); err == nil || !strings.Contains(string(out), "pinned commit") {
 		t.Errorf("a vanished pin checked out: %v: %s", err, out)
+	}
+	if git(t, root, "rev-parse", "HEAD") != later {
+		t.Error("a failed pin moved the checkout")
 	}
 }
 

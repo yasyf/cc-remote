@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -32,18 +33,18 @@ func (l *LocalExec) Home(id string) string {
 }
 
 func (l *LocalExec) Handle(id string, cmd []string, stdin []byte) providers.Result {
-	if len(cmd) != 3 || cmd[0] != "sh" || cmd[1] != "-c" {
-		return providers.Result{Stderr: []byte("localexec runs sh -c <script> only"), ExitCode: 2}
-	}
 	home := l.Home(id)
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return providers.Result{Stderr: []byte(err.Error()), ExitCode: 1}
 	}
 	l.mu.Lock()
-	l.scripts[id] = append(l.scripts[id], cmd[2])
+	l.scripts[id] = append(l.scripts[id], strings.Join(cmd, " "))
 	l.stdins[id] = append(l.stdins[id], string(stdin))
 	l.mu.Unlock()
-	run := exec.CommandContext(context.Background(), "sh", "-c", cmd[2])
+	if cmd[0] == "sudo" {
+		return providers.Result{}
+	}
+	run := exec.CommandContext(context.Background(), cmd[0], cmd[1:]...)
 	run.Env = []string{"HOME=" + home, "PATH=" + l.Path, "TMPDIR=" + l.Root, "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1"}
 	run.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer

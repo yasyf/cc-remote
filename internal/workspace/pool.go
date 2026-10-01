@@ -6,17 +6,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/remote"
+	"github.com/yasyf/cc-remote/internal/state"
 )
 
-const sparePrefix = remote.Prefix + "-spare-"
+const (
+	sparePrefix      = remote.Prefix + "-spare-"
+	spareFingerprint = 12
+)
 
 type Pool struct {
 	Provider    string
@@ -29,7 +32,7 @@ type Pool struct {
 	Ledger      budget.Store
 }
 
-func NewPool(cfg *config.Config, provider, profile string, rate budget.Rate) (Pool, error) {
+func NewPool(cfg *config.Config, provider, profile string, rate budget.Rate, stamp string) (Pool, error) {
 	prepared, err := cfg.ProfileNamed(profile)
 	if err != nil {
 		return Pool{}, err
@@ -43,13 +46,9 @@ func NewPool(cfg *config.Config, provider, profile string, rate budget.Rate) (Po
 		Repository, Provider, Profile, Root string
 		Section                             string
 		Spec                                config.Profile
-	}{cfg.Repository, provider, profile, cfg.ProjectRoot(provider), string(section), prepared}); err != nil {
+		Stamp                               string
+	}{cfg.Repository, provider, profile, cfg.ProjectRoot(provider), string(section), prepared, stamp}); err != nil {
 		return Pool{}, err
-	}
-	if cfg.Bootstrap != "" {
-		if err := hashScript(hash, cfg.Bootstrap, cfg.ScriptPath(cfg.Bootstrap)); err != nil {
-			return Pool{}, err
-		}
 	}
 	return Pool{
 		Provider:    provider,
@@ -63,22 +62,14 @@ func NewPool(cfg *config.Config, provider, profile string, rate budget.Rate) (Po
 	}, nil
 }
 
-func hashScript(hash io.Writer, name, path string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(hash, "%s %d\n", name, len(raw)); err != nil {
-		return err
-	}
-	_, err = hash.Write(raw)
-	return err
-}
-
 func (p Pool) SpareName() string {
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
-	return fmt.Sprintf("%s%s-%s-%s", sparePrefix, p.Profile, p.Fingerprint[:12], hex.EncodeToString(suffix))
+	slug := p.Profile
+	if limit := state.NameLimit - len(sparePrefix) - 2 - spareFingerprint - 2*len(suffix); len(slug) > limit {
+		slug = strings.TrimRight(slug[:limit], "-")
+	}
+	return fmt.Sprintf("%s%s-%s-%s", sparePrefix, slug, p.Fingerprint[:spareFingerprint], hex.EncodeToString(suffix))
 }
 
 type Assignment string

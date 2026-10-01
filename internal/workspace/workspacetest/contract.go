@@ -72,8 +72,14 @@ func GitRepository(t *testing.T) string {
 	return "file://" + origin
 }
 
+const Inventory = "version: 1\nconfigure:\n  env: [WEB_PORT]\n"
+
 func Config(t *testing.T, h Harness) *config.Config {
 	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(Inventory), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := config.Parse([]byte(fmt.Sprintf(`
 repository: %s
 ref: main
@@ -94,6 +100,7 @@ profiles:
       %s: { image: %q, size: %q, region: %q }
 spares:
   %s: { lean: %d }
+inventory: ./inventory.yaml
 forwards:
   - { label: web, env: WEB_PORT }
 budget:
@@ -104,7 +111,7 @@ budget:
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Path = filepath.Join(t.TempDir(), "config.yaml")
+	cfg.Path = filepath.Join(dir, "config.yaml")
 	return cfg
 }
 
@@ -170,6 +177,9 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if result.SchemaVersion != workspace.SchemaVersion || result.Name != "ws-1" || result.Provider != h.Kind || result.Machine != "ws-1" || result.ProjectRoot != s.ProjectRoot() || result.SSH.Host == "" || len(result.Forwards) != 1 || result.Forwards[0].Label != "web" || result.Forwards[0].Port == 0 {
 		t.Errorf("result = %+v", result)
 	}
+	if fragment, err := os.ReadFile(result.SSH.Config); err != nil || result.SSH.Config != s.State.SSH("ws-1") || !strings.HasPrefix(string(fragment), "Host ws-1\n") || !strings.Contains(string(fragment), "\n  HostName "+result.SSH.Host+"\n") {
+		t.Errorf("ssh fragment %s = %q, %v", result.SSH.Config, fragment, err)
+	}
 	machine, err := h.Provider.Get(ctx, "ws-1")
 	if err != nil || machine.Labels[workspace.LabelWorkspace] != "ws-1" || machine.Labels[workspace.LabelProfile] != "lean" {
 		t.Errorf("machine = %+v, %v", machine, err)
@@ -201,6 +211,9 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	}
 	if _, found := record(t, s, "ws-1"); found {
 		t.Error("the destroyed workspace is still recorded")
+	}
+	if _, err := os.Stat(result.SSH.Config); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the destroyed workspace still has an ssh fragment")
 	}
 	if resource := ledger(t, s).Resources["ws-1"]; resource == nil || resource.Destroyed == nil {
 		t.Errorf("the ledger did not retire the workspace: %+v", resource)

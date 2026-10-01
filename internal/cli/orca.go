@@ -128,7 +128,7 @@ func orcaResource(stdin io.Reader) (string, error) {
 func orcaResultOf(result *workspace.Result) orcaResult {
 	target := orcaSSHTarget{
 		Label:        result.Name,
-		Host:         result.SSH.Host,
+		Host:         result.Name,
 		Port:         result.SSH.Port,
 		Username:     result.SSH.User,
 		IdentityFile: result.SSH.IdentityFile,

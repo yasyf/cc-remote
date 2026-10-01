@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,18 +27,23 @@ import (
 )
 
 const (
-	suffix   = "example.ts.net"
-	tag      = "tag:cc-remote"
-	token    = "ghp_" + "testtokenthatmustnotreachascript00000000"
-	enrolls  = ` up --auth-key="file:`
-	freshens = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
-	logsOut  = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
-	renews   = `rm -rf "$HOME"/.claude.json`
-	checkout = "clone --quiet"
-	prepares = "cd /home/fake/app\n"
-	warms    = "warm-head"
-	cleans   = "this spare is not clean"
-	noState  = `{"BackendState":"NoState"}`
+	suffix     = "example.ts.net"
+	tag        = "tag:cc-remote"
+	token      = "ghp_" + "testtokenthatmustnotreachascript00000000"
+	enrolls    = ` up --auth-key="file:`
+	freshens   = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
+	logsOut    = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
+	renews     = `rm -rf "$HOME"/.claude.json`
+	checkout   = "clone --quiet"
+	prepares   = "cd /home/fake/app\n"
+	warms      = "warm-head"
+	cleans     = "this spare is not clean"
+	noState    = `{"BackendState":"NoState"}`
+	provisions = "sudo bash -s"
+	installs   = "plugins.sh install "
+	readies    = "plugins.sh ready "
+	configures = "plugins.sh configure"
+	inventory  = "version: 1\nconfigure:\n  env: [WEB_PORT]\n"
 )
 
 func running(nodeID string) string {
@@ -54,6 +60,7 @@ type scripted struct {
 	onStatus func()
 	scripts  map[string][]string
 	stdins   map[string][]string
+	ready    map[string]string
 }
 
 func (m *scripted) setStatus(status string) {
@@ -69,14 +76,22 @@ func (m *scripted) currentStatus() string {
 }
 
 func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Result {
-	script := cmd[2]
+	script := strings.Join(cmd, " ")
 	m.mu.Lock()
 	if m.scripts == nil {
-		m.scripts, m.stdins = map[string][]string{}, map[string][]string{}
+		m.scripts, m.stdins, m.ready = map[string][]string{}, map[string][]string{}, map[string]string{}
 	}
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
 	failAll := m.failAll
+	stamp := cmd[len(cmd)-1]
+	switch {
+	case strings.Contains(script, installs):
+		m.ready[id] = stamp
+	case strings.Contains(script, readies) && m.ready[id] != stamp:
+		m.mu.Unlock()
+		return providers.Result{Stderr: []byte("plugins: this host was not prepared from stamp " + stamp), ExitCode: 1}
+	}
 	m.mu.Unlock()
 	if failAll {
 		return providers.Result{Stderr: []byte("the machine went away"), ExitCode: 1}
@@ -224,8 +239,8 @@ func newHarness(t *testing.T, spares int, withTailnet bool) *harness {
 	machine := &scripted{status: noState, minted: "nNEW"}
 	fake := &providertest.Fake{Rates: providers.Rate{HourlyUSD: 1}, Handle: machine.Handle}
 	provider := &flaky{Provider: fake}
-	bootstrap := filepath.Join(t.TempDir(), "bootstrap.sh")
-	if err := os.WriteFile(bootstrap, []byte("#!/bin/sh\necho bootstrapped\n"), 0o700); err != nil {
+	inventoryPath := filepath.Join(t.TempDir(), "inventory.yaml")
+	if err := os.WriteFile(inventoryPath, []byte(inventory), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	text := fmt.Sprintf(`
@@ -247,14 +262,14 @@ profiles:
       fake: {}
 spares:
   fake: { lean: %d }
-bootstrap: %s
+inventory: %s
 forwards:
   - { label: web, env: WEB_PORT }
 budget:
   cap_usd: 100
   reserve_usd: 10
   trial_hours: 1
-`, t.TempDir(), spares, bootstrap)
+`, t.TempDir(), spares, inventoryPath)
 	if withTailnet {
 		text += "tailnet:\n  tag: " + tag + "\n"
 	}
@@ -363,15 +378,19 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", 0, checkout, prepares, "bootstrap.sh", freshens, enrolls)
+	order := h.machine.order("ws-1", 0, provisions, installs, checkout, prepares, configures, freshens, enrolls)
 	for i := 1; i < len(order); i++ {
 		if order[i-1] < 0 || order[i] <= order[i-1] {
 			t.Fatalf("scripts ran out of order: %v", order)
 		}
 	}
-	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", warms) != 0 {
-		t.Error("a fresh create renewed identity or warmed")
+	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", warms) != 0 || h.machine.ran("ws-1", readies) != 0 {
+		t.Error("a fresh create renewed identity, warmed, or checked a ready stamp it could not have")
 	}
+	if got := h.machine.stdins["ws-1"][order[1]]; got != token {
+		t.Errorf("the tool install read %q on stdin", got)
+	}
+	order = order[2:]
 	for i, script := range h.machine.scripts["ws-1"] {
 		if strings.Contains(script, token) || strings.Contains(script, "tskey-auth") {
 			t.Errorf("script %d carries a secret", i)
@@ -414,11 +433,14 @@ func TestAClaimRenewsIdentityBeforeInstallingThenWarmsAndEnrolls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order(spare, before, renews, checkout, prepares, warms, freshens, enrolls)
+	order := h.machine.order(spare, before, renews, readies, checkout, prepares, warms, configures, freshens, enrolls)
 	for i := 1; i < len(order); i++ {
 		if order[i-1] < 0 || order[i] <= order[i-1] {
 			t.Fatalf("the claim ran scripts out of order: %v (prepare ran %d)", order, before)
 		}
+	}
+	if from := h.machine.scripts[spare][before:]; strings.Contains(strings.Join(from, "\n"), installs) || strings.Contains(strings.Join(from, "\n"), provisions) {
+		t.Errorf("a claim of a spare at the current stamp installed tools again: %q", from)
 	}
 	if fresh := h.machine.scripts[spare][order[0]]; !strings.Contains(fresh, "sudo -n ssh-keygen -A") {
 		t.Errorf("the claim kept the spare's host keys: %q", fresh)
@@ -711,6 +733,7 @@ func TestSuspendStopsTheLedgerAndResumeRestartsIt(t *testing.T) {
 		t.Error("suspend left the workspace running")
 	}
 	checkouts := h.machine.ran("ws-1", checkout)
+	before := len(h.machine.scripts["ws-1"])
 	result, err := h.session.Resume(ctx, "ws-1")
 	if err != nil {
 		t.Fatal(err)
@@ -718,9 +741,8 @@ func TestSuspendStopsTheLedgerAndResumeRestartsIt(t *testing.T) {
 	if !h.ledger().Running("ws-1") || h.machine.ran("ws-1", checkout) != checkouts || h.machine.ran("ws-1", prepares) < 2 {
 		t.Error("resume did not restart the ledger, or re-cloned, or skipped the prepare steps")
 	}
-	bootstraps := h.machine.order("ws-1", 0, "bootstrap.sh")
-	if last := h.machine.stdins["ws-1"][len(h.machine.stdins["ws-1"])-1]; bootstraps[0] < 0 || last != "" {
-		t.Errorf("resume sent %q to the bootstrap instead of no token", last)
+	if resumed := strings.Join(h.machine.scripts["ws-1"][before:], "\n"); !strings.Contains(resumed, readies) || strings.Contains(resumed, installs) || !strings.Contains(resumed, configures) {
+		t.Errorf("resume did not check the ready stamp, or reinstalled, or skipped configure: %q", resumed)
 	}
 	if result.Forwards[0].Port == 0 {
 		t.Error("resume lost the forwarded port")
@@ -1047,4 +1069,165 @@ func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testin
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Errorf("create after the revoke: %v", err)
 	}
+}
+
+func TestAClaimInstallsTheToolsWhenTheStampMoved(t *testing.T) {
+	h := newHarness(t, 1, false)
+	spare := h.prepared()
+	h.session.Stamp = strings.Repeat("b", 64)
+	before := len(h.machine.scripts[spare])
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	order := h.machine.order(spare, before, readies, installs, checkout)
+	for i := 1; i < len(order); i++ {
+		if order[i-1] < 0 || order[i] <= order[i-1] {
+			t.Fatalf("the claim ran scripts out of order: %v", order)
+		}
+	}
+	if strings.Contains(strings.Join(h.machine.scripts[spare][before:], "\n"), provisions) {
+		t.Error("a claim provisioned a spare that was already provisioned")
+	}
+	if h.machine.ready[spare] != h.session.Stamp {
+		t.Errorf("the claim left the spare at stamp %q", h.machine.ready[spare])
+	}
+}
+
+func TestAPartialCreateKeepsItsRecordUntilDestroyVerifiesTheMachine(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	h.session.Provider = &createdThenFailed{Provider: h.provider}
+	_, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"})
+	if err == nil || !strings.Contains(err.Error(), "configure-ssh") || !strings.Contains(err.Error(), "run destroy ws-1") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, found := h.record("ws-1"); !found {
+		t.Fatal("the record of a machine that may exist was forgotten")
+	}
+	if resource := h.ledger().Resources["ws-1"]; resource == nil || resource.Destroyed != nil {
+		t.Fatalf("the ledger retired a machine that may be billing: %+v", resource)
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
+		t.Fatal("the created machine was destroyed on an unverified failure")
+	}
+	if len(h.machine.scripts["ws-1"]) != 0 {
+		t.Errorf("the failed create ran %q on a machine it could not confirm", h.machine.scripts["ws-1"])
+	}
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+		t.Error("destroy left the machine")
+	}
+	if resource := h.ledger().Resources["ws-1"]; resource.Destroyed == nil {
+		t.Error("destroy did not retire the ledger entry")
+	}
+	if _, found := h.record("ws-1"); found {
+		t.Error("destroy kept the record")
+	}
+}
+
+type createdThenFailed struct {
+	providers.Provider
+}
+
+func (c *createdThenFailed) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	if _, err := c.Provider.Create(ctx, spec); err != nil {
+		return providers.Machine{}, err
+	}
+	return providers.Machine{}, errors.New("configure-ssh: the provider api timed out")
+}
+
+func TestPrepareKeepsAReservationWhoseCreateOutcomeIsUnknownUntilDrainSettlesIt(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := context.Background()
+	h.session.Provider = &createdThenFailed{Provider: h.provider}
+	if err := h.session.Prepare(ctx); err == nil || !strings.Contains(err.Error(), "reservation is kept") {
+		t.Fatalf("err = %v", err)
+	}
+	spares := h.spares()
+	if len(spares) != 1 {
+		t.Fatalf("spares = %v", spares)
+	}
+	var name string
+	for id, spare := range spares {
+		name = id
+		if spare.State != budget.Preparing {
+			t.Errorf("spare = %+v", spare)
+		}
+	}
+	if _, err := h.fake.Get(ctx, name); err != nil {
+		t.Fatal("the machine that may exist was destroyed on an unverified failure")
+	}
+	if err := h.session.Pool.Ledger.UpdateSpares(func(_ *budget.Ledger, spares budget.Spares) error {
+		spares[name].Preparer = 1 << 30
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.session.Provider = h.provider
+	if err := h.session.Drain(ctx, false); err != nil {
+		t.Fatalf("Drain = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, name); !errors.Is(err, providers.ErrNotFound) {
+		t.Error("drain left the machine")
+	}
+	if len(h.spares()) != 0 || h.ledger().Resources[name].Destroyed == nil {
+		t.Error("drain did not retire the reservation")
+	}
+}
+
+func TestConnectWritesTheSSHFragmentOrcaResolvesByTheWorkspaceName(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	knownHosts := filepath.Join(t.TempDir(), "ws-1.known_hosts")
+	identityFile := filepath.Join(t.TempDir(), "ws-1")
+	h.session.Provider = &pinnedSSH{Provider: h.provider, knownHosts: knownHosts, identity: identityFile}
+	result, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment := h.session.State.SSH("ws-1")
+	if result.SSH.Config != fragment || !strings.HasPrefix(fragment, filepath.Join(string(h.session.State), "ssh")) || !strings.HasSuffix(fragment, "ws-1.ssh") {
+		t.Errorf("result.SSH.Config = %q, fragment %q", result.SSH.Config, fragment)
+	}
+	raw, err := os.ReadFile(fragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(raw), "Host ws-1\n") {
+		t.Errorf("fragment = %q", raw)
+	}
+	resolved, err := exec.Command("ssh", "-G", "-F", fragment, "ws-1").Output()
+	if err != nil {
+		t.Fatalf("ssh -G: %v", err)
+	}
+	for _, want := range []string{"hostname ws-1.internal", "hostkeyalias ws-1.sprite.cc-remote", "userknownhostsfile " + knownHosts, "identityfile " + identityFile, "stricthostkeychecking true", "proxycommand cc-remote proxy -- ws-1", "port 2222", "user sprite"} {
+		if !strings.Contains(strings.ToLower(string(resolved)), strings.ToLower(want)) {
+			t.Errorf("ssh -G did not resolve %q from the fragment:\n%s", want, resolved)
+		}
+	}
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(fragment); !errors.Is(err, os.ErrNotExist) {
+		t.Error("destroy left the ssh fragment behind")
+	}
+}
+
+type pinnedSSH struct {
+	providers.Provider
+	knownHosts string
+	identity   string
+}
+
+func (p *pinnedSSH) SSHTarget(_ context.Context, id string) (providers.Target, error) {
+	return providers.Target{
+		Host:          id + ".internal",
+		Port:          2222,
+		User:          "sprite",
+		IdentityFile:  p.identity,
+		ProxyCommand:  "cc-remote proxy -- " + id,
+		HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyPinned, Alias: id + ".sprite.cc-remote", KnownHostsFile: p.knownHosts},
+	}, nil
 }

@@ -105,7 +105,7 @@ func TestOrcaResultIsTheSchemaTwoProvisionedRootShape(t *testing.T) {
 	if shape["schemaVersion"] != float64(2) || shape["checkoutMode"] != "provisioned-root" || connection["type"] != "ssh" || connection["projectRoot"] != "/home/sprite/app" {
 		t.Errorf("shape = %s", out.String())
 	}
-	if target["label"] != "orca-x-1" || target["host"] != "orca-x-1.sprite" || target["port"] != float64(22) || target["username"] != "sprite" || target["identityFile"] != "/k" || target["proxyCommand"] != "cc-remote proxy orca-x-1" {
+	if target["label"] != "orca-x-1" || target["host"] != "orca-x-1" || target["port"] != float64(22) || target["username"] != "sprite" || target["identityFile"] != "/k" || target["proxyCommand"] != "cc-remote proxy orca-x-1" {
 		t.Errorf("target = %v", target)
 	}
 	if forwards["localPort"] != float64(40001) || forwards["remotePort"] != float64(40001) || forwards["remoteHost"] != "localhost" || forwards["label"] != "web" {

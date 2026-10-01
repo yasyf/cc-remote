@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"net"
+	"strings"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/providers"
@@ -49,6 +50,16 @@ type SSH struct {
 	HostKeyAlias   string   `json:"hostKeyAlias,omitempty"`
 	KnownHostsFile string   `json:"knownHostsFile,omitempty"`
 	Options        []string `json:"options"`
+	Config         string   `json:"config"`
+}
+
+func SSHFragment(name string, target providers.Target) []byte {
+	var fragment strings.Builder
+	fragment.WriteString("Host " + name + "\n")
+	for _, option := range target.SSHOptions() {
+		fragment.WriteString("  " + strings.Replace(option, "=", " ", 1) + "\n")
+	}
+	return []byte(fragment.String())
 }
 
 type Result struct {

@@ -42,7 +42,7 @@ type Config struct {
 	Roots      map[string]string         `yaml:"workspace_dirs"`
 	Profiles   map[string]Profile        `yaml:"profiles"`
 	Spares     map[string]map[string]int `yaml:"spares"`
-	Bootstrap  string                    `yaml:"bootstrap"`
+	Inventory  string                    `yaml:"inventory"`
 	Forwards   []Forward                 `yaml:"forwards"`
 	Budget     Budget                    `yaml:"budget"`
 	Tailnet    *Tailnet                  `yaml:"tailnet"`
@@ -178,6 +178,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.Profiles) == 0 {
 		return errors.New("profiles lists no profile")
+	}
+	if c.Inventory == "" {
+		return errors.New("inventory names the tool inventory every machine is provisioned from, relative to this file")
 	}
 	if _, ok := c.Providers[c.Provider]; !ok {
 		return fmt.Errorf("provider %q is not under providers", c.Provider)

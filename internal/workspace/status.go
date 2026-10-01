@@ -156,10 +156,6 @@ func (s *Session) Verify(ctx context.Context) map[string]string {
 	if s.Enroller != nil {
 		report("tailnet", s.verifyTailnet(ctx))
 	}
-	if s.Config.Bootstrap != "" {
-		_, err := os.Stat(s.Config.ScriptPath(s.Config.Bootstrap))
-		report("bootstrap", err)
-	}
 	report("ssh", lookPath("ssh"))
 	return checks
 }

@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/identity"
+	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/tailnet"
@@ -42,9 +44,12 @@ type Session struct {
 	Token    func(context.Context) (string, error)
 	Now      func() time.Time
 	Refill   func() error
+	Scripts  images.Scripts
+	Stamp    string
 
 	profile config.Profile
 	labels  []LabelledEnv
+	inPlace bool
 }
 
 func Open(cfg *config.Config, provider providers.Provider, kind, profile string, platform Platform) (*Session, error) {
@@ -57,7 +62,14 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if err != nil {
 		return nil, err
 	}
-	pool, err := NewPool(cfg, kind, profile, budget.Rate(rate))
+	scripts, stamp, err := render(cfg, profile, machine.Image != "")
+	if err != nil {
+		return nil, err
+	}
+	if err := coverEnv(cfg.Forwards, scripts.Env); err != nil {
+		return nil, err
+	}
+	pool, err := NewPool(cfg, kind, profile, budget.Rate(rate), stamp)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +84,10 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		Log:      slog.Default(),
 		Stderr:   os.Stderr,
 		Now:      time.Now,
+		Scripts:  scripts,
+		Stamp:    stamp,
 		profile:  spec,
+		inPlace:  machine.Image == "",
 	}
 	s.Token = s.gitToken
 	for _, forward := range cfg.Forwards {
@@ -87,6 +102,38 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		}
 	}
 	return s, nil
+}
+
+func render(cfg *config.Config, profile string, imaged bool) (images.Scripts, string, error) {
+	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
+	if err != nil {
+		return images.Scripts{}, "", err
+	}
+	scripts, err := images.Render(inventory, profile)
+	if err != nil {
+		return images.Scripts{}, "", err
+	}
+	var image *images.Context
+	if imaged {
+		rendered, err := images.RenderImage(inventory)
+		if err != nil {
+			return images.Scripts{}, "", err
+		}
+		image = &rendered
+	}
+	return scripts, images.Stamp(scripts, image), nil
+}
+
+func coverEnv(forwards []config.Forward, declared []string) error {
+	names := make([]string, 0, len(forwards))
+	for _, forward := range forwards {
+		names = append(names, forward.Env)
+	}
+	slices.Sort(names)
+	if want := slices.Sorted(slices.Values(declared)); !slices.Equal(names, want) {
+		return fmt.Errorf("forwards export %v but the inventory's configure.env declares %v; the two must name the same variables", names, want)
+	}
+	return nil
 }
 
 func (s *Session) tailnetClient(ctx context.Context) (*tailnet.Client, error) {
@@ -136,7 +183,11 @@ func (r runner) Run(ctx context.Context, script string, stdin io.Reader) ([]byte
 }
 
 func (s *Session) run(ctx context.Context, machine, script string, stdin io.Reader) ([]byte, error) {
-	result, err := s.Provider.Exec(ctx, machine, []string{"sh", "-c", script}, stdin)
+	return s.execute(ctx, machine, []string{"sh", "-c", script}, stdin)
+}
+
+func (s *Session) execute(ctx context.Context, machine string, argv []string, stdin io.Reader) ([]byte, error) {
+	result, err := s.Provider.Exec(ctx, machine, argv, stdin)
 	if err != nil {
 		return nil, err
 	}
@@ -144,9 +195,16 @@ func (s *Session) run(ctx context.Context, machine, script string, stdin io.Read
 		return nil, err
 	}
 	if result.ExitCode != 0 {
-		return result.Stdout, fmt.Errorf("a script on %s exited %d", machine, result.ExitCode)
+		return result.Stdout, fmt.Errorf("%s on %s exited %d: %s", argv[0], machine, result.ExitCode, bytes.TrimSpace(result.Stderr))
 	}
 	return result.Stdout, nil
+}
+
+func (s *Session) exec(machine string) images.Exec {
+	return func(ctx context.Context, argv []string, stdin io.Reader) error {
+		_, err := s.execute(ctx, machine, argv, stdin)
+		return err
+	}
 }
 
 func (s *Session) verifyTailnet(ctx context.Context) error {
@@ -180,7 +238,7 @@ func (s *Session) save(record *Record) error {
 }
 
 func (s *Session) forget(name string) error {
-	return state.Remove(s.State.Workspace(name))
+	return errors.Join(state.Remove(s.State.Workspace(name)), state.Remove(s.State.SSH(name)))
 }
 
 func (s *Session) Create(ctx context.Context, name string, source Source) (*Result, error) {
@@ -226,7 +284,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 	if !record.Claimed {
 		s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
 		if _, err := s.Provider.Create(ctx, s.spec(machine, map[string]string{LabelWorkspace: name})); err != nil {
-			return nil, errors.Join(err, s.Pool.Retire(machine, s.Now()), s.forget(name))
+			return nil, s.unmade(name, machine, err)
 		}
 		s.Log.Info("created", "machine", machine)
 	}
@@ -241,6 +299,13 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 	}
 	return result, nil
+}
+
+func (s *Session) unmade(name, machine string, cause error) error {
+	if errors.Is(cause, providers.ErrExists) {
+		return errors.Join(cause, s.Pool.Retire(machine, s.Now()), s.forget(name))
+	}
+	return fmt.Errorf("%w; whether %s came to exist at the provider is unknown, so its record and ledger entry are kept: run destroy %s once the provider answers", cause, machine, name)
 }
 
 func (s *Session) reconcile(name string, recorded *Record) error {
@@ -291,8 +356,13 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 			return nil, err
 		}
 		s.Log.Info("renewed its identity", "machine", machine)
+		if err := s.readyTools(ctx, machine); err != nil {
+			return nil, err
+		}
+	} else if err := s.installTools(ctx, machine); err != nil {
+		return nil, err
 	}
-	if err := s.install(ctx, record); err != nil {
+	if err := s.checkout(ctx, record); err != nil {
 		return nil, err
 	}
 	if record.Claimed {
@@ -300,13 +370,51 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 			return nil, err
 		}
 	}
+	if err := s.configure(ctx, record); err != nil {
+		return nil, err
+	}
 	if err := s.enroll(ctx, held, record); err != nil {
 		return nil, err
 	}
 	return s.connect(ctx, record)
 }
 
-func (s *Session) install(ctx context.Context, record *Record) error {
+func (s *Session) installTools(ctx context.Context, machine string) error {
+	if s.inPlace {
+		if err := s.Scripts.ProvisionInPlace(ctx, s.exec(machine)); err != nil {
+			return err
+		}
+		s.Log.Info("provisioned", "machine", machine)
+	}
+	return s.installPlugins(ctx, machine)
+}
+
+func (s *Session) installPlugins(ctx context.Context, machine string) error {
+	token, err := s.checkoutToken(ctx)
+	if err != nil {
+		return err
+	}
+	run := s.exec(machine)
+	if err := s.Scripts.StagePlugins(ctx, run); err != nil {
+		return err
+	}
+	if err := s.Scripts.Install(ctx, run, token, s.Stamp); err != nil {
+		return err
+	}
+	s.Log.Info("installed the tools", "machine", machine, "stamp", s.Stamp[:12])
+	return nil
+}
+
+func (s *Session) readyTools(ctx context.Context, machine string) error {
+	if err := s.Scripts.Ready(ctx, s.exec(machine), s.Stamp); err != nil {
+		s.Log.Info("the tools are not at the current stamp; installing them", "machine", machine, "stamp", s.Stamp[:12], "err", err)
+		return s.installPlugins(ctx, machine)
+	}
+	s.Log.Info("the tools are ready at the current stamp", "machine", machine, "stamp", s.Stamp[:12])
+	return nil
+}
+
+func (s *Session) checkout(ctx context.Context, record *Record) error {
 	machine, root := record.Machine, s.ProjectRoot()
 	if err := record.Source.Validate(); err != nil {
 		return err
@@ -319,18 +427,30 @@ func (s *Session) install(ctx context.Context, record *Record) error {
 		return err
 	}
 	s.Log.Info("checked out", "machine", machine, "ref", record.Source.Ref, "head", record.Source.Head)
+	return s.prepare(ctx, record)
+}
+
+func (s *Session) prepare(ctx context.Context, record *Record) error {
 	env, err := s.forwards(record)
 	if err != nil {
 		return err
 	}
-	if _, err := s.run(ctx, machine, RefreshScript(root, env, s.profile.Prepare), nil); err != nil {
+	if _, err := s.run(ctx, record.Machine, RefreshScript(s.ProjectRoot(), ExportEnv(env), s.profile.Prepare), nil); err != nil {
 		return err
 	}
-	s.Log.Info("prepared", "machine", machine)
-	if err := s.bootstrap(ctx, machine, env, token); err != nil {
+	s.Log.Info("prepared", "machine", record.Machine)
+	return nil
+}
+
+func (s *Session) configure(ctx context.Context, record *Record) error {
+	env, err := s.forwards(record)
+	if err != nil {
 		return err
 	}
-	s.Log.Info("bootstrapped", "machine", machine)
+	if err := s.Scripts.Configure(ctx, s.exec(record.Machine), env); err != nil {
+		return err
+	}
+	s.Log.Info("configured", "machine", record.Machine)
 	return nil
 }
 
@@ -341,28 +461,13 @@ func (s *Session) checkoutToken(ctx context.Context) (string, error) {
 	return s.Token(ctx)
 }
 
-func (s *Session) forwards(record *Record) ([]string, error) {
+func (s *Session) forwards(record *Record) (map[string]string, error) {
 	forwards, err := AllocateForwards(s.labels, record.Forwards)
 	if err != nil {
 		return nil, err
 	}
 	record.Forwards = forwards
 	return ForwardEnv(forwards, s.labels), nil
-}
-
-func (s *Session) bootstrap(ctx context.Context, machine string, env []string, token string) error {
-	if s.Config.Bootstrap == "" {
-		return nil
-	}
-	script, err := os.ReadFile(s.Config.ScriptPath(s.Config.Bootstrap))
-	if err != nil {
-		return err
-	}
-	if _, err := s.run(ctx, machine, WriteBootstrapScript, bytes.NewReader(script)); err != nil {
-		return err
-	}
-	_, err = s.run(ctx, machine, BootstrapScript(s.ProjectRoot(), env), strings.NewReader(token+"\n"))
-	return err
 }
 
 func (s *Session) warm(ctx context.Context, machine string) error {
@@ -387,6 +492,12 @@ func (s *Session) connect(ctx context.Context, record *Record) (*Result, error) 
 	if err != nil {
 		return nil, err
 	}
+	fragment := s.State.SSH(record.Name)
+	if err := state.Write(fragment, SSHFragment(record.Name, target)); err != nil {
+		return nil, err
+	}
+	ssh := sshFromTarget(target)
+	ssh.Config = fragment
 	return &Result{
 		SchemaVersion: SchemaVersion,
 		Name:          record.Name,
@@ -395,7 +506,7 @@ func (s *Session) connect(ctx context.Context, record *Record) (*Result, error) 
 		Source:        record.Source,
 		Machine:       record.Machine,
 		ProjectRoot:   s.ProjectRoot(),
-		SSH:           sshFromTarget(target),
+		SSH:           ssh,
 		Forwards:      record.Forwards,
 		Tailnet:       record.Tailnet,
 	}, nil
@@ -481,14 +592,13 @@ func (s *Session) reopen(ctx context.Context, record *Record) error {
 	if err := s.Provider.Wake(ctx, machine); err != nil {
 		return err
 	}
-	env, err := s.forwards(record)
-	if err != nil {
+	if err := s.readyTools(ctx, machine); err != nil {
 		return err
 	}
-	if _, err := s.run(ctx, machine, RefreshScript(s.ProjectRoot(), env, s.profile.Prepare), nil); err != nil {
+	if err := s.prepare(ctx, record); err != nil {
 		return err
 	}
-	return s.bootstrap(ctx, machine, env, "")
+	return s.configure(ctx, record)
 }
 
 func (s *Session) Suspend(ctx context.Context, name string) error {
@@ -579,7 +689,10 @@ func (s *Session) Prepare(ctx context.Context) error {
 		}
 		s.Log.Info("preparing a spare", "machine", name, "provider", s.Kind, "profile", s.Profile)
 		if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelSpare: s.Pool.Fingerprint})); err != nil {
-			return errors.Join(err, s.Pool.Retire(name, s.Now()))
+			if errors.Is(err, providers.ErrExists) {
+				return errors.Join(err, s.Pool.Retire(name, s.Now()))
+			}
+			return fmt.Errorf("%w; whether spare %s came to exist at the provider is unknown, so its reservation is kept for the next drain to settle", err, name)
 		}
 		s.Log.Info("created", "machine", name)
 		if err := s.prepareSpare(ctx, name); err != nil {
@@ -594,7 +707,10 @@ func (s *Session) Prepare(ctx context.Context) error {
 }
 
 func (s *Session) prepareSpare(ctx context.Context, name string) error {
-	if err := s.install(ctx, &Record{Machine: name, Source: Source{Ref: s.Config.Ref}}); err != nil {
+	if err := s.installTools(ctx, name); err != nil {
+		return err
+	}
+	if err := s.checkout(ctx, &Record{Machine: name, Source: Source{Ref: s.Config.Ref}}); err != nil {
 		return err
 	}
 	if err := s.warm(ctx, name); err != nil {

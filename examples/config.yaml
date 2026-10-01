@@ -23,15 +23,12 @@ workspace_dirs:
 profiles:
   lean:
     checkout: shallow
-    prepare:
-      - ./tools/install-agent-tools.sh
     machine:
       sprites: {}
       namespace: { image: <image-name-or-digest>, size: l }
   full:
     checkout: full
     prepare:
-      - ./tools/install-agent-tools.sh
       - ./tools/bootstrap-project.sh
     warm:
       - ./tools/install-project-deps.sh
@@ -45,11 +42,10 @@ spares:
   sprites: { lean: 1 }
   namespace: { full: 0 }
 
-bootstrap: ./tools/install-plugins.sh
+inventory: ./inventory.yaml
 
 forwards:
-  - { label: cc-present, env: CC_PRESENT_PORT }
-  - { label: cc-review, env: CC_REVIEW_PORT }
+  - { label: example, env: EXAMPLE_PORT }
 
 budget:
   ledger: default

@@ -41,6 +41,10 @@ func (d Dir) Workspace(name string) string {
 	return filepath.Join(string(d), "workspaces", name+".json")
 }
 func (d Dir) Tailnet() string { return filepath.Join(string(d), "tailnet") }
+func (d Dir) SSH(name string) string {
+	return filepath.Join(string(d), "ssh", name+".ssh")
+}
+func (d Dir) SSHInclude() string { return filepath.Join(string(d), "ssh", "*.ssh") }
 func (d Dir) Log(kind, name string) string {
 	return filepath.Join(string(d), "logs", kind, name+".log")
 }
@@ -84,6 +88,10 @@ func Save(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	return Write(path, append(raw, '\n'))
+}
+
+func Write(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -92,7 +100,7 @@ func Save(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(append(raw, '\n')); err != nil {
+	if _, err := file.Write(data); err != nil {
 		return errors.Join(err, file.Close())
 	}
 	if err := file.Sync(); err != nil {
@@ -122,7 +130,10 @@ func Load(path string, into any) (bool, error) {
 }
 
 func Remove(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
 	return syncDir(filepath.Dir(path))

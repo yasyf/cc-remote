@@ -251,7 +251,7 @@ func TestDrainRemovesStaleSparesAndCrashedPreparations(t *testing.T) {
 func poolConfig(t *testing.T) *config.Config {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "bootstrap.sh"), []byte("install plugins\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte("version: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Parse([]byte(`
@@ -271,7 +271,7 @@ profiles:
       fake: { size: l }
 spares:
   fake: { lean: 1 }
-bootstrap: bootstrap.sh
+inventory: inventory.yaml
 budget:
   cap_usd: 100
   reserve_usd: 10
@@ -288,7 +288,8 @@ budget:
 func TestTheFingerprintFollowsWhatASpareHolds(t *testing.T) {
 	cfg := poolConfig(t)
 	rate := budget.Rate{HourlyUSD: 1}
-	base, err := NewPool(cfg, "fake", "lean", rate)
+	stamp := strings.Repeat("a", 64)
+	base, err := NewPool(cfg, "fake", "lean", rate, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestTheFingerprintFollowsWhatASpareHolds(t *testing.T) {
 	}
 	fingerprint := func() string {
 		t.Helper()
-		pool, err := NewPool(cfg, "fake", "lean", rate)
+		pool, err := NewPool(cfg, "fake", "lean", rate, stamp)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,12 +308,10 @@ func TestTheFingerprintFollowsWhatASpareHolds(t *testing.T) {
 	if fingerprint() != base.Fingerprint {
 		t.Error("resizing the pool invalidated its spares")
 	}
-	if err := os.WriteFile(cfg.ScriptPath("bootstrap.sh"), []byte("install newer plugins\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	stamp = strings.Repeat("b", 64)
 	bumped := fingerprint()
 	if bumped == base.Fingerprint {
-		t.Error("a new bootstrap kept the old fingerprint")
+		t.Error("a new tool stamp kept the old fingerprint")
 	}
 	profile := cfg.Profiles["lean"]
 	profile.Warm = []string{"yarn install", "go mod download"}
@@ -336,10 +335,15 @@ func TestTheFingerprintFollowsWhatASpareHolds(t *testing.T) {
 	}
 }
 
-func TestAConfigWithoutABootstrapStillPools(t *testing.T) {
-	cfg := poolConfig(t)
-	cfg.Bootstrap = ""
-	if _, err := NewPool(cfg, "fake", "lean", budget.Rate{}); err != nil {
-		t.Fatal(err)
+func TestSpareNamesStayWithinTheLimitForTheLongestProfile(t *testing.T) {
+	for _, profile := range []string{"lean", "a-profile-of-twenty0", "trailing-dash-at-16-x"} {
+		pool := Pool{Profile: profile, Fingerprint: strings.Repeat("f", 64)}
+		name := pool.SpareName()
+		if err := state.ValidateName(name); err != nil {
+			t.Errorf("%s: %v", profile, err)
+		}
+		if !strings.HasSuffix(name[:len(name)-9], "-"+pool.Fingerprint[:12]) || len(name[len(name)-8:]) != 8 || !strings.HasPrefix(name, "cc-remote-spare-"+profile[:min(len(profile), 4)]) {
+			t.Errorf("%s: spare name %q lost its fingerprint or random suffix", profile, name)
+		}
 	}
 }
