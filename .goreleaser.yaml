@@ -1,0 +1,78 @@
+# goreleaser v2 — the canonical base config (pure Go, CGO_ENABLED=0). Layer
+# recipes on top (zig CGO, build tags, universal binaries, embed-prebuild) per
+# reference/go-ci-and-release.md. Validate locally: goreleaser release --snapshot --clean
+version: 2
+
+project_name: cc-remote
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cc-remote
+    main: ./cmd/cc-remote
+    binary: cc-remote
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/yasyf/cc-remote/internal/version.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: cc-remote
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+# Sign + notarize every darwin binary with our Apple Developer ID. The shared release
+# workflow rejects missing MACOS_* secrets before goreleaser runs, and this unconditional
+# setting keeps direct goreleaser releases fail-closed too.
+# goreleaser's built-in quill signer is pure Go and runs on the linux runner (no macOS runner).
+# REQUIRES a full-chain p12 (leaf + Developer ID intermediate + Apple Root CA): without the
+# root, quill emits an unsatisfiable `certificate root[…6.2.6…]` designated requirement that
+# macOS SIGKILLs at exec. Bare-binary only (no .app bundle). See reference/go-ci-and-release.md.
+notarize:
+  macos:
+    - enabled: true
+      ids:
+        - cc-remote
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+checksum:
+  name_template: checksums.txt
+
+# Default distribution: a native Homebrew cask rendered by goreleaser, verified against its
+# artifact manifest, and published by the shared release workflow. A cask ships the prebuilt
+# binary as-is. Switch to a
+# formula (native `brews:`, or a rendered `.rb` via the render-formula action) only when you
+# need `brew services`, a runtime `depends_on`, or conditional install — see
+# reference/go-ci-and-release.md § Formula recipe.
+homebrew_casks:
+  - name: cc-remote
+    binaries:
+      - cc-remote
+    repository:
+      owner: yasyf
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/yasyf/cc-remote
+    description: Remote environments for coding agents, with pluggable frontends and backends.
+
+release:
+  prerelease: auto
+
+changelog:
+  use: github
