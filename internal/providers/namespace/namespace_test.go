@@ -301,8 +301,8 @@ func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
 			p, fake := newProvider(t)
 			fail(fake)
 			_, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"}))
-			if err == nil || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "rpc error") {
-				t.Fatalf("Create = %v, want the CLI failure without ErrExists", err)
+			if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "rpc error") {
+				t.Fatalf("Create = %v, want ErrAmbiguous carrying the CLI failure, never ErrExists", err)
 			}
 			machine, err := p.Get(t.Context(), "alpha")
 			if err != nil || len(machine.Labels) != 0 {

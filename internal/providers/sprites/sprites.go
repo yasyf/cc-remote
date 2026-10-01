@@ -126,6 +126,9 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		if providers.IsConflict(err) {
 			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
+		if _, found := p.Get(ctx, spec.Name); found == nil {
+			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
+		}
 		return providers.Machine{}, fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)
 	}
 	if err := p.records().Save(spec.Name, spec.Labels); err != nil {

@@ -147,10 +147,13 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		if providers.IsConflict(err) {
 			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
+		if _, found := p.Get(ctx, spec.Name); found == nil {
+			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
+		}
 		return providers.Machine{}, fmt.Errorf("devbox %s: whether the create allocated it is unknown: %w", spec.Name, err)
 	}
 	if _, err := p.devbox(ctx, "configure-ssh", spec.Name); err != nil {
-		return providers.Machine{}, fmt.Errorf("devbox %s was created but its ssh access was not configured: %w", spec.Name, err)
+		return providers.Machine{}, fmt.Errorf("devbox %s: %w: ssh access was not configured: %w", spec.Name, providers.ErrAmbiguous, err)
 	}
 	if err := p.records().Save(spec.Name, spec.Labels); err != nil {
 		return providers.Machine{}, err

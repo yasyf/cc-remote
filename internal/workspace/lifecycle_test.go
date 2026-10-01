@@ -43,7 +43,7 @@ const (
 	installs   = "plugins.sh install "
 	readies    = "plugins.sh ready "
 	configures = "plugins.sh configure"
-	inventory  = "version: 1\nconfigure:\n  env: [WEB_PORT]\n"
+	inventory  = "version: 1\nsystem:\n  - { name: jq, version: 1.8.2, url: https://example.com/jq-1.8.2, sha256: " + sha + ", format: binary }\nconfigure:\n  env: [WEB_PORT]\n"
 	imaged     = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
 	sha        = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
 )
@@ -1138,22 +1138,23 @@ func TestResumeProvisionsInPlaceWhenTheInventoryDrifted(t *testing.T) {
 	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	drifted := h.drift("version: 1\napt:\n  install: [ripgrep]\nprepare: [\"echo drifted\"]\nconfigure:\n  env: [WEB_PORT]\n")
+	drifted := h.drift(strings.NewReplacer("1.8.2", "1.8.3", sha, strings.Repeat("ab", 32)).Replace(inventory))
 	before := len(h.machine.scripts["ws-1"])
 	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", before, readies, provisions, installs, prepares, configures)
+	order := h.machine.order("ws-1", before, readies, provisions, "plugins.sh.tmp", installs, prepares, configures)
 	for i := 1; i < len(order); i++ {
 		if order[i-1] < 0 || order[i] <= order[i-1] {
 			t.Fatalf("the resume ran scripts out of order: %v", order)
 		}
 	}
-	if h.machine.ready["ws-1"] != drifted.Stamp || !strings.Contains(h.machine.stdins["ws-1"][order[1]], "ripgrep") {
-		t.Errorf("the resume left stamp %q and provisioned with %q", h.machine.ready["ws-1"], h.machine.stdins["ws-1"][order[1]])
+	provision, plugins := h.machine.stdins["ws-1"][order[1]], h.machine.stdins["ws-1"][order[2]]
+	if !strings.Contains(provision, "jq-1.8.3") || strings.Contains(provision, "1.8.2") || !strings.Contains(plugins, "jq-1.8.3") || strings.Contains(plugins, "1.8.2") {
+		t.Errorf("the resume provisioned with %q and staged %q; want only the new pin", provision, plugins)
 	}
-	if h.machine.ran("ws-1", checkout) != 1 {
-		t.Error("the resume checked out again")
+	if h.machine.ready["ws-1"] != drifted.Stamp || h.machine.ran("ws-1", checkout) != 1 {
+		t.Errorf("the resume left stamp %q, or checked out again", h.machine.ready["ws-1"])
 	}
 }
 
@@ -1220,10 +1221,13 @@ func TestDestroyLeavesAMachineMadeBeforeTheAttemptAndReleasesItsName(t *testing.
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
 		t.Fatalf("err = %v", err)
 	}
-	if _, found := h.record("ws-1"); !found || !h.ledger().Running("ws-1") {
-		t.Fatal("an ambiguous create dropped its accounting")
+	if record, found := h.record("ws-1"); !found || !record.Unverified || !h.ledger().Running("ws-1") {
+		t.Fatalf("an ambiguous create dropped its accounting or left the record verified: %+v, %v", record, found)
 	}
 	h.session.Provider = h.provider
+	if _, err := h.session.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "made before the create") {
+		t.Fatalf("Resume of a name whose machine predates it = %v", err)
+	}
 	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
 		t.Fatalf("Destroy = %v", err)
 	}
@@ -1250,10 +1254,16 @@ func TestDestroyRemovesAnUnlabelledMachineMadeDuringTheAttempt(t *testing.T) {
 	h := newHarness(t, 0, false)
 	ctx := context.Background()
 	h.session.Provider = &createdUnlabelledThenFailed{Provider: h.provider}
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); !errors.Is(err, providers.ErrAmbiguous) || !strings.Contains(err.Error(), "run destroy ws-1") {
 		t.Fatalf("err = %v", err)
 	}
 	h.session.Provider = h.provider
+	if _, err := h.session.Resume(ctx, "ws-1"); err != nil {
+		t.Fatalf("Resume of the machine the attempt allocated = %v", err)
+	}
+	if record, _ := h.record("ws-1"); record.Unverified {
+		t.Error("a resume that verified the machine left the record unverified")
+	}
 	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
 		t.Fatalf("Destroy = %v", err)
 	}
@@ -1273,7 +1283,30 @@ func (c *createdUnlabelledThenFailed) Create(ctx context.Context, spec providers
 	if _, err := c.Provider.Create(ctx, providers.Spec{Name: spec.Name}); err != nil {
 		return providers.Machine{}, err
 	}
-	return providers.Machine{}, errors.New("the provider api timed out after allocating")
+	return providers.Machine{}, fmt.Errorf("%w: the provider api timed out after allocating", providers.ErrAmbiguous)
+}
+
+func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	h.session.Provider = &destroyIgnored{Provider: h.provider}
+	if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "still at the provider") {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, found := h.record("ws-1"); !found || !h.ledger().Running("ws-1") {
+		t.Error("a destroy that could not prove absence released the name")
+	}
+}
+
+type destroyIgnored struct {
+	providers.Provider
+}
+
+func (d *destroyIgnored) Destroy(context.Context, string) error {
+	return nil
 }
 
 func TestAPartialCreateKeepsItsRecordUntilDestroyVerifiesTheMachine(t *testing.T) {

@@ -296,7 +296,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 	if !record.Claimed {
 		s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
 		if _, err := s.Provider.Create(ctx, s.spec(machine, map[string]string{LabelWorkspace: name})); err != nil {
-			return nil, s.unmade(name, machine, err)
+			return nil, s.unmade(record, err)
 		}
 		s.Log.Info("created", "machine", machine)
 	}
@@ -313,11 +313,15 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 	return result, nil
 }
 
-func (s *Session) unmade(name, machine string, cause error) error {
+func (s *Session) unmade(record *Record, cause error) error {
 	if errors.Is(cause, providers.ErrExists) {
-		return errors.Join(cause, s.Pool.Retire(machine, s.Now()), s.forget(name))
+		return errors.Join(cause, s.Pool.Retire(record.Machine, s.Now()), s.forget(record.Name))
 	}
-	return fmt.Errorf("%w; whether %s came to exist at the provider is unknown, so its record and ledger entry are kept: run destroy %s once the provider answers", cause, machine, name)
+	record.Unverified = true
+	if err := s.save(record); err != nil {
+		return errors.Join(cause, err)
+	}
+	return fmt.Errorf("%w; whether %s came to exist at the provider is unverified, so its record and ledger entry are kept: run destroy %s once the provider answers", cause, record.Machine, record.Name)
 }
 
 func (s *Session) reconcile(name string, recorded *Record) error {
@@ -561,6 +565,9 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 		if err := s.Provider.Destroy(ctx, machine); err != nil {
 			return fmt.Errorf("removing %s failed, so check the provider for it: %w", machine, err)
 		}
+		if _, err := s.Provider.Get(ctx, machine); !errors.Is(err, providers.ErrNotFound) {
+			return fmt.Errorf("%s is still at the provider after its destroy, so check the provider for it: %w", machine, err)
+		}
 	}
 	return s.Pool.Retire(machine, s.Now())
 }
@@ -596,10 +603,31 @@ func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
 	if err := s.verifyTailnet(ctx); err != nil {
 		return nil, err
 	}
+	if record.Unverified {
+		if err := s.verifyMade(ctx, record); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.Pool.Start(record.Machine, s.Now()); err != nil {
 		return nil, err
 	}
 	return s.restore(ctx, held, record)
+}
+
+func (s *Session) verifyMade(ctx context.Context, record *Record) error {
+	found, err := s.Provider.Get(ctx, record.Machine)
+	if err != nil {
+		return fmt.Errorf("%s was recorded by a create whose outcome was unverified, and the provider does not answer for it now: %w", record.Name, err)
+	}
+	ours, err := s.made(found, record.Name)
+	if err != nil {
+		return err
+	}
+	if !ours {
+		return fmt.Errorf("%s exists at the provider but was made before the create that recorded %s (labels %v, created %s), so run destroy %s to release the name and leave that machine alone", record.Machine, record.Name, found.Labels, found.CreatedAt.Format(time.RFC3339), record.Name)
+	}
+	record.Unverified = false
+	return nil
 }
 
 func (s *Session) restore(ctx context.Context, held *state.Held, record *Record) (*Result, error) {

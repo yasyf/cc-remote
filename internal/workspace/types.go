@@ -28,19 +28,20 @@ type Platform struct {
 }
 
 type Record struct {
-	Name      string        `json:"name"`
-	Provider  string        `json:"provider"`
-	Profile   string        `json:"profile"`
-	Source    Source        `json:"source"`
-	Machine   string        `json:"machine"`
-	Image     string        `json:"image,omitempty"`
-	ImageSpec string        `json:"imageSpec,omitempty"`
-	Claimed   bool          `json:"claimed,omitempty"`
-	Ready     bool          `json:"ready,omitempty"`
-	CreatedAt time.Time     `json:"createdAt"`
-	UpdatedAt time.Time     `json:"updatedAt"`
-	Forwards  []Forward     `json:"forwards,omitempty"`
-	Tailnet   *tailnet.Node `json:"tailnet,omitempty"`
+	Name       string        `json:"name"`
+	Provider   string        `json:"provider"`
+	Profile    string        `json:"profile"`
+	Source     Source        `json:"source"`
+	Machine    string        `json:"machine"`
+	Image      string        `json:"image,omitempty"`
+	ImageSpec  string        `json:"imageSpec,omitempty"`
+	Claimed    bool          `json:"claimed,omitempty"`
+	Ready      bool          `json:"ready,omitempty"`
+	Unverified bool          `json:"unverified,omitempty"`
+	CreatedAt  time.Time     `json:"createdAt"`
+	UpdatedAt  time.Time     `json:"updatedAt"`
+	Forwards   []Forward     `json:"forwards,omitempty"`
+	Tailnet    *tailnet.Node `json:"tailnet,omitempty"`
 }
 
 type SSH struct {
