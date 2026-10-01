@@ -1,6 +1,6 @@
-# cc-remote
+# ![cc-remote](docs/assets/readme-banner.webp)
 
-A Go CLI for remote agent workspaces, in early development.
+Remote agent workspaces, ready with your tools.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/yasyf/cc-remote/ci.yml?branch=main&label=ci)](https://github.com/yasyf/cc-remote/actions/workflows/ci.yml)
 [![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm--Noncommercial--1.0.0-blue.svg)](https://github.com/yasyf/cc-remote/blob/main/LICENSE)
@@ -12,7 +12,10 @@ contain agent tools and plugins plus a shallow checkout of the requested ref,
 without project dependency installation or Tilt. A full-stack workspace on
 Namespace over SSH will require opt-in config.
 
-Status: early development; only `cc-remote version` exists. See [docs/architecture.md](docs/architecture.md) for the planned packages.
+Status: early development. The Sprites and Namespace provider implementations
+have landed; workspace lifecycle and Orca integration are in progress. The
+public CLI currently exposes `cc-remote version`.
+See [docs/architecture.md](docs/architecture.md) for the intended architecture.
 
 ## Build from source
 
