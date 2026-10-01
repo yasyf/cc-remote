@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		return providers.Machine{}, err
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "create", "-o", p.Org, "--skip-console", spec.Name)); err != nil {
-		if providers.Says(err, "sprite already exists") {
+		if providers.Reports(err, regexp.MustCompile(`(^|`+providers.Boundary+`)sprite `+providers.Named(spec.Name)+` already exists`)) {
 			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
 		if _, found := p.Get(ctx, spec.Name); found == nil {
@@ -256,10 +257,13 @@ func (p *Provider) Destroy(ctx context.Context, id string) error {
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "destroy", "-o", p.Org, "-s", id, "--force")); err != nil {
 		return err
 	}
-	if err := p.keys().remove(id); err != nil {
+	switch _, err := p.Get(ctx, id); {
+	case errors.Is(err, providers.ErrNotFound):
+		return errors.Join(p.keys().remove(id), p.records().Remove(id))
+	case err != nil:
 		return err
 	}
-	return p.records().Remove(id)
+	return nil
 }
 
 func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {

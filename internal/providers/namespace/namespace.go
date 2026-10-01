@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -144,7 +145,7 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		args = append(args, "--site", spec.Region)
 	}
 	if _, err := p.devboxUnbounded(ctx, args...); err != nil {
-		if providers.Says(err, "code = AlreadyExists") {
+		if providers.Reports(err, regexp.MustCompile(`code = AlreadyExists desc = .*(^|`+providers.Boundary+`)`+providers.Named(spec.Name)+`($|`+providers.Boundary+`)`)) {
 			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
 		if _, found := p.Get(ctx, spec.Name); found == nil {
@@ -300,7 +301,13 @@ func (p *Provider) Destroy(ctx context.Context, id string) error {
 	if _, err := p.devbox(ctx, "expire", id, "--force"); err != nil {
 		return err
 	}
-	return p.records().Remove(id)
+	switch _, err := p.find(ctx, id); {
+	case errors.Is(err, providers.ErrNotFound):
+		return p.records().Remove(id)
+	case err != nil:
+		return err
+	}
+	return nil
 }
 
 func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {

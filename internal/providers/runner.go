@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -73,11 +74,22 @@ func (e *CommandError) Error() string {
 	return fmt.Sprintf("%s: exit %d: %s", e.Command, e.Result.ExitCode, detail)
 }
 
-func (e *CommandError) Says(phrase string) bool {
-	return strings.Contains(string(e.Result.Stderr), phrase) || strings.Contains(string(e.Result.Stdout), phrase)
+func (e *CommandError) Reports(grammar *regexp.Regexp) bool {
+	for line := range strings.Lines(string(e.Result.Stderr) + "\n" + string(e.Result.Stdout)) {
+		if grammar.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }
 
-func Says(err error, phrase string) bool {
+func Reports(err error, grammar *regexp.Regexp) bool {
 	var command *CommandError
-	return errors.As(err, &command) && command.Says(phrase)
+	return errors.As(err, &command) && command.Reports(grammar)
+}
+
+const Boundary = `[^A-Za-z0-9_.-]`
+
+func Named(resource string) string {
+	return `"?` + regexp.QuoteMeta(resource) + `"?`
 }

@@ -429,16 +429,13 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 
 func (s *Session) readyTools(ctx context.Context, record *Record) error {
 	machine := record.Machine
+	if record.Image != s.image || record.ImageSpec != s.imageSpec {
+		return fmt.Errorf("the image of profile %s changed since %s was created (image %q with declaration %.12s, now %q with %.12s); a machine cannot change its image in place, so destroy %s and create it again", s.Profile, record.Name, record.Image, record.ImageSpec, s.image, s.imageSpec, record.Name)
+	}
 	err := s.Scripts.Ready(ctx, s.exec(machine), s.Stamp)
 	if err == nil {
 		s.Log.Info("the tools are ready at the current stamp", "machine", machine, "stamp", s.Stamp[:12])
 		return nil
-	}
-	if record.Image != s.image || record.ImageSpec != s.imageSpec {
-		return fmt.Errorf("the tools on %s are not at the current stamp and the image of profile %s changed since %s was created (image %q with declaration %.12s, now %q with %.12s); a machine cannot change its image in place, so destroy %s and create it again: %w", machine, s.Profile, record.Name, record.Image, record.ImageSpec, s.image, s.imageSpec, record.Name, err)
-	}
-	if s.inPlace() && record.Tailnet != nil && s.Platform.Daemon.Mode == tailnet.Kernel {
-		return fmt.Errorf("the tools on %s are not at the current stamp and provision.sh cannot run again on a host that already joined the tailnet in kernel mode, so destroy %s and create it again: %w", machine, record.Name, err)
 	}
 	s.Log.Info("the tools are not at the current stamp; provisioning them again", "machine", machine, "stamp", s.Stamp[:12], "err", err)
 	return s.installTools(ctx, machine)
@@ -560,14 +557,16 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 	found, err := s.Provider.Get(ctx, machine)
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
-		if err := s.Provider.Destroy(ctx, machine); err != nil && !errors.Is(err, providers.ErrNotFound) {
-			return err
-		}
 	case err != nil:
 		return fmt.Errorf("could not tell whether %s is still there, so check the provider for it: %w", machine, err)
-	case !labelled(found, owner):
-		return fmt.Errorf("%s exists at the provider without a label proving this ledger made it (labels %v, created %s), so it was left running and its record and ledger entry are kept: if it is yours, remove it at the provider, then run this again", machine, found.Labels, found.CreatedAt.Format(time.RFC3339))
 	default:
+		label, value, err := s.receipt(machine, owner)
+		if err != nil {
+			return err
+		}
+		if found.Labels[label] != value {
+			return fmt.Errorf("%s exists at the provider without a label proving this ledger made it (want %s=%s, labels %v, created %s), so it was left running and its record and ledger entry are kept: if it is yours, remove it at the provider, then run this again", machine, label, value, found.Labels, found.CreatedAt.Format(time.RFC3339))
+		}
 		if err := s.Provider.Destroy(ctx, machine); err != nil {
 			return fmt.Errorf("removing %s failed, so check the provider for it: %w", machine, err)
 		}
@@ -578,12 +577,15 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 	return s.Pool.Retire(machine, s.Now())
 }
 
-func labelled(found providers.Machine, owner string) bool {
-	if workspace, ok := found.Labels[LabelWorkspace]; ok {
-		return workspace == owner
+func (s *Session) receipt(machine, owner string) (string, string, error) {
+	spares, err := s.Pool.Ledger.ReadSpares()
+	if err != nil {
+		return "", "", err
 	}
-	_, spare := found.Labels[LabelSpare]
-	return spare
+	if spare, ok := spares[machine]; ok {
+		return LabelSpare, spare.Fingerprint, nil
+	}
+	return LabelWorkspace, owner, nil
 }
 
 func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
@@ -753,6 +755,9 @@ func (s *Session) Prepare(ctx context.Context) error {
 }
 
 func (s *Session) prepareSpare(ctx context.Context, name string) error {
+	if err := s.unjoined(ctx, name); err != nil {
+		return err
+	}
 	if err := s.installTools(ctx, name); err != nil {
 		return err
 	}
@@ -767,6 +772,14 @@ func (s *Session) prepareSpare(ctx context.Context, name string) error {
 		return err
 	}
 	return s.Provider.Suspend(ctx, name)
+}
+
+func (s *Session) unjoined(ctx context.Context, machine string) error {
+	if s.Enroller == nil {
+		return nil
+	}
+	_, err := s.run(ctx, machine, s.Platform.Daemon.FreshScript(), nil)
+	return err
 }
 
 func (s *Session) replaceClaimed() {

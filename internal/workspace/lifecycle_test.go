@@ -60,6 +60,7 @@ type scripted struct {
 	minted   string
 	fail     error
 	failAll  bool
+	joined   bool
 	onEnroll func()
 	onStatus func()
 	scripts  map[string][]string
@@ -87,7 +88,7 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 	}
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
-	failAll := m.failAll
+	failAll, joined := m.failAll, m.joined
 	stamp := cmd[len(cmd)-1]
 	switch {
 	case strings.Contains(script, installs):
@@ -99,6 +100,9 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 	m.mu.Unlock()
 	if failAll {
 		return providers.Result{Stderr: []byte("the machine went away"), ExitCode: 1}
+	}
+	if joined && strings.Contains(script, freshens) {
+		return providers.Result{Stderr: []byte("cc-remote: this machine already carries /var/lib/tailscale/tailscaled.state, so its image or spare joined a tailnet before this claim; rebuild it unenrolled"), ExitCode: 1}
 	}
 	switch {
 	case strings.Contains(script, enrolls):
@@ -338,6 +342,18 @@ func (h *harness) drift(tools string) *Session {
 	return drifted
 }
 
+func (h *harness) reimage(image string) *Session {
+	h.t.Helper()
+	machine := h.cfg.Profiles["lean"].Machine["fake"]
+	machine.Image = image
+	h.cfg.Profiles["lean"].Machine["fake"] = machine
+	moved := h.open()
+	if moved.Stamp != h.session.Stamp {
+		h.t.Fatal("the image reference moved the stamp")
+	}
+	return moved
+}
+
 func (h *harness) bound() tailnet.Binding {
 	h.t.Helper()
 	bindings := tailnet.Bindings{Dir: h.session.State.Tailnet()}
@@ -461,8 +477,11 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 func TestAClaimRenewsIdentityBeforeInstallingThenWarmsAndEnrolls(t *testing.T) {
 	h := newHarness(t, 1, true)
 	spare := h.prepared()
-	if h.machine.ran(spare, enrolls) != 0 || h.machine.ran(spare, freshens) != 0 || h.machine.ran(spare, cleans) != 1 || h.machine.ran(spare, warms) != 1 {
+	if h.machine.ran(spare, enrolls) != 0 || h.machine.ran(spare, freshens) != 1 || h.machine.ran(spare, cleans) != 1 || h.machine.ran(spare, warms) != 1 {
 		t.Errorf("prepare ran %q", h.machine.scripts[spare])
+	}
+	if sealed := h.machine.order(spare, 0, freshens, provisions); sealed[0] < 0 || sealed[1] < sealed[0] {
+		t.Errorf("prepare provisioned the spare before proving it never joined a tailnet: %v", sealed)
 	}
 	if machine, _ := h.fake.Get(context.Background(), spare); machine.State != providers.StateSuspended || machine.Labels[LabelSpare] != h.session.Pool.Fingerprint {
 		t.Errorf("the ready spare is %+v", machine)
@@ -1147,7 +1166,7 @@ func TestTheInstallReadsTheTokenOnlyForPrivateMarketplaces(t *testing.T) {
 	}
 }
 
-func TestResumeRefusesToReprovisionAHostEnrolledInKernelMode(t *testing.T) {
+func TestResumeProvisionsAnEnrolledHostInPlace(t *testing.T) {
 	h := newHarness(t, 0, true)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
@@ -1158,12 +1177,54 @@ func TestResumeRefusesToReprovisionAHostEnrolledInKernelMode(t *testing.T) {
 	}
 	drifted := h.drift(strings.NewReplacer("1.8.2", "1.8.3", sha, strings.Repeat("ab", 32)).Replace(inventory))
 	drifted.Enroller.Connect = h.session.Enroller.Connect
-	before := len(h.machine.scripts["ws-1"])
-	if _, err := drifted.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "already joined the tailnet") {
-		t.Fatalf("Resume = %v", err)
+	before, minted := len(h.machine.scripts["ws-1"]), h.api.mintedKeys()
+	result, err := drifted.Resume(ctx, "ws-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if after := strings.Join(h.machine.scripts["ws-1"][before:], "\n"); !strings.Contains(after, readies) || strings.Contains(after, provisions) || strings.Contains(after, installs) {
-		t.Errorf("the refused resume ran %q", after)
+	order := h.machine.order("ws-1", before, readies, provisions, "plugins.sh.tmp", installs, prepares, configures)
+	for i := 1; i < len(order); i++ {
+		if order[i-1] < 0 || order[i] <= order[i-1] {
+			t.Fatalf("the resume ran scripts out of order: %v", order)
+		}
+	}
+	after := strings.Join(h.machine.scripts["ws-1"][before:], "\n")
+	for _, kept := range []string{freshens, enrolls, logsOut, renews, checkout} {
+		if strings.Contains(after, kept) {
+			t.Errorf("the resume ran %q on a host that keeps its tailnet node and session state", kept)
+		}
+	}
+	if !strings.Contains(h.machine.stdins["ws-1"][order[1]], "jq-1.8.3") || h.machine.ready["ws-1"] != drifted.Stamp {
+		t.Errorf("the resume provisioned with %q and left stamp %q", h.machine.stdins["ws-1"][order[1]], h.machine.ready["ws-1"])
+	}
+	if h.machine.currentStatus() != running("nNEW") || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) || h.api.mintedKeys() != minted || len(h.api.deletedNodes()) != 0 {
+		t.Errorf("the resume disturbed the tailnet: status %s, bound %v, minted %d, deleted %v", h.machine.currentStatus(), h.bound(), h.api.mintedKeys(), h.api.deletedNodes())
+	}
+	if result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" {
+		t.Errorf("result = %+v", result)
+	}
+}
+
+func TestPrepareRefusesASpareThatAlreadyJoinedATailnet(t *testing.T) {
+	h := newHarness(t, 1, true)
+	h.machine.joined = true
+	err := h.session.Prepare(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "rebuild it unenrolled") {
+		t.Fatalf("Prepare = %v", err)
+	}
+	if len(h.machine.scripts) != 1 {
+		t.Fatalf("prepare touched %d machines", len(h.machine.scripts))
+	}
+	for spare, scripts := range h.machine.scripts {
+		if len(scripts) != 1 || !strings.Contains(scripts[0], freshens) {
+			t.Errorf("prepare ran %q on a spare that joined a tailnet; want only the purity check", scripts)
+		}
+		if _, err := h.fake.Get(context.Background(), spare); !errors.Is(err, providers.ErrNotFound) {
+			t.Errorf("the joined spare survived: Get = %v", err)
+		}
+	}
+	if spares := h.spares(); len(spares) != 0 {
+		t.Errorf("the pool kept %v", spares)
 	}
 }
 
@@ -1214,11 +1275,34 @@ func TestResumeRefusesWhenTheImageDeclarationChanged(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "destroy ws-1 and create it again") || !strings.Contains(err.Error(), "agent-host") {
 		t.Fatalf("Resume = %v", err)
 	}
-	if after := strings.Join(h.machine.scripts["ws-1"][before:], "\n"); !strings.Contains(after, readies) || strings.Contains(after, installs) || strings.Contains(after, provisions) {
+	if after := h.machine.scripts["ws-1"][before:]; len(after) != 0 {
 		t.Errorf("the refused resume ran %q", after)
 	}
 	if h.machine.ready["ws-1"] != h.session.Stamp {
 		t.Errorf("the refused resume moved the stamp to %q", h.machine.ready["ws-1"])
+	}
+}
+
+func TestResumeRefusesWhenOnlyTheImageReferenceChanged(t *testing.T) {
+	h := newImagedHarness(t)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	moved := h.reimage("agent-host-v2")
+	before := len(h.machine.scripts["ws-1"])
+	_, err := moved.Resume(ctx, "ws-1")
+	if err == nil || !strings.Contains(err.Error(), "destroy ws-1 and create it again") || !strings.Contains(err.Error(), `"agent-host-v2"`) {
+		t.Fatalf("Resume = %v", err)
+	}
+	if after := h.machine.scripts["ws-1"][before:]; len(after) != 0 {
+		t.Errorf("the refused resume ran %q", after)
+	}
+	if record, found := h.record("ws-1"); !found || record.Image != "agent-host" {
+		t.Errorf("the refused resume rewrote the image binding: %+v, %v", record, found)
 	}
 }
 
@@ -1355,6 +1439,70 @@ func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {
 	}
 	if _, found := h.record("ws-1"); !found || !h.ledger().Running("ws-1") {
 		t.Error("a destroy that could not prove absence released the name")
+	}
+}
+
+func TestDrainKeepsASpareWhoseReceiptNamesAnotherFingerprint(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := context.Background()
+	h.session.Provider = &relabelled{Provider: h.provider}
+	spare := h.prepared()
+	h.session.Provider = h.provider
+	err := h.session.Drain(ctx, true)
+	if err == nil || !strings.Contains(err.Error(), "without a label proving this ledger made it") || !strings.Contains(err.Error(), h.session.Pool.Fingerprint) {
+		t.Fatalf("Drain = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, spare); err != nil {
+		t.Error("drain removed a spare whose receipt names another fingerprint")
+	}
+	if left := h.spares(); left[spare] == nil || h.ledger().Resources[spare].Destroyed != nil {
+		t.Errorf("drain left %v; want the spare still accounted", left)
+	}
+}
+
+type relabelled struct {
+	providers.Provider
+}
+
+func (r *relabelled) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	return r.Provider.Create(ctx, providers.Spec{Name: spec.Name, Labels: map[string]string{LabelSpare: "stale"}})
+}
+
+func TestDestroyOfAMachineAlreadyGoneRetiresWithoutAProviderDestroy(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.fake.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	calls := len(h.fake.Calls())
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if after := verbs(h.fake.Calls()[calls:]); strings.Contains(after, "destroy") {
+		t.Errorf("destroy of an absent machine ran %q at the provider", after)
+	}
+	if _, found := h.record("ws-1"); found || h.ledger().Running("ws-1") {
+		t.Error("the absent machine kept its record or accounting")
+	}
+}
+
+func TestAChangedImageReferenceClaimsNoSpareBuiltFromTheOldOne(t *testing.T) {
+	h := build(t, 1, false, imaged, "agent-host")
+	ctx := context.Background()
+	spare := h.prepared()
+	moved := h.reimage("agent-host-v2")
+	result, err := moved.Create(ctx, "ws-1", Source{Ref: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Machine == spare || result.Machine != "ws-1" {
+		t.Errorf("the create claimed %s; want a fresh machine", result.Machine)
+	}
+	if record, found := h.record("ws-1"); !found || record.Claimed || record.Image != "agent-host-v2" {
+		t.Errorf("record = %+v, %v", record, found)
 	}
 }
 

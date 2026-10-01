@@ -277,6 +277,27 @@ func TestConcurrentSSHTargetsShareOneKey(t *testing.T) {
 	}
 }
 
+func TestDestroyKeepsTheReceiptUntilTheSpriteIsGone(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"})); err != nil {
+		t.Fatal(err)
+	}
+	fake.destroySurvives = true
+	if err := p.Destroy(t.Context(), "alpha"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.Labels["owner"] != "me" {
+		t.Fatalf("after the destroy the sprite survived, Get = %+v, %v; want its labels kept", machine, err)
+	}
+	fake.destroySurvives = false
+	if err := p.Destroy(t.Context(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Get(t.Context(), "alpha"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("after the sprite went, Get = %v", err)
+	}
+}
+
 func TestCreateLosingARaceReportsErrExists(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true
@@ -286,15 +307,25 @@ func TestCreateLosingARaceReportsErrExists(t *testing.T) {
 }
 
 func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
-	p, fake := newProvider(t)
-	fake.createFails = true
-	_, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"}))
-	if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "console timed out") {
-		t.Fatalf("Create = %v, want ErrAmbiguous carrying the CLI failure, never ErrExists", err)
-	}
-	machine, err := p.Get(t.Context(), "alpha")
-	if err != nil || len(machine.Labels) != 0 {
-		t.Errorf("after the failed create, Get = %+v, %v; want the allocated sprite without labels", machine, err)
+	for name, stderr := range map[string]string{
+		"a timeout":             "error: waiting for the sprite console timed out",
+		"another sprite":        "error: sprite alpha-2 already exists",
+		"an unrelated resource": "error: creating the console socket: file already exists",
+		"the name elsewhere":    "creating sprite alpha\nerror: volume already exists",
+		"the name on the line":  "error: creating sprite alpha: volume already exists",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			fake.createFails = stderr
+			_, err := p.Create(t.Context(), spec("alpha", map[string]string{"owner": "me"}))
+			if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), strings.Split(stderr, "\n")[0]) {
+				t.Fatalf("Create = %v, want ErrAmbiguous carrying the CLI failure, never ErrExists", err)
+			}
+			machine, err := p.Get(t.Context(), "alpha")
+			if err != nil || len(machine.Labels) != 0 {
+				t.Errorf("after the failed create, Get = %+v, %v; want the allocated sprite without labels", machine, err)
+			}
+		})
 	}
 }
 
