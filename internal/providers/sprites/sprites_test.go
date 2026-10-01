@@ -150,7 +150,7 @@ func TestListFollowsContinuationTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []string
+	got := make([]string, 0, len(machines))
 	for _, machine := range machines {
 		got = append(got, machine.ID)
 	}

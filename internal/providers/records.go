@@ -44,19 +44,22 @@ func (r Records) Save(id string, labels map[string]string) error {
 	if err != nil {
 		return err
 	}
-	staged, err := os.CreateTemp(r.Dir, id+".*.tmp")
+	return WriteFileAtomic(r.path(id), raw, 0o600)
+}
+
+func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
+	staged, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(staged.Name())
-	if _, err := staged.Write(raw); err != nil {
-		staged.Close()
-		return err
+	_, writeErr := staged.Write(data)
+	if err := errors.Join(writeErr, staged.Chmod(perm), staged.Close()); err != nil {
+		return errors.Join(err, os.Remove(staged.Name()))
 	}
-	if err := staged.Close(); err != nil {
-		return err
+	if err := os.Rename(staged.Name(), path); err != nil {
+		return errors.Join(err, os.Remove(staged.Name()))
 	}
-	return os.Rename(staged.Name(), r.path(id))
+	return nil
 }
 
 func (r Records) Remove(id string) error {

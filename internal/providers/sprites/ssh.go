@@ -110,23 +110,7 @@ func (p *Provider) installHelper() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	staged, err := os.CreateTemp(filepath.Dir(path), "cc-remote.*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(staged.Name())
-	if _, err := staged.Write(helper); err != nil {
-		staged.Close()
-		return err
-	}
-	if err := staged.Chmod(0o700); err != nil {
-		staged.Close()
-		return err
-	}
-	if err := staged.Close(); err != nil {
-		return err
-	}
-	return os.Rename(staged.Name(), path)
+	return providers.WriteFileAtomic(path, helper, 0o700)
 }
 
 func Proxy(ctx context.Context, argv []string) error {

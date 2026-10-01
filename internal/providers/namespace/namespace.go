@@ -120,7 +120,8 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 	case !errors.Is(err, providers.ErrNotFound):
 		return providers.Machine{}, err
 	}
-	args := []string{"create",
+	args := []string{
+		"create",
 		"--name", spec.Name,
 		"--platform", p.Platform,
 		"--size", size,
@@ -297,14 +298,16 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 const sshFailed = 255
 
 func (p *Provider) ssh(ctx context.Context, target providers.Target, cmd []string, stdin io.Reader) (providers.Result, error) {
-	args := []string{"-T"}
-	for _, option := range append(target.SSHOptions(),
+	options := append(target.SSHOptions(),
 		"BatchMode=yes",
 		"LogLevel=ERROR",
 		"ConnectTimeout=120",
 		"ServerAliveInterval=15",
 		"ServerAliveCountMax=4",
-	) {
+	)
+	args := make([]string, 0, 2*len(options)+4)
+	args = append(args, "-T")
+	for _, option := range options {
 		args = append(args, "-o", option)
 	}
 	args = append(args, target.Host, "--", providers.ShellQuote(cmd...))
