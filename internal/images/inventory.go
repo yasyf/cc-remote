@@ -35,6 +35,7 @@ var (
 	sha256Pattern      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	sha512Pattern      = regexp.MustCompile(`^[0-9a-f]{128}$`)
 	refPattern         = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	branchPattern      = regexp.MustCompile(`^[A-Za-z0-9._/+-]+$`)
 	githubPattern      = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 	pluginPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*@([A-Za-z0-9][A-Za-z0-9._-]*)$`)
 	packagePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,-]+\])?$`)
@@ -118,6 +119,7 @@ type Marketplace struct {
 	Name    string `yaml:"name"`
 	GitHub  string `yaml:"github"`
 	Ref     string `yaml:"ref"`
+	Branch  string `yaml:"branch"`
 	Private bool   `yaml:"private"`
 }
 
@@ -496,6 +498,8 @@ func (inv Inventory) validatePython() error {
 			return fmt.Errorf("%s: marketplace checkouts live in the user's home, so only python.user may install from one", where)
 		case tool.Marketplace != "" && !slices.ContainsFunc(inv.Claude.Marketplaces, func(m Marketplace) bool { return m.Name == tool.Marketplace }):
 			return fmt.Errorf("%s: marketplace %q is not under claude.marketplaces", where, tool.Marketplace)
+		case tool.Marketplace != "" && slices.ContainsFunc(inv.Claude.Marketplaces, func(m Marketplace) bool { return m.Name == tool.Marketplace && m.Branch != "" && m.Ref == "" }):
+			return fmt.Errorf("%s: marketplace %q is registered by branch, so it has no pinned checkout to install from", where, tool.Marketplace)
 		case len(tool.Bins) == 0:
 			return fmt.Errorf("%s: bins names no executable to verify", where)
 		}
@@ -518,8 +522,14 @@ func (inv Inventory) validateClaude() error {
 			return fmt.Errorf("%s: duplicate marketplace", where)
 		case !githubPattern.MatchString(marketplace.GitHub):
 			return fmt.Errorf("%s: github %q is not owner/repo", where, marketplace.GitHub)
-		case !refPattern.MatchString(marketplace.Ref):
+		case (marketplace.Ref == "") == (marketplace.Branch == ""):
+			return fmt.Errorf("%s: set exactly one of ref and branch", where)
+		case marketplace.Ref != "" && !refPattern.MatchString(marketplace.Ref):
 			return fmt.Errorf("%s: ref %q is not a 40-digit commit", where, marketplace.Ref)
+		case marketplace.Branch != "" && !branchName(marketplace.Branch):
+			return fmt.Errorf("%s: branch %q is not a branch name", where, marketplace.Branch)
+		case marketplace.Branch != "" && marketplace.Private:
+			return fmt.Errorf("%s: Claude Code clones a branch marketplace itself, so a private one needs a token-fetched ref", where)
 		}
 		marketplaces[marketplace.Name] = true
 	}
@@ -679,6 +689,18 @@ func (inv Inventory) providesSystem(bin string) bool {
 		_, ok := a.bins()[bin]
 		return ok
 	})
+}
+
+func branchName(branch string) bool {
+	if !branchPattern.MatchString(branch) || strings.Contains(branch, "..") || strings.HasSuffix(branch, ".") {
+		return false
+	}
+	for component := range strings.SplitSeq(branch, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 func references(template string) []string {

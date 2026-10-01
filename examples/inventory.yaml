@@ -143,6 +143,9 @@ claude:
   env:
     EXAMPLE_MCP_DOMAIN: mcp.example.com
   marketplaces:
+    - name: claude-plugins-official
+      github: anthropics/claude-plugins-official
+      branch: main
     - name: captain-hook
       github: yasyf/captain-hook
       ref: f0aa10a4da02aaaf5dc9e1e66cfda4c4fbe50744
@@ -151,6 +154,8 @@ claude:
       ref: 0000000000000000000000000000000000000000
       private: true
   plugins:
+    - id: rust-analyzer-lsp@claude-plugins-official
+      version: 1.0.0
     - id: captain-hook@captain-hook
       version: 12.66.0
     - id: example-plugin@example-marketplace
