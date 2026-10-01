@@ -27,7 +27,7 @@ Recipe ids follow `<provider>-<profile>-ssh`. cc-remote derives one recipe for
 every provider and profile pair in the cc-remote config, so the profile names
 in the config become the ids. A profile's `machine` entry for a provider sets
 that machine's image, size, and region; generation fails when a provider
-cannot run a profile, such as a Namespace pairing with no size. The config's
+cannot run a profile, such as a Namespace pairing with no image or size. The config's
 top-level `provider` and `profile` make the default recipe, and its name ends
 in `(default)`. Print the generated set:
 

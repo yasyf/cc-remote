@@ -104,8 +104,9 @@ func TestRate(t *testing.T) {
 		wantErr string
 	}{
 		{"lean size", spec("a", nil), providers.Rate{HourlyUSD: 0.96, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
-		{"full stack size", providers.Spec{Profile: "stack", Size: "xl"}, providers.Rate{HourlyUSD: 1.92, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
+		{"full stack size", providers.Spec{Profile: "stack", Size: "xl", Image: "cc-remote-linux"}, providers.Rate{HourlyUSD: 1.92, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
 		{"no size", providers.Spec{Profile: "agents"}, providers.Rate{}, "a namespace spec needs a size"},
+		{"no image", providers.Spec{Profile: "agents", Size: "l"}, providers.Rate{}, "a namespace spec needs an image"},
 		{"unpriced size", providers.Spec{Profile: "agents", Size: "s"}, providers.Rate{}, `namespace has no hourly rate for size "s"`},
 	}
 	for _, tt := range tests {
