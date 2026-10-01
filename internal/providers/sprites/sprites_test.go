@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -248,6 +249,39 @@ func TestSSHTargetPinsTheSpriteHostKey(t *testing.T) {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("Destroy left %s: %v", path, err)
 		}
+	}
+}
+
+func TestConcurrentSSHTargetsShareOneKey(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Go(func() { _, errs[i] = p.SSHTarget(t.Context(), "alpha") })
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatal(err)
+	}
+	public, err := os.ReadFile(p.keys().identity("alpha") + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range fake.sprites["alpha"].authorized {
+		if key != strings.TrimSpace(string(public)) {
+			t.Errorf("authorized %q, want only the one key on disk", key)
+		}
+	}
+}
+
+func TestCreateLosingARaceReportsErrExists(t *testing.T) {
+	p, fake := newProvider(t)
+	fake.takenAtCreate = true
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); !errors.Is(err, providers.ErrExists) {
+		t.Errorf("Create = %v, want ErrExists", err)
 	}
 }
 

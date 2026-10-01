@@ -14,13 +14,13 @@ import (
 
 func TestSSHOptions(t *testing.T) {
 	base := Target{Host: "h", Port: 22, User: "u", IdentityFile: "/k", ProxyCommand: "proxy h"}
-	common := []string{"HostName=h", "Port=22", "User=u", "IdentityFile=/k", "IdentitiesOnly=yes", "ProxyCommand=proxy h"}
+	common := []string{"HostName=h", "Port=22", "User=u", `IdentityFile="/k"`, "IdentitiesOnly=yes", "ProxyCommand=proxy h"}
 	tests := []struct {
 		name   string
 		policy HostKeyPolicy
 		want   []string
 	}{
-		{"pinned", HostKeyPolicy{Mode: HostKeyPinned, Alias: "h.alias", KnownHostsFile: "/known"}, []string{"HostKeyAlias=h.alias", "UserKnownHostsFile=/known", "StrictHostKeyChecking=yes"}},
+		{"pinned", HostKeyPolicy{Mode: HostKeyPinned, Alias: "h.alias", KnownHostsFile: "/known"}, []string{"HostKeyAlias=h.alias", `UserKnownHostsFile="/known"`, "StrictHostKeyChecking=yes"}},
 		{"proxy trusted", HostKeyPolicy{Mode: HostKeyProxyTrusted}, []string{"UserKnownHostsFile=/dev/null", "StrictHostKeyChecking=no"}},
 	}
 	for _, tt := range tests {
@@ -38,6 +38,51 @@ func TestSSHOptions(t *testing.T) {
 		}
 	}()
 	base.SSHOptions()
+}
+
+func TestSSHOptionsSurviveOpenSSHParsing(t *testing.T) {
+	target := Target{
+		Host:         "h",
+		Port:         2222,
+		User:         "u",
+		IdentityFile: "/tmp/a b/100%/k",
+		ProxyCommand: ShellQuote("/tmp/100%/cc-remote", "proxy", "--", "/x y/sprite", "-W", ":22"),
+		HostKeyPolicy: HostKeyPolicy{
+			Mode:           HostKeyPinned,
+			Alias:          "h.alias",
+			KnownHostsFile: "/tmp/a b/known_hosts",
+		},
+	}
+	options := target.SSHOptions()
+	args := make([]string, 0, 2*len(options)+4)
+	args = append(args, "-G", "-F", "/dev/null")
+	for _, option := range options {
+		args = append(args, "-o", option)
+	}
+	out, err := exec.Command("ssh", append(args, "h")...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh -G = %v: %s", err, out)
+	}
+	parsed := map[string]string{}
+	for line := range strings.Lines(string(out)) {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), " ")
+		parsed[key] = value
+	}
+	want := map[string]string{
+		"hostname":              "h",
+		"port":                  "2222",
+		"user":                  "u",
+		"identityfile":          "/tmp/a b/100%%/k",
+		"proxycommand":          "/tmp/100%%/cc-remote proxy -- '/x y/sprite' -W :22",
+		"hostkeyalias":          "h.alias",
+		"userknownhostsfile":    "/tmp/a b/known_hosts",
+		"stricthostkeychecking": "true",
+	}
+	for key, value := range want {
+		if parsed[key] != value {
+			t.Errorf("ssh parsed %s = %q, want %q", key, parsed[key], value)
+		}
+	}
 }
 
 func TestShellQuote(t *testing.T) {

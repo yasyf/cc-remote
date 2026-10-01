@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -100,19 +101,25 @@ func (t Target) SSHOptions() []string {
 		"HostName=" + t.Host,
 		"Port=" + strconv.Itoa(t.Port),
 		"User=" + t.User,
-		"IdentityFile=" + t.IdentityFile,
+		"IdentityFile=" + sshPath(t.IdentityFile),
 		"IdentitiesOnly=yes",
-		"ProxyCommand=" + t.ProxyCommand,
+		"ProxyCommand=" + sshTokens(t.ProxyCommand),
 	}
 	switch t.HostKeyPolicy.Mode {
 	case HostKeyPinned:
 		return append(options,
 			"HostKeyAlias="+t.HostKeyPolicy.Alias,
-			"UserKnownHostsFile="+t.HostKeyPolicy.KnownHostsFile,
+			"UserKnownHostsFile="+sshPath(t.HostKeyPolicy.KnownHostsFile),
 			"StrictHostKeyChecking=yes",
 		)
 	case HostKeyProxyTrusted:
 		return append(options, "UserKnownHostsFile=/dev/null", "StrictHostKeyChecking=no")
 	}
 	panic(fmt.Sprintf("host key mode %q", t.HostKeyPolicy.Mode))
+}
+
+func sshTokens(value string) string { return strings.ReplaceAll(value, "%", "%%") }
+
+func sshPath(path string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(sshTokens(path)) + `"`
 }

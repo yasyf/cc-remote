@@ -23,11 +23,12 @@ type fakeDevbox struct {
 }
 
 type fakeNamespace struct {
-	t        *testing.T
-	cli      string
-	sshDir   string
-	loggedIn bool
-	sshFails providers.Result
+	t             *testing.T
+	cli           string
+	sshDir        string
+	loggedIn      bool
+	sshFails      providers.Result
+	takenAtCreate bool
 
 	mu     sync.Mutex
 	boxes  map[string]*fakeDevbox
@@ -61,6 +62,9 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 		return f.list(), nil
 	case args[0] == "create":
 		name := flag(args, "--name")
+		if f.takenAtCreate {
+			f.boxes[name] = &fakeDevbox{createdAt: time.Now().UTC()}
+		}
 		if _, ok := f.boxes[name]; ok {
 			return providers.Result{Stderr: []byte("rpc error: code = AlreadyExists desc = devbox exists"), ExitCode: 1}, nil
 		}

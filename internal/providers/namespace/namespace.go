@@ -135,6 +135,9 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		args = append(args, "--site", site)
 	}
 	if _, err := p.devboxUnbounded(ctx, args...); err != nil {
+		if _, taken := p.Get(ctx, spec.Name); taken == nil {
+			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrExists, err)
+		}
 		return providers.Machine{}, err
 	}
 	if _, err := p.devbox(ctx, "configure-ssh", spec.Name); err != nil {

@@ -27,11 +27,12 @@ type fakeSprite struct {
 }
 
 type fakeSprites struct {
-	t        *testing.T
-	cli      string
-	org      string
-	pageSize int
-	status   int
+	t             *testing.T
+	cli           string
+	org           string
+	pageSize      int
+	status        int
+	takenAtCreate bool
 
 	mu      sync.Mutex
 	sprites map[string]*fakeSprite
@@ -64,6 +65,9 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 	case "create":
 		if len(args) != 2 || args[0] != "--skip-console" {
 			f.t.Fatalf("sprite create %q", args)
+		}
+		if f.takenAtCreate {
+			f.sprites[args[1]] = &fakeSprite{status: "running", createdAt: time.Now().UTC()}
 		}
 		if _, ok := f.sprites[args[1]]; ok {
 			return providers.Result{Stderr: []byte("sprite already exists"), ExitCode: 1}, nil

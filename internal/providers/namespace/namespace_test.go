@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -243,5 +244,30 @@ func TestListReadsAnEmptyAccount(t *testing.T) {
 	machines, err := p.List(t.Context(), nil)
 	if err != nil || len(machines) != 0 {
 		t.Errorf("List = %v, %v; want none", machines, err)
+	}
+}
+
+func TestSSHConfigReadsLiteralValues(t *testing.T) {
+	raw := []byte("Host a.devbox.namespace\n" +
+		"  IdentityFile \"/Users/x/My Keys/a.key\"\n" +
+		"  ProxyCommand /opt/100%%/devbox-ssh-proxy ssh-proxy a\n" +
+		"  user dev\n")
+	want := map[string]string{
+		"host":         "a.devbox.namespace",
+		"identityfile": "/Users/x/My Keys/a.key",
+		"proxycommand": "/opt/100%/devbox-ssh-proxy ssh-proxy a",
+		"user":         "dev",
+	}
+	if got := sshConfig(raw); !maps.Equal(got, want) {
+		t.Errorf("sshConfig =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestCreateLosingARaceReportsErrExists(t *testing.T) {
+	p, fake := newProvider(t)
+	fake.takenAtCreate = true
+	_, err := p.Create(t.Context(), spec("alpha", nil))
+	if !errors.Is(err, providers.ErrExists) {
+		t.Errorf("Create = %v, want ErrExists", err)
 	}
 }

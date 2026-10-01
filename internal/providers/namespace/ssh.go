@@ -54,9 +54,14 @@ func sshConfig(raw []byte) map[string]string {
 	lines := bufio.NewScanner(bytes.NewReader(raw))
 	for lines.Scan() {
 		key, value, ok := strings.Cut(strings.TrimSpace(lines.Text()), " ")
-		if ok {
-			options[strings.ToLower(key)] = strings.TrimSpace(value)
+		if !ok {
+			continue
 		}
+		value = strings.TrimSpace(value)
+		if unquoted, quoted := strings.CutPrefix(value, `"`); quoted {
+			value = strings.TrimSuffix(unquoted, `"`)
+		}
+		options[strings.ToLower(key)] = strings.ReplaceAll(value, "%%", "%")
 	}
 	return options
 }

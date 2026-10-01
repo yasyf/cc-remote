@@ -23,9 +23,10 @@ func (p *Provider) keys() keys { return keys{dir: filepath.Join(p.StateDir, Name
 
 func (k keys) identity(id string) string   { return filepath.Join(k.dir, id) }
 func (k keys) knownHosts(id string) string { return filepath.Join(k.dir, id+".known_hosts") }
+func (k keys) lock(id string) string       { return filepath.Join(k.dir, id+".lock") }
 
 func (k keys) remove(id string) error {
-	for _, path := range []string{k.identity(id), k.identity(id) + ".pub", k.knownHosts(id)} {
+	for _, path := range []string{k.identity(id), k.identity(id) + ".pub", k.knownHosts(id), k.lock(id)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -84,14 +85,22 @@ func (p *Provider) SSHTarget(ctx context.Context, id string) (providers.Target, 
 	}, nil
 }
 
-func (p *Provider) ensureKey(ctx context.Context, keys keys, id string) error {
+func (p *Provider) ensureKey(ctx context.Context, keys keys, id string) (err error) {
 	if err := os.MkdirAll(keys.dir, 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(keys.lock(id), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, lock.Close()) }()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
 	if _, err := os.Stat(keys.identity(id)); !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	_, err := providers.Output(ctx, p.Runner, providers.Command{
+	_, err = providers.Output(ctx, p.Runner, providers.Command{
 		Name: "ssh-keygen",
 		Args: []string{"-q", "-t", "ed25519", "-N", "", "-C", "cc-remote " + id, "-f", keys.identity(id)},
 	})
