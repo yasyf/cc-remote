@@ -111,18 +111,19 @@ func TestOrcaRecipes(t *testing.T) {
 			t.Errorf("recipes omit --config %s, so Orca's environment would pick another config:\n%s", custom, got)
 		}
 	})
-	t.Run("writes a repo-relative binary into the recipes as given", func(t *testing.T) {
-		wrapper := orca.Lifecycle{Binary: "./tools/cc-remote/bin/cc-remote", Config: exampleConfig}
-		want, err := orca.MergeYAML(nil, wrapper, recipes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := runCLI(t, "orca", "recipes", "--config", exampleConfig, "--binary", wrapper.Binary)
-		if got != string(want) {
-			t.Errorf("stdout =\n%s\nwant\n%s", got, want)
-		}
-		if !strings.Contains(got, "create: ./tools/cc-remote/bin/cc-remote create --provider sprites --profile lean") {
-			t.Errorf("recipes do not run the repo-relative wrapper:\n%s", got)
+	t.Run("writes --binary into the recipes as given", func(t *testing.T) {
+		for binary, create := range map[string]string{
+			"./tools/cc-remote/bin/cc-remote": "./tools/cc-remote/bin/cc-remote create",
+			"./tools/my tools/cc-remote":      `'./tools/my tools/cc-remote' create`,
+		} {
+			entries, err := orca.ParseYAML([]byte(runCLI(t, "orca", "recipes", "--config", exampleConfig, "--binary", binary)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := create + " --provider sprites --profile lean --connection ssh --config " + exampleConfig
+			if len(entries) == 0 || entries[0].Create != want {
+				t.Errorf("--binary %q: first create = %+v, want %q", binary, entries, want)
+			}
 		}
 	})
 	t.Run("rewrites orca.yaml in place and keeps other keys", func(t *testing.T) {
