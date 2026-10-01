@@ -1,7 +1,12 @@
 package budget
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"math"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/state"
@@ -63,8 +68,26 @@ func until(end *time.Time, now time.Time) time.Time {
 	return now
 }
 
+type Origin struct {
+	Kind     string    `json:"kind"`
+	Source   string    `json:"source,omitempty"`
+	Imported time.Time `json:"imported"`
+}
+
 type Ledger struct {
+	Origin    *Origin              `json:"origin,omitempty"`
 	Resources map[string]*Resource `json:"resources"`
+}
+
+const (
+	Created  = "created"
+	Imported = "imported"
+)
+
+var ErrNoLedger = errors.New("no ledger")
+
+func archived(id string, destroyed time.Time) string {
+	return id + "~" + destroyed.UTC().Format("20060102T150405Z")
 }
 
 func (l *Ledger) Running(id string) bool {
@@ -97,12 +120,17 @@ func (l *Ledger) Committed(now time.Time) float64 {
 
 func (l *Ledger) Start(id, provider, profile string, rate Rate, reserved float64, now time.Time) error {
 	resource, ok := l.Resources[id]
+	if ok && resource.Destroyed != nil {
+		history := archived(id, *resource.Destroyed)
+		if _, taken := l.Resources[history]; taken {
+			return fmt.Errorf("%s was destroyed at %s and its history is already archived as %s", id, resource.Destroyed.Format(time.RFC3339), history)
+		}
+		l.Resources[history] = resource
+		ok = false
+	}
 	if !ok {
 		resource = &Resource{Provider: provider, Profile: profile, Rate: rate, Created: now}
 		l.Resources[id] = resource
-	}
-	if resource.Destroyed != nil {
-		return fmt.Errorf("%s was destroyed at %s", id, resource.Destroyed.Format(time.RFC3339))
 	}
 	if !resource.running() {
 		resource.Running = append(resource.Running, Interval{Start: now, ReservedUSD: reserved})
@@ -151,10 +179,18 @@ func (e *OverBudgetError) Error() string {
 }
 
 func (g Guard) Admit(l *Ledger, estimate float64, now time.Time) error {
-	if remaining := g.Remaining(l, now); estimate > remaining {
+	remaining := g.Remaining(l, now)
+	if !finite(remaining) || !finite(estimate) || estimate < 0 {
+		return fmt.Errorf("the budget cannot be judged: $%v remains against an estimate of $%v", remaining, estimate)
+	}
+	if estimate > remaining {
 		return &OverBudgetError{EstimateUSD: estimate, RemainingUSD: remaining}
 	}
 	return nil
+}
+
+func finite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 type Store struct {
@@ -163,13 +199,50 @@ type Store struct {
 
 func (s Store) Read() (*Ledger, error) {
 	ledger := &Ledger{Resources: map[string]*Resource{}}
-	if _, err := state.Load(s.Path, ledger); err != nil {
+	found, err := state.Load(s.Path, ledger)
+	if err != nil {
 		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("%w at %s: run `cc-remote ledger init` to start one or `cc-remote ledger import <path>` to carry an earlier one over", ErrNoLedger, s.Path)
 	}
 	if ledger.Resources == nil {
 		ledger.Resources = map[string]*Resource{}
 	}
 	return ledger, nil
+}
+
+func (s Store) Init(now time.Time) error {
+	return s.create(&Ledger{Origin: &Origin{Kind: Created, Imported: now}, Resources: map[string]*Resource{}})
+}
+
+func (s Store) Import(source string, now time.Time) (*Ledger, error) {
+	absolute, err := filepath.Abs(source)
+	if err != nil {
+		return nil, err
+	}
+	ledger, err := Store{Path: absolute}.Read()
+	if err != nil {
+		return nil, err
+	}
+	ledger.Origin = &Origin{Kind: Imported, Source: absolute, Imported: now}
+	return ledger, s.create(ledger)
+}
+
+func (s Store) create(ledger *Ledger) error {
+	unlock, err := state.Lock(s.Path + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = os.Stat(s.Path)
+	switch {
+	case err == nil:
+		return fmt.Errorf("%s already exists; cc-remote never replaces a ledger", s.Path)
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	return state.Save(s.Path, ledger)
 }
 
 func (s Store) Update(change func(*Ledger) error) error {

@@ -22,6 +22,7 @@ func NewRootCmd() *cobra.Command {
 		newDrainCmd(),
 		newStatusCmd(),
 		newVerifyCmd(),
+		newLedgerCmd(),
 		newProxyCmd(),
 		newImagesCmd(),
 	)

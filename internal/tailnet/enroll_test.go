@@ -18,7 +18,7 @@ import (
 
 const (
 	enrolls  = ` up --auth-key="file:`
-	freshens = `test ! -e "/var/lib/tailscale/tailscaled.state"`
+	freshens = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
 	logsOut  = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
 	noState  = `{"BackendState":"NoState"}`
 )

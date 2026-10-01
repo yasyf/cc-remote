@@ -66,6 +66,13 @@ func (d Daemon) cli() string {
 	return `tailscale --socket="` + d.socket() + `"`
 }
 
+func (d Daemon) stateExists() string {
+	if d.Mode == Kernel {
+		return `sudo -n test -e "` + d.State() + `"`
+	}
+	return `test -e "` + d.State() + `"`
+}
+
 func (d Daemon) upFlags() string {
 	if d.Mode == Userspace {
 		return " --accept-dns=false"
@@ -115,7 +122,7 @@ func (d Daemon) ensureRunning() string {
 }
 
 func (d Daemon) FreshScript() string {
-	return remote.Script(`test ! -e "` + d.State() + `" || { echo "` + remote.Prefix + `: this machine already carries ` + d.State() + `, so its image or spare joined a tailnet before this claim; rebuild it unenrolled" >&2; exit 1; }`)
+	return remote.Script(`! ` + d.stateExists() + ` || { echo "` + remote.Prefix + `: this machine already carries ` + d.State() + `, so its image or spare joined a tailnet before this claim; rebuild it unenrolled" >&2; exit 1; }`)
 }
 
 func (d Daemon) UpScript(hostname string) string {
@@ -136,7 +143,7 @@ func (d Daemon) EnrollScript(hostname string) string {
 
 func (d Daemon) StatusScript() string {
 	return remote.Script(
-		`test -e "`+d.State()+`" || { echo '{"BackendState":"NoState"}'; exit 0; }`,
+		d.stateExists()+` || { echo '{"BackendState":"NoState"}'; exit 0; }`,
 		d.ensureRunning(),
 		d.cli()+" status --json",
 	)
@@ -144,7 +151,7 @@ func (d Daemon) StatusScript() string {
 
 func (d Daemon) LogoutScript() string {
 	return remote.Script(
-		`test -e "`+d.State()+`" || exit 0`,
+		d.stateExists()+` || exit 0`,
 		d.ensureRunning(),
 		d.cli()+" logout",
 	)

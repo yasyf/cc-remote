@@ -12,6 +12,15 @@ import (
 	"time"
 )
 
+func initialized(t *testing.T) Store {
+	t.Helper()
+	store := Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	if err := store.Init(epoch); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
 func pooled(t *testing.T, fingerprint string, ready ...string) (*Ledger, Spares) {
 	t.Helper()
 	ledger, spares := &Ledger{Resources: map[string]*Resource{}}, Spares{}
@@ -135,7 +144,7 @@ func TestDrainTakesOnlyUnclaimedSparesItIsAskedFor(t *testing.T) {
 }
 
 func TestConcurrentClaimsNeverShareASpare(t *testing.T) {
-	store := Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	store := initialized(t)
 	if err := store.UpdateSpares(func(ledger *Ledger, spares Spares) error {
 		seeded, seededSpares := pooled(t, "f", "a", "b", "c")
 		*ledger = *seeded
@@ -182,7 +191,7 @@ func TestConcurrentClaimsNeverShareASpare(t *testing.T) {
 }
 
 func TestAHelperThatPredatesThePoolCannotEraseIt(t *testing.T) {
-	store := Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	store := initialized(t)
 	if err := store.UpdateSpares(func(ledger *Ledger, spares Spares) error {
 		return spares.Prepare(ledger, "a", "sprites", "agents", "f", Rate{}, 0, 1, epoch)
 	}); err != nil {
@@ -196,7 +205,7 @@ func TestAHelperThatPredatesThePoolCannotEraseIt(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != 1 || fields["resources"] == nil {
+	if len(fields) != 2 || fields["resources"] == nil || fields["origin"] == nil {
 		t.Errorf("the ledger carries %d fields; any helper that rewrites it must lose nothing of the pool", len(fields))
 	}
 	if err := store.Update(func(*Ledger) error { return nil }); err != nil {
@@ -208,7 +217,7 @@ func TestAHelperThatPredatesThePoolCannotEraseIt(t *testing.T) {
 }
 
 func TestAWorkspaceDestroyedElsewhereLeavesThePool(t *testing.T) {
-	store := Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	store := initialized(t)
 	if err := store.UpdateSpares(func(ledger *Ledger, spares Spares) error {
 		if err := spares.Prepare(ledger, "a", "sprites", "agents", "f", Rate{}, 0, 1, epoch); err != nil {
 			return err

@@ -30,7 +30,7 @@ type Record struct {
 	Name      string        `json:"name"`
 	Provider  string        `json:"provider"`
 	Profile   string        `json:"profile"`
-	Ref       string        `json:"ref"`
+	Source    Source        `json:"source"`
 	Machine   string        `json:"machine"`
 	Claimed   bool          `json:"claimed,omitempty"`
 	Ready     bool          `json:"ready,omitempty"`
@@ -56,7 +56,7 @@ type Result struct {
 	Name          string        `json:"name"`
 	Provider      string        `json:"provider"`
 	Profile       string        `json:"profile"`
-	Ref           string        `json:"ref"`
+	Source        Source        `json:"source"`
 	Machine       string        `json:"machine"`
 	ProjectRoot   string        `json:"projectRoot"`
 	SSH           SSH           `json:"ssh"`

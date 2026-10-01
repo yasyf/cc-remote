@@ -35,7 +35,7 @@ func TestCheckoutScriptClonesShallowThenSwitchesRefWithoutKeepingTheToken(t *tes
 	git(t, origin, "commit", "-q", "--allow-empty", "-m", "second")
 	home := t.TempDir()
 	root := filepath.Join(home, "app")
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, "main", true), workspacetest.Token+"\n"); err != nil {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, true), workspacetest.Token+"\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "main" {
@@ -44,14 +44,14 @@ func TestCheckoutScriptClonesShallowThenSwitchesRefWithoutKeepingTheToken(t *tes
 	if shallow := git(t, root, "rev-parse", "--is-shallow-repository"); shallow != "true" {
 		t.Errorf("a lean checkout is not shallow: %s", shallow)
 	}
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, "feature", true), workspacetest.Token+"\n"); err != nil {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "feature"}, true), workspacetest.Token+"\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "feature" || git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "feature") {
 		t.Error("a second checkout did not switch to the requested ref")
 	}
 	git(t, origin, "commit", "-q", "--allow-empty", "-m", "third")
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, "main", false), "\n"); err != nil {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, false), "\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") {
@@ -67,7 +67,7 @@ func TestCheckoutScriptClonesShallowThenSwitchesRefWithoutKeepingTheToken(t *tes
 }
 
 func TestCheckoutScriptNeverPutsTheTokenInArgv(t *testing.T) {
-	script := workspace.CheckoutScript("/home/x/app", "https://github.com/example/app", "main", true)
+	script := workspace.CheckoutScript("/home/x/app", "https://github.com/example/app", workspace.Source{Ref: "main"}, true)
 	if strings.Contains(script, "x-access-token:") || !strings.Contains(script, "IFS= read -r token") || !strings.Contains(script, "GIT_ASKPASS") || !strings.Contains(script, "GIT_TERMINAL_PROMPT=0") {
 		t.Errorf("script = %s", script)
 	}
@@ -168,5 +168,47 @@ func TestAllocateForwardsKeepsHeldPortsAndAllocatesTheRest(t *testing.T) {
 func TestTokenGoesOnlyToGitHub(t *testing.T) {
 	if !workspace.TokenAllowed("https://github.com/example/app") || workspace.TokenAllowed("https://gitlab.com/example/app") || workspace.TokenAllowed("file:///tmp/app") {
 		t.Error("TokenAllowed")
+	}
+}
+
+func TestCheckoutScriptPinsTheRequestedCommitOnTheRequestedBranch(t *testing.T) {
+	repository := workspacetest.GitRepository(t)
+	origin := strings.TrimPrefix(repository, "file://")
+	head := git(t, origin, "rev-parse", "main")
+	git(t, origin, "commit", "-q", "--allow-empty", "-m", "moved on")
+	home := t.TempDir()
+	root := filepath.Join(home, "app")
+	pinned := workspace.Source{Ref: "main", Head: head, Branch: "orca/ws-1"}
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, pinned, false), "\n"); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if git(t, root, "rev-parse", "HEAD") != head || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "orca/ws-1" {
+		t.Errorf("checked out %s on %s", git(t, root, "rev-parse", "HEAD"), git(t, root, "rev-parse", "--abbrev-ref", "HEAD"))
+	}
+	gone := workspace.Source{Ref: "main", Head: strings.Repeat("0", 40), Branch: "orca/ws-2"}
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, gone, false), "\n"); err == nil || !strings.Contains(string(out), "pinned commit") {
+		t.Errorf("a vanished pin checked out: %v: %s", err, out)
+	}
+}
+
+func TestSourceValidationKeepsOptionsOutOfGit(t *testing.T) {
+	for _, bad := range []workspace.Source{
+		{Ref: "--upload-pack=touch /tmp/x"},
+		{Ref: "-b"},
+		{Ref: "a..b"},
+		{Ref: "main\nrm -rf /"},
+		{Ref: ""},
+		{Ref: "main", Head: "zzzz", Branch: "b"},
+		{Ref: "main", Head: "abcdef0", Branch: "--force"},
+		{Ref: "main", Head: "abcdef0"},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Errorf("%+v validated", bad)
+		}
+	}
+	for _, good := range []workspace.Source{{Ref: "main"}, {Ref: "feature/x.y-1"}, {Ref: "v1.2.3", Head: strings.Repeat("a", 40), Branch: "orca/ws"}} {
+		if err := good.Validate(); err != nil {
+			t.Errorf("%+v: %v", good, err)
+		}
 	}
 }

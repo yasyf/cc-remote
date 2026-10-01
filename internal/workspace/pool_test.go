@@ -20,6 +20,10 @@ var poolEpoch = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
 func testPool(t *testing.T, spares int, capUSD float64) Pool {
 	t.Helper()
+	store := budget.Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	if err := store.Init(poolEpoch); err != nil {
+		t.Fatal(err)
+	}
 	return Pool{
 		Provider:    "fake",
 		Profile:     "lean",
@@ -28,7 +32,7 @@ func testPool(t *testing.T, spares int, capUSD float64) Pool {
 		Rate:        budget.Rate{HourlyUSD: 1},
 		Estimate:    3,
 		Guard:       budget.Guard{CapUSD: capUSD, ReserveUSD: 10},
-		Ledger:      budget.Store{Path: filepath.Join(t.TempDir(), "ledger.json")},
+		Ledger:      store,
 	}
 }
 

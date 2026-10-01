@@ -96,13 +96,93 @@ func TestRetiredResourcesStayRetired(t *testing.T) {
 	if err := ledger.Retire("a", epoch); err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.Start("a", "namespace", "agents", Rate{}, 0, epoch); err == nil {
-		t.Fatal("a destroyed resource started again")
+	if err := ledger.Start("a", "namespace", "agents", Rate{HourlyUSD: 2}, 0, epoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	history := ledger.Resources["a~20260930T120000Z"]
+	if history == nil || history.Destroyed == nil || ledger.Resources["a"].Rate.HourlyUSD != 2 || ledger.Resources["a"].Destroyed != nil {
+		t.Fatalf("a recreated name did not archive its history: %+v", ledger.Resources)
+	}
+	if err := ledger.Retire("a", epoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if ledger.Resources["a"].Destroyed == nil || ledger.Resources["a~20260930T120000Z"] != history {
+		t.Fatal("retiring the recreated resource touched its history")
+	}
+	if err := ledger.Start("a", "namespace", "agents", Rate{}, 0, epoch.Add(time.Hour)); err != nil || ledger.Resources["a~20260930T130000Z"] == nil {
+		t.Fatalf("a second recreation did not archive the second life: %v", err)
+	}
+}
+
+func TestAStoreRefusesWorkUntilALedgerIsStartedOrImported(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	if _, err := store.Read(); !errors.Is(err, ErrNoLedger) {
+		t.Fatalf("read of a missing ledger = %v", err)
+	}
+	if err := store.Update(func(*Ledger) error { return nil }); !errors.Is(err, ErrNoLedger) {
+		t.Fatalf("update of a missing ledger = %v", err)
+	}
+	if err := store.Init(epoch); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(epoch); err == nil {
+		t.Fatal("init replaced a ledger")
+	}
+	ledger, err := store.Read()
+	if err != nil || ledger.Origin == nil || ledger.Origin.Kind != Created || !ledger.Origin.Imported.Equal(epoch) {
+		t.Fatalf("ledger = %+v, %v", ledger, err)
+	}
+}
+
+func TestImportCarriesAnEarlierLedgerOverWithProvenance(t *testing.T) {
+	source := Store{Path: filepath.Join(t.TempDir(), "forge-pilot.json")}
+	if err := source.Init(epoch); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Update(func(ledger *Ledger) error {
+		return ledger.Start("kept", "namespace", "agents", Rate{HourlyUSD: 1}, 5, epoch)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := Store{Path: filepath.Join(t.TempDir(), "default.json")}
+	imported, err := store.Import(source.Path, epoch.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ledger.Origin == nil || ledger.Origin.Kind != Imported || ledger.Origin.Source != source.Path || !ledger.Running("kept") || imported.Origin.Kind != Imported {
+		t.Fatalf("imported ledger = %+v", ledger)
+	}
+	if _, err := store.Import(source.Path, epoch); err == nil {
+		t.Fatal("import replaced a ledger")
+	}
+	if _, err := (Store{Path: filepath.Join(t.TempDir(), "other.json")}).Import(filepath.Join(t.TempDir(), "missing.json"), epoch); !errors.Is(err, ErrNoLedger) {
+		t.Fatalf("import of a missing source = %v", err)
+	}
+}
+
+func TestAdmitRefusesABudgetItCannotJudge(t *testing.T) {
+	ledger := &Ledger{Resources: map[string]*Resource{}}
+	for _, guard := range []Guard{{CapUSD: math.NaN()}, {CapUSD: math.Inf(1)}, {CapUSD: 100, ReserveUSD: math.NaN()}} {
+		if err := guard.Admit(ledger, 1, epoch); err == nil {
+			t.Errorf("%+v admitted a trial", guard)
+		}
+	}
+	for _, estimate := range []float64{math.NaN(), math.Inf(1), -1} {
+		if err := (Guard{CapUSD: 100}).Admit(ledger, estimate, epoch); err == nil {
+			t.Errorf("an estimate of %v was admitted", estimate)
+		}
+	}
+	if err := (Guard{CapUSD: 100}).Admit(ledger, 1, epoch); err != nil {
+		t.Error(err)
 	}
 }
 
 func TestStoreSerializesConcurrentCreates(t *testing.T) {
-	store := Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
+	store := initialized(t)
 	guard := Guard{CapUSD: 100, ReserveUSD: 10}
 	var wg sync.WaitGroup
 	admitted := make(chan string, 8)

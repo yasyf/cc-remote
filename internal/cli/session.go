@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -100,91 +101,158 @@ func emit(out io.Writer, value any) error {
 
 func newCreateCmd() *cobra.Command {
 	var flags selection
-	var ref string
+	var ref, connection string
 	cmd := &cobra.Command{
-		Use:   "create <name>",
+		Use:   "create [name]",
 		Short: "Create a workspace, claiming a prepared spare when one matches",
 		Long: `create claims a ready spare with the current fingerprint or creates a fresh
 machine, checks out the requested ref, runs the profile's prepare steps and the
 bootstrap script, enrolls the machine in the tailnet when one is configured,
 and prints the connection as JSON on stdout. A failed create removes what it
-made, leaving the tailnet only when this attempt enrolled.`,
-		Args: cobra.ExactArgs(1),
+made, leaving the tailnet only when this attempt enrolled.
+
+With --connection, create runs as an Orca VM recipe: the name comes from
+ORCA_RECIPE_ID and ORCA_VM_INSTANCE_ID, the checkout is pinned to
+ORCA_REPO_REF_HEAD on branch ORCA_REPO_BRANCH, and stdout carries Orca's
+schema 2 provisioned-root result instead.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := orcaMode(connection); err != nil {
+				return err
+			}
+			name, source := "", workspace.Source{Ref: ref}
+			if len(args) == 1 {
+				name = args[0]
+			}
+			if name == "" && connection == "" {
+				return errors.New("name the workspace")
+			}
 			session, err := flags.open()
 			if err != nil {
 				return err
 			}
-			if ref == "" {
-				ref = session.Config.Ref
+			if connection != "" {
+				if source, err = orcaSource(lookupEnv, session.Config.Repository); err != nil {
+					return err
+				}
+				if name == "" {
+					if name, err = orcaName(lookupEnv); err != nil {
+						return err
+					}
+				}
 			}
-			result, err := session.Create(cmd.Context(), args[0], ref)
+			if source.Ref == "" {
+				source.Ref = session.Config.Ref
+			}
+			result, err := session.Create(cmd.Context(), name, source)
 			if err != nil {
 				return err
+			}
+			if connection != "" {
+				return emit(cmd.OutOrStdout(), orcaResultOf(result))
 			}
 			return emit(cmd.OutOrStdout(), result)
 		},
 	}
 	flags.bind(cmd)
 	cmd.Flags().StringVar(&ref, "ref", "", "branch or tag to check out (default config.ref)")
+	bindConnection(cmd, &connection)
 	return cmd
+}
+
+func bindConnection(cmd *cobra.Command, connection *string) {
+	cmd.Flags().StringVar(connection, "connection", "", "run as an Orca VM recipe over this connection (ssh)")
+}
+
+func orcaTarget(cmd *cobra.Command, args []string, connection string) (string, error) {
+	if err := orcaMode(connection); err != nil {
+		return "", err
+	}
+	if len(args) == 1 {
+		return args[0], nil
+	}
+	if connection == "" {
+		return "", errors.New("name the workspace")
+	}
+	return orcaResource(cmd.InOrStdin())
 }
 
 func newResumeCmd() *cobra.Command {
 	var flags selection
+	var connection string
 	cmd := &cobra.Command{
-		Use:   "resume <name>",
+		Use:   "resume [name]",
 		Short: "Wake a workspace, refresh it, and print its connection",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			name, err := orcaTarget(cmd, args, connection)
+			if err != nil {
+				return err
+			}
 			session, err := flags.open()
 			if err != nil {
 				return err
 			}
-			result, err := session.Resume(cmd.Context(), args[0])
+			result, err := session.Resume(cmd.Context(), name)
 			if err != nil {
 				return err
+			}
+			if connection != "" {
+				return emit(cmd.OutOrStdout(), orcaResultOf(result))
 			}
 			return emit(cmd.OutOrStdout(), result)
 		},
 	}
 	flags.bind(cmd)
+	bindConnection(cmd, &connection)
 	return cmd
 }
 
 func newSuspendCmd() *cobra.Command {
 	var flags selection
+	var connection string
 	cmd := &cobra.Command{
-		Use:   "suspend <name>",
+		Use:   "suspend [name]",
 		Short: "Stop a workspace's compute; storage and its tailnet node stay",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			name, err := orcaTarget(cmd, args, connection)
+			if err != nil {
+				return err
+			}
 			session, err := flags.open()
 			if err != nil {
 				return err
 			}
-			return session.Suspend(cmd.Context(), args[0])
+			return session.Suspend(cmd.Context(), name)
 		},
 	}
 	flags.bind(cmd)
+	bindConnection(cmd, &connection)
 	return cmd
 }
 
 func newDestroyCmd() *cobra.Command {
 	var flags selection
+	var connection string
 	cmd := &cobra.Command{
-		Use:   "destroy <name>",
+		Use:   "destroy [name]",
 		Short: "Leave the tailnet, destroy the machine, and retire the ledger entry",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			name, err := orcaTarget(cmd, args, connection)
+			if err != nil {
+				return err
+			}
 			session, err := flags.open()
 			if err != nil {
 				return err
 			}
-			return session.Destroy(cmd.Context(), args[0])
+			return session.Destroy(cmd.Context(), name)
 		},
 	}
 	flags.bind(cmd)
+	bindConnection(cmd, &connection)
 	return cmd
 }
 

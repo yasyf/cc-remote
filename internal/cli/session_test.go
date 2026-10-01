@@ -59,6 +59,18 @@ func TestEveryLifecycleCommandTakesTheSelectionFlags(t *testing.T) {
 			}
 		}
 	}
+	for _, name := range []string{"create", "resume", "suspend", "destroy"} {
+		cmd, _, _ := root.Find([]string{name})
+		if cmd.Flags().Lookup("connection") == nil {
+			t.Errorf("%s lacks --connection, which Orca's recipes pass", name)
+		}
+	}
+	for _, name := range []string{"init", "import"} {
+		cmd, _, err := root.Find([]string{"ledger", name})
+		if err != nil || cmd.Name() != name || cmd.Flags().Lookup("config") == nil {
+			t.Errorf("no ledger %s command taking --config: %v", name, err)
+		}
+	}
 	if cmd, _, _ := root.Find([]string{"warm"}); cmd.Name() != "prepare" {
 		t.Error("warm is not an alias of prepare")
 	}
@@ -85,5 +97,37 @@ func TestEmitWritesIndentedJSON(t *testing.T) {
 	var decoded map[string]int
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil || decoded["a"] != 1 || !strings.Contains(out.String(), "\n  ") {
 		t.Errorf("emit wrote %q, %v", out.String(), err)
+	}
+}
+
+func TestLedgerInitThenImportRefuseToReplaceALedger(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	config := filepath.Join("..", "..", "examples", "config.yaml")
+	run := func(args ...string) (string, error) {
+		root := NewRootCmd()
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetArgs(append(args, "--config", config))
+		err := root.Execute()
+		return out.String(), err
+	}
+	out, err := run("ledger", "init")
+	if err != nil || !strings.Contains(out, `"origin": "created"`) {
+		t.Fatalf("init: %v: %s", err, out)
+	}
+	if _, err := run("ledger", "init"); err == nil || !strings.Contains(err.Error(), "never replaces") {
+		t.Errorf("a second init: %v", err)
+	}
+	if _, err := run("ledger", "import", config); err == nil {
+		t.Error("import replaced the ledger")
+	}
+	if _, err := run("create", "ws-1", "--connection", "server"); err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Errorf("create --connection server: %v", err)
+	}
+	if _, err := run("destroy", "--connection", "ssh"); err == nil || !strings.Contains(err.Error(), "stdin") {
+		t.Errorf("destroy with no name and no payload: %v", err)
+	}
+	if _, err := run("create"); err == nil || !strings.Contains(err.Error(), "name the workspace") {
+		t.Errorf("create with no name: %v", err)
 	}
 }

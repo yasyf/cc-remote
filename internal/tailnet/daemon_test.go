@@ -150,11 +150,23 @@ func TestScriptsKeepTheStateTheNextBootReattachesWith(t *testing.T) {
 				t.Errorf("%v script starts tailscaled without the persistent state the next boot re-attaches with:\n%s", daemon, script)
 			}
 		}
-		if fresh := daemon.FreshScript(); !strings.Contains(fresh, `test ! -e "`+daemon.State()+`"`) || strings.Contains(fresh, "tailscaled ") {
+		if fresh := daemon.FreshScript(); !strings.Contains(fresh, "! "+daemon.stateExists()) || strings.Contains(fresh, "tailscaled ") {
 			t.Errorf("%v claim does not refuse a machine that already carries tailscaled state before any daemon starts:\n%s", daemon, fresh)
 		}
 		if strings.Contains(daemon.StatusScript(), " up ") || strings.Contains(daemon.LogoutScript(), " up ") {
 			t.Errorf("%v status or logout script enrolls", daemon)
 		}
+	}
+}
+
+func TestKernelModeChecksRootOwnedStateThroughSudo(t *testing.T) {
+	kernel := Daemon{Mode: Kernel, Supervisor: SpriteEnv}
+	for name, script := range map[string]string{"fresh": kernel.FreshScript(), "status": kernel.StatusScript(), "logout": kernel.LogoutScript()} {
+		if !strings.Contains(script, `sudo -n test -e "`+kernel.State()+`"`) {
+			t.Errorf("%s reads %s as the unprivileged user, who cannot see into /var/lib/tailscale:\n%s", name, kernel.State(), script)
+		}
+	}
+	if script := (Daemon{Mode: Userspace, Supervisor: Setsid}).StatusScript(); strings.Contains(script, "sudo") {
+		t.Errorf("userspace status needs root:\n%s", script)
 	}
 }

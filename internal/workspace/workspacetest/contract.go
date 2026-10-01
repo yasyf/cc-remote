@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
@@ -41,6 +42,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		{"DrainDestroysUnclaimedSpares", drainDestroysUnclaimedSpares},
 		{"TokenNeverReachesAScriptOrDisk", tokenNeverReachesAScriptOrDisk},
 		{"VerifyReportsEveryCheck", verifyReportsEveryCheck},
+		{"CreateRefusesWithoutALedger", createRefusesWithoutALedger},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -115,6 +117,9 @@ func Open(t *testing.T, h Harness) *workspace.Session {
 	s.Token = func(context.Context) (string, error) { return Token, nil }
 	s.Stderr = &testWriter{t: t}
 	s.Log = slog.New(slog.DiscardHandler)
+	if err := s.Pool.Ledger.Init(time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
@@ -158,7 +163,7 @@ func record(t *testing.T, s *workspace.Session, name string) (workspace.Record, 
 
 func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	ctx := t.Context()
-	result, err := s.Create(ctx, "ws-1", "main")
+	result, err := s.Create(ctx, "ws-1", workspace.Source{Ref: "main"})
 	if err != nil {
 		t.Fatalf("Create = %v", err)
 	}
@@ -169,7 +174,7 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if err != nil || machine.Labels[workspace.LabelWorkspace] != "ws-1" || machine.Labels[workspace.LabelProfile] != "lean" {
 		t.Errorf("machine = %+v, %v", machine, err)
 	}
-	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != "ws-1" || rec.Ref != "main" || rec.Claimed || len(rec.Forwards) != 1 {
+	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != "ws-1" || rec.Source.Ref != "main" || rec.Claimed || len(rec.Forwards) != 1 {
 		t.Errorf("record = %+v, found %v", rec, found)
 	}
 	if !ledger(t, s).Running("ws-1") {
@@ -203,17 +208,37 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if _, err := s.Resume(ctx, "ws-1"); err == nil {
 		t.Error("a destroyed workspace resumed")
 	}
+	if _, err := s.Create(ctx, "ws-1", workspace.Source{Ref: "main"}); err != nil {
+		t.Errorf("a destroyed name could not be created again: %v", err)
+	}
+}
+
+func createRefusesWithoutALedger(t *testing.T, h Harness, _ *workspace.Session) {
+	s, err := workspace.Open(Config(t, h), h.Provider, h.Kind, "lean", h.Platform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Log = slog.New(slog.DiscardHandler)
+	if _, err := s.Create(t.Context(), "ws-5", workspace.Source{Ref: "main"}); !errors.Is(err, budget.ErrNoLedger) {
+		t.Errorf("a create with no ledger: %v", err)
+	}
+	if err := s.Prepare(t.Context()); !errors.Is(err, budget.ErrNoLedger) {
+		t.Errorf("a prepare with no ledger: %v", err)
+	}
+	if _, err := h.Provider.Get(t.Context(), "ws-5"); !errors.Is(err, providers.ErrNotFound) {
+		t.Error("a machine was created without a ledger")
+	}
 }
 
 func createRefusesADuplicate(t *testing.T, _ Harness, s *workspace.Session) {
 	ctx := t.Context()
-	if _, err := s.Create(ctx, "ws-2", "main"); err != nil {
+	if _, err := s.Create(ctx, "ws-2", workspace.Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Create(ctx, "ws-2", "main"); err == nil || !strings.Contains(err.Error(), "already exists") {
+	if _, err := s.Create(ctx, "ws-2", workspace.Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("a second create of the same name: %v", err)
 	}
-	if _, err := s.Create(ctx, "Bad Name", "main"); err == nil {
+	if _, err := s.Create(ctx, "Bad Name", workspace.Source{Ref: "main"}); err == nil {
 		t.Error("an invalid name was created")
 	}
 	if rec, found := record(t, s, "ws-2"); !found || rec.Machine != "ws-2" {
@@ -246,11 +271,11 @@ func prepareFillsThePoolAndCreateClaims(t *testing.T, h Harness, s *workspace.Se
 	}
 	refills := 0
 	s.Refill = func() error { refills++; return nil }
-	result, err := s.Create(ctx, "ws-3", "feature")
+	result, err := s.Create(ctx, "ws-3", workspace.Source{Ref: "feature"})
 	if err != nil {
 		t.Fatalf("Create = %v", err)
 	}
-	if _, isSpare := pooled[result.Machine]; !isSpare || result.Name != "ws-3" || result.Ref != "feature" {
+	if _, isSpare := pooled[result.Machine]; !isSpare || result.Name != "ws-3" || result.Source.Ref != "feature" {
 		t.Errorf("create did not claim a spare: %+v", result)
 	}
 	if refills != 1 {
@@ -294,7 +319,7 @@ func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Sessio
 	ctx := t.Context()
 	seen := &capture{Provider: h.Provider}
 	s.Provider = seen
-	if _, err := s.Create(ctx, "ws-4", "main"); err != nil {
+	if _, err := s.Create(ctx, "ws-4", workspace.Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, cmd := range seen.commands {
@@ -322,7 +347,7 @@ func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Sessio
 
 func verifyReportsEveryCheck(t *testing.T, _ Harness, s *workspace.Session) {
 	checks := s.Verify(t.Context())
-	for _, name := range []string{"config", "state", "provider", "ssh"} {
+	for _, name := range []string{"config", "state", "ledger", "provider", "ssh"} {
 		if checks[name] != "ok" {
 			t.Errorf("check %s = %q", name, checks[name])
 		}

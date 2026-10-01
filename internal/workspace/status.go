@@ -146,6 +146,8 @@ func (s *Session) Verify(ctx context.Context) map[string]string {
 	}
 	report("config", nil)
 	report("state", s.stateWritable())
+	_, err := s.Pool.Ledger.Read()
+	report("ledger", err)
 	report("provider", s.Provider.Check(ctx))
 	if TokenAllowed(s.Config.Repository) {
 		_, err := s.Token(ctx)

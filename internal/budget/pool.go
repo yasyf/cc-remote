@@ -109,6 +109,20 @@ func (sp Spares) MarkReady(l *Ledger, id string, now time.Time) error {
 	return l.Stop(id, now)
 }
 
+func (s Store) ClaimedFor(request string) (string, bool, error) {
+	ledger, err := s.Read()
+	if err != nil {
+		return "", false, err
+	}
+	spares, err := s.ReadSpares()
+	if err != nil {
+		return "", false, err
+	}
+	spares.DropRetired(ledger)
+	id, ok := spares.HeldBy(request)
+	return id, ok, nil
+}
+
 func (sp Spares) HeldBy(request string) (string, bool) {
 	for id, spare := range sp {
 		if spare.State == Claimed && spare.Request == request {

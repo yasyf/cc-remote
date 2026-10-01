@@ -30,7 +30,7 @@ const (
 	tag      = "tag:cc-remote"
 	token    = "ghp_" + "testtokenthatmustnotreachascript00000000"
 	enrolls  = ` up --auth-key="file:`
-	freshens = `test ! -e "/var/lib/tailscale/tailscaled.state"`
+	freshens = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
 	logsOut  = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
 	renews   = `rm -rf "$HOME"/.claude.json`
 	checkout = "git clone --quiet"
@@ -270,6 +270,9 @@ budget:
 	session.Log = slog.New(slog.DiscardHandler)
 	session.Stderr = io.Discard
 	session.Token = func(context.Context) (string, error) { return token, nil }
+	if err := session.Pool.Ledger.Init(time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	api := &fakeTailnet{devices: []tailnet.Device{owned("nNEW")}}
 	if withTailnet {
 		client := api.serve(t)
@@ -356,7 +359,7 @@ func (h *harness) calls() string {
 
 func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	h := newHarness(t, 0, true)
-	result, err := h.session.Create(context.Background(), "ws-1", "feature")
+	result, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +383,7 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if !strings.Contains(h.machine.scripts["ws-1"][order[0]], "--depth 1") || !strings.Contains(h.machine.scripts["ws-1"][order[0]], "ref=feature") {
 		t.Error("the lean checkout is not a shallow checkout of the requested ref")
 	}
-	if result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Ref != "feature" {
+	if result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Source.Ref != "feature" {
 		t.Errorf("result = %+v", result)
 	}
 	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || record.Claimed {
@@ -407,7 +410,7 @@ func TestAClaimRenewsIdentityBeforeInstallingThenWarmsAndEnrolls(t *testing.T) {
 	refills := 0
 	h.session.Refill = func() error { refills++; return nil }
 	before := len(h.machine.scripts[spare])
-	result, err := h.session.Create(context.Background(), "ws-1", "main")
+	result, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,12 +437,12 @@ func TestAClaimRenewsIdentityBeforeInstallingThenWarmsAndEnrolls(t *testing.T) {
 func TestARetriedCreateReattachesItsClaimWithoutRenewingIdentity(t *testing.T) {
 	h := newHarness(t, 1, true)
 	spare := h.prepared()
-	if _, err := h.session.Create(context.Background(), "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	identities, minted := h.machine.ran(spare, renews), h.api.mintedKeys()
 	calls := len(h.fake.Calls())
-	if _, err := h.session.Create(context.Background(), "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	if h.machine.ran(spare, renews) != identities || h.api.mintedKeys() != minted || h.machine.ran(spare, checkout) != 2 {
@@ -456,11 +459,11 @@ func TestARetriedCreateReattachesItsClaimWithoutRenewingIdentity(t *testing.T) {
 func TestAFailedReattachLeavesTheWorkspace(t *testing.T) {
 	h := newHarness(t, 1, true)
 	spare := h.prepared()
-	if _, err := h.session.Create(context.Background(), "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	h.machine.failAll = true
-	if _, err := h.session.Create(context.Background(), "ws-1", "main"); err == nil {
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil {
 		t.Fatal("the reattach succeeded on a machine that fails every command")
 	}
 	if strings.Contains(h.calls(), "destroy") {
@@ -481,7 +484,7 @@ func TestARetryOfAnUnfinishedCreateTouchesNothing(t *testing.T) {
 		t.Fatal(assignment, err)
 	}
 	calls := len(h.fake.Calls())
-	if _, err := h.session.Create(context.Background(), "ws-1", "main"); err == nil || !strings.Contains(err.Error(), "never finished") {
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "never finished") {
 		t.Fatalf("a retry reattached a claim whose first create never finished: %v", err)
 	}
 	if len(h.fake.Calls()) != calls {
@@ -500,7 +503,7 @@ func TestARetriedFreshCreateLeavesTheWorkspaceItMade(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.machine.failAll = true
-			if _, err := h.session.Create(context.Background(), "ws-1", "main"); err == nil || !strings.Contains(err.Error(), "already exists") {
+			if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already exists") {
 				t.Fatalf("the retry of a fresh create returned %v; want a refusal before any machine call", err)
 			}
 			if len(h.fake.Calls()) != 0 {
@@ -516,7 +519,7 @@ func TestARetriedFreshCreateLeavesTheWorkspaceItMade(t *testing.T) {
 func TestAFailedCreateLeavesTheTailnetThenDiscardsWhatItMade(t *testing.T) {
 	h := newHarness(t, 0, true)
 	h.provider.unreachable.Store(true)
-	_, err := h.session.Create(context.Background(), "ws-1", "main")
+	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
 	if err == nil || !strings.Contains(err.Error(), "no route") {
 		t.Fatalf("err = %v", err)
 	}
@@ -538,7 +541,7 @@ func TestAFailedCreateDestroysTheMachineEvenWhenItsNodeCannotBeRevoked(t *testin
 	h := newHarness(t, 0, true)
 	h.api.refuse = true
 	h.provider.unreachable.Store(true)
-	_, err := h.session.Create(context.Background(), "ws-1", "main")
+	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
 	if err == nil || !strings.Contains(err.Error(), "by hand") {
 		t.Fatalf("err = %v", err)
 	}
@@ -567,7 +570,7 @@ func TestAFailedResumeRevokesOnlyTheNodeItEnrolled(t *testing.T) {
 			if _, err := h.fake.Create(context.Background(), providers.Spec{Name: "ws-1"}); err != nil {
 				t.Fatal(err)
 			}
-			h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Ref: "main", Machine: "ws-1"})
+			h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Source: Source{Ref: "main"}, Machine: "ws-1"})
 			h.machine.setStatus(tt.status)
 			if tt.binding != (tailnet.Binding{}) {
 				h.bind(tt.binding)
@@ -588,7 +591,7 @@ func TestAConcurrentResumeNeverRevokesTheNodeAnotherEstablished(t *testing.T) {
 	if _, err := h.fake.Create(context.Background(), providers.Spec{Name: "ws-1"}); err != nil {
 		t.Fatal(err)
 	}
-	h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Ref: "main", Machine: "ws-1"})
+	h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Source: Source{Ref: "main"}, Machine: "ws-1"})
 	enrolling, enrolled, connecting, connected := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var firstEnroll, firstConnect sync.Once
 	h.machine.onEnroll = func() {
@@ -641,7 +644,7 @@ func TestAConcurrentResumeNeverRevokesTheNodeAnotherEstablished(t *testing.T) {
 func TestAWorkspaceWithNoTailnetNeverTouchesTheTailnet(t *testing.T) {
 	h := newHarness(t, 0, false)
 	ctx := context.Background()
-	if _, err := h.session.Create(ctx, "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.session.Resume(ctx, "ws-1"); err != nil {
@@ -661,7 +664,7 @@ func TestAWorkspaceWithNoTailnetNeverTouchesTheTailnet(t *testing.T) {
 func TestDestroyLeavesTheTailnetBeforeTheMachineAndRetiresTheLedger(t *testing.T) {
 	h := newHarness(t, 0, true)
 	ctx := context.Background()
-	if _, err := h.session.Create(ctx, "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	calls := len(h.fake.Calls())
@@ -698,7 +701,7 @@ func TestDestroyLeavesTheTailnetBeforeTheMachineAndRetiresTheLedger(t *testing.T
 func TestSuspendStopsTheLedgerAndResumeRestartsIt(t *testing.T) {
 	h := newHarness(t, 0, false)
 	ctx := context.Background()
-	if _, err := h.session.Create(ctx, "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
@@ -783,7 +786,7 @@ func TestAFailedPrepareDiscardsTheSpare(t *testing.T) {
 func TestStatusReportsWorkspacesPoolAndBudget(t *testing.T) {
 	h := newHarness(t, 1, false)
 	spare := h.prepared()
-	if _, err := h.session.Create(context.Background(), "ws-1", "main"); err != nil {
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
 	status, err := h.session.Status()
@@ -799,4 +802,123 @@ func TestStatusReportsWorkspacesPoolAndBudget(t *testing.T) {
 	if status.Budget.CapUSD != 100 || status.Budget.RemainingUSD >= 90 || len(status.Resources) != 1 || !status.Resources[0].Running {
 		t.Errorf("budget = %+v, resources = %+v", status.Budget, status.Resources)
 	}
+}
+
+func TestAFreshCreateNeverDestroysAMachineItDidNotMake(t *testing.T) {
+	h := newHarness(t, 0, true)
+	ctx := context.Background()
+	if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1", Labels: map[string]string{LabelWorkspace: "someone-else"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); !errors.Is(err, providers.ErrExists) {
+		t.Fatalf("err = %v", err)
+	}
+	if machine, err := h.fake.Get(ctx, "ws-1"); err != nil || machine.Labels[LabelWorkspace] != "someone-else" {
+		t.Errorf("the collision destroyed the other owner's machine: %+v, %v", machine, err)
+	}
+	if h.machine.scripts["ws-1"] != nil || h.api.mintedKeys() != 0 || len(h.api.deletedNodes()) != 0 {
+		t.Errorf("the refused create ran %q, minted %d, deleted %v", h.machine.scripts["ws-1"], h.api.mintedKeys(), h.api.deletedNodes())
+	}
+	if _, found := h.record("ws-1"); found {
+		t.Error("the refused create left a record")
+	}
+	if resource := h.ledger().Resources["ws-1"]; resource == nil || resource.Destroyed == nil {
+		t.Errorf("the ledger still runs the machine that was never made: %+v", resource)
+	}
+}
+
+func TestCreateRefusesANameAnotherLedgerRecorded(t *testing.T) {
+	h := newHarness(t, 0, true)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	other := budget.Store{Path: filepath.Join(t.TempDir(), "other.json")}
+	if err := other.Init(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.session.Pool.Ledger = other
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already recorded") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
+		t.Error("the refused create destroyed the recorded workspace's machine")
+	}
+	if len(h.api.deletedNodes()) != 0 || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) {
+		t.Errorf("the refused create revoked the recorded workspace's node: deleted %v, bound %v", h.api.deletedNodes(), h.bound())
+	}
+	if _, found := h.record("ws-1"); !found {
+		t.Error("the refused create forgot the recorded workspace")
+	}
+}
+
+func TestDestroyReleasesAClaimWhoseCreateNeverRecordedIt(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := context.Background()
+	spare := h.prepared()
+	if _, assignment, err := h.session.Pool.Assign("ws-1", time.Now()); err != nil || assignment != NewClaim {
+		t.Fatal(assignment, err)
+	}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "never finished") {
+		t.Fatalf("err = %v", err)
+	}
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, spare); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("the claimed spare survived: %v", err)
+	}
+	if _, held := h.spares()[spare]; held {
+		t.Error("the claim survived destroy")
+	}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Errorf("the name could not be created after the orphaned claim was destroyed: %v", err)
+	}
+}
+
+func TestDestroyHoldsTheResourceUntilTheMachineIsGone(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	destroying, release := make(chan struct{}), make(chan struct{})
+	h.session.Provider = &slowDestroy{Provider: h.provider, started: destroying, release: release}
+	done := make(chan error, 1)
+	go func() { done <- h.session.Destroy(ctx, "ws-1") }()
+	<-destroying
+	acquired := make(chan bool, 1)
+	go func() {
+		held, err := h.session.State.Hold("ws-1")
+		if err != nil {
+			t.Error(err)
+		}
+		defer held.Release()
+		_, found := h.record("ws-1")
+		acquired <- found
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("the resource lock was free while the provider was still destroying the machine")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if found := <-acquired; found {
+		t.Error("the lock was acquired while the destroyed workspace was still recorded")
+	}
+}
+
+type slowDestroy struct {
+	providers.Provider
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *slowDestroy) Destroy(ctx context.Context, id string) error {
+	close(s.started)
+	<-s.release
+	return s.Provider.Destroy(ctx, id)
 }
