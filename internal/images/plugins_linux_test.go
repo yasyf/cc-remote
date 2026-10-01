@@ -337,6 +337,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 		catalog      func(map[string]any)
 		state        fakeState
 		settings     map[string]any
+		loose        bool
 		wantErr      string
 		wantCalls    []string
 		absentCalls  []string
@@ -373,6 +374,14 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
 			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
+			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
+		},
+		{
+			name:         "settings and a stale temp file at 0644",
+			marketplaces: []Marketplace{toolsRef, officialBranch},
+			state:        registered("main", "0.7.17"),
+			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			loose:        true,
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
 		{
@@ -424,6 +433,18 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				tt.catalog(catalog)
 			}
 			h := newPluginsHost(t, tt.marketplaces, catalog, tt.state, tt.settings)
+			if tt.loose {
+				settings := filepath.Join(h.home, ".claude", "settings.json")
+				if err := os.Chmod(settings, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settings+".tmp", []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(settings+".tmp", 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			out, err := h.plugins("install", digest)
 			calls := h.calls()
 			if tt.wantErr != "" {

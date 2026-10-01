@@ -240,14 +240,15 @@ verify_captain_hook() {
 }
 
 edit_settings() (
-  local settings="$HOME/.claude/settings.json"
+  local settings="$HOME/.claude/settings.json" edited
   umask 077
   mkdir -p "$HOME/.claude"
   if [ ! -f "$settings" ]; then
     echo '{}' > "$settings"
   fi
-  jq "$@" "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  edited="$(mktemp "$settings.XXXXXX")"
+  jq "$@" "$settings" > "$edited"
+  mv "$edited" "$settings"
 )
 
 claude_env() {
