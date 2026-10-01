@@ -1,11 +1,15 @@
 # cc-remote Development Guide
 
-cc-remote is a repo-agnostic Go CLI in early development; only `cc-remote version`
-exists. Planned work covers VMs where Claude Code and Codex run against a
-repository checkout, with Sprites and Namespace backends and an Orca desktop
-frontend. The planned default is lean: agent tools and plugins plus a shallow
-checkout of the requested ref, without project dependency installation or Tilt;
-a full-stack workspace on Namespace over SSH will require opt-in config.
+cc-remote is a repo-agnostic Go CLI for remote agent workspaces, with Sprites and
+Namespace backends and an Orca desktop frontend. The default profile prepares
+agent tools and plugins plus a shallow checkout of the requested commit.
+Project dependency installation and platform startup belong to optional
+profile commands. A full platform on Namespace over SSH requires opt-in config.
+
+Read `docs/orca-workspaces.md` for the native composer flow and
+`docs/tool-inventory.md` for tool preparation. Recipe generation and waiting
+must use the same config and lifecycle binary. Preserve existing budget
+history and resource ownership; initialize a ledger only for a new budget.
 
 ## Repository Structure
 
@@ -13,11 +17,17 @@ a full-stack workspace on Namespace over SSH will require opt-in config.
 cc-remote/
 ├── cmd/cc-remote/          # main package
 ├── internal/
-│   ├── cli/               # Cobra command tree; version only
+│   ├── cli/               # Cobra commands and workspace lifecycle
+│   ├── config/            # repository, profiles, and provider configuration
+│   ├── frontends/orca/    # recipe generation and client verification
+│   ├── images/            # tool inventory and preparation scripts
+│   ├── providers/         # Sprites and Namespace backends
+│   ├── state/             # workspace records and SSH fragments
 │   ├── version/           # version string, stamped by -ldflags
 │   └── log/               # slog setup
 ├── docs/
-│   └── architecture.md    # planned packages
+│   ├── architecture.md    # lifecycle and ownership
+│   └── orca-workspaces.md # client setup and commands
 ├── .github/workflows/
 │   ├── ci.yml             # vet/test -race/build on Ubuntu + macOS; golangci-lint, govulncheck, actionlint
 │   ├── release.yml        # v* tags call the shared homebrew-tap release-go workflow

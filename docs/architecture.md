@@ -5,10 +5,11 @@ a different profile when its task needs a complete platform. The repository's
 setup commands belong to that profile; the environment manager supplies the
 host, checkout, tools, and lifecycle.
 
-This is the architecture target for `cc-remote`. The Sprites and Namespace
-provider backends and the image/tool-inventory implementation have landed.
-The CLI exposes `version` and `images render|fingerprint|build`; workspace
-lifecycle, prepared claims, and the Orca adapter are under development.
+cc-remote implements this separation with Sprites and Namespace backends,
+image and tool preparation, workspace lifecycle, prepared claims, and an Orca
+adapter. The [workspace guide](orca-workspaces.md) describes the client setup.
+The Orca composer flow and live personal-tailnet enrollment still need live
+verification; startup timings for this implementation have not been measured.
 
 ## Separate the client from the host
 
