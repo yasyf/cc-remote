@@ -222,18 +222,35 @@ func (h pluginsHost) calls() []string {
 	return strings.Split(strings.ReplaceAll(string(raw), h.home, "HOME"), "\n")
 }
 
-func (h pluginsHost) declared(name string) any {
-	raw, err := os.ReadFile(filepath.Join(h.home, ".claude", "settings.json"))
+func (h pluginsHost) settings() map[string]any {
+	path := filepath.Join(h.home, ".claude", "settings.json")
+	info, err := os.Stat(path)
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	var settings struct {
-		ExtraKnownMarketplaces map[string]any `json:"extraKnownMarketplaces"`
+	if info.Mode().Perm() != 0o600 {
+		h.t.Errorf("settings.json mode = %#o, want 0600", info.Mode().Perm())
 	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var settings map[string]any
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		h.t.Fatal(err)
 	}
-	return settings.ExtraKnownMarketplaces[name]
+	return settings
+}
+
+func (h pluginsHost) declared(name string) any {
+	declared, _ := h.settings()["extraKnownMarketplaces"].(map[string]any)
+	return declared[name]
+}
+
+func (h pluginsHost) unready() {
+	if _, err := os.Stat(filepath.Join(h.home, ".cc-remote", "ready")); !os.IsNotExist(err) {
+		h.t.Errorf("ready stamp after a failed install: %v", err)
+	}
 }
 
 func (h pluginsHost) version(id string) string {
@@ -291,6 +308,7 @@ func registered(officialRef any, officialVersion string) fakeState {
 
 func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 	declaredOfficial := map[string]any{"source": map[string]any{"source": "github", "repo": "anthropics/claude-plugins-official", "ref": "main"}}
+	keptEnv := map[string]any{"KEEP": "1"}
 	tests := []struct {
 		name         string
 		marketplaces []Marketplace
@@ -325,14 +343,14 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "official already pinned",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "pinned official with auto-update turned on",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
+			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
 		{
@@ -375,6 +393,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				if err == nil || !strings.Contains(out, tt.wantErr) {
 					t.Fatalf("install = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 				}
+				h.unready()
 				return
 			}
 			if err != nil {
@@ -392,6 +411,11 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			}
 			if got := h.declared("claude-plugins-official"); !reflect.DeepEqual(got, heldOfficial) {
 				t.Errorf("settings declare claude-plugins-official as %v, want %v", got, heldOfficial)
+			}
+			if tt.settings != nil {
+				if got := h.settings()["env"]; !reflect.DeepEqual(got, tt.settings["env"]) {
+					t.Errorf("settings env = %v, want it kept as %v", got, tt.settings["env"])
+				}
 			}
 			if stamp, err := os.ReadFile(filepath.Join(h.home, ".cc-remote", "ready")); err != nil || string(stamp) != digest+"\n" {
 				t.Errorf("ready stamp = %q, %v", stamp, err)
@@ -447,6 +471,7 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 			if err == nil || !strings.Contains(out, "the installed, enabled and loadable plugins differ from the pins") {
 				t.Fatalf("reinstall = %v\n%s\nwant the pin check to fail closed", err, out)
 			}
+			h.unready()
 			if got := h.declared("claude-plugins-official"); !reflect.DeepEqual(got, heldOfficial) {
 				t.Errorf("reinstall left claude-plugins-official declared as %v, want %v", got, heldOfficial)
 			}

@@ -22,7 +22,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 ```json
 {
-  "tools": "37899634b51762279bc0b69fc44bfd3ab7dfb882b05ed91be779f87789a1265f",
+  "tools": "e2dbe2aeb97cb44378effb91faee4ba33c153cf5fe93688e359c3a63af6fed56",
   "image": "a377d3eccaf38e09d1e85443838af36aa20136ba24760fb04e58c3188dde8553"
 }
 ```
