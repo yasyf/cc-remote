@@ -101,17 +101,21 @@ branch_source() {
   jq -r --arg name "$1" '.[] | select(.name == $name) | "\(.source) \(.repo // "") \(.ref // "")"' <<< "$2"
 }
 
+held_declaration() {
+  jq -cn --arg repo "$1" --arg branch "$2" '{source: {source: "github", repo: $repo, ref: $branch}, autoUpdate: false}'
+}
+
 pin_branch_marketplace() {
   local name="$1" repo="$2" branch="$3" known source
   known="$(claude plugin marketplace list --json)"
   source="$(branch_source "$name" "$known")"
-  if [ "$source" = "github $repo $branch" ]; then
-    return
+  if [ "$source" != "github $repo $branch" ]; then
+    if [ -n "$source" ]; then
+      claude plugin marketplace remove "$name"
+    fi
+    claude plugin marketplace add "$repo#$branch"
   fi
-  if [ -n "$source" ]; then
-    claude plugin marketplace remove "$name"
-  fi
-  claude plugin marketplace add "$repo#$branch"
+  edit_settings --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" ".extraKnownMarketplaces[\$name] = \$held"
 }
 
 verify_branch_marketplace() {
@@ -119,6 +123,10 @@ verify_branch_marketplace() {
   known="$(claude plugin marketplace list --json)"
   if [ "$(branch_source "$name" "$known")" != "github $repo $branch" ]; then
     echo "cc-remote: marketplace $name is not registered from github $repo at branch $branch" >&2
+    exit 1
+  fi
+  if ! jq -e --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" '.extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
+    echo "cc-remote: marketplace $name is not declared in Claude settings at branch $branch with auto-update off" >&2
     exit 1
   fi
 }
@@ -230,14 +238,18 @@ verify_captain_hook() {
   fi
 }
 
-claude_env() {
+edit_settings() {
   local settings="$HOME/.claude/settings.json"
   mkdir -p "$HOME/.claude"
   if [ ! -f "$settings" ]; then
     echo '{}' > "$settings"
   fi
-  jq --arg key "$1" --arg value "$2" '.env[$key] = $value' "$settings" > "$settings.tmp"
+  jq "$@" "$settings" > "$settings.tmp"
   mv "$settings.tmp" "$settings"
+}
+
+claude_env() {
+  edit_settings --arg key "$1" --arg value "$2" ".env[\$key] = \$value"
 }
 
 synckit_state() {
