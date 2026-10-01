@@ -223,7 +223,7 @@ func TestWaitPreflightFailures(t *testing.T) {
 		{
 			name: "ssh include commented out",
 			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
-				config := "# " + include + "\nInclude # " + fragments + "\nInclude \"" + fragments + "\nHost *\n"
+				config := "# " + include + "\nInclude # " + fragments + "\nInclude ~/.ssh/extra.conf # " + fragments + "\nInclude \"" + fragments + "\nHost *\n"
 				if err := os.WriteFile(f.sshConfig, []byte(config), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -302,6 +302,32 @@ func TestWaitAcceptsIncludeForms(t *testing.T) {
 				on(f.doctorCall(), doctorPassed).
 				on("worktree list --limit 10000 --json", worktreesJSON)
 			if _, err := orca.NewClient(fake).Wait(context.Background(), f.preflight, fastPoll); err != nil {
+				t.Errorf("Wait() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitKeepsHashInsideAnIncludePath(t *testing.T) {
+	const hashed = "/Users/me/state#1/cc-remote/ssh/*.ssh"
+	for _, line := range []string{
+		`Include "` + hashed + `"`,
+		"Include '" + hashed + "'",
+		"Include " + hashed,
+	} {
+		t.Run(line, func(t *testing.T) {
+			f := newWaitFixture(t)
+			p := f.preflight
+			p.SSH.Include = hashed
+			if err := os.WriteFile(f.sshConfig, []byte(line+"\nHost *\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake := newFakeOrca(t).
+				on("status --json", statusReady).
+				on("repo list --json", f.reposJSON()).
+				on(f.doctorCall(), doctorPassed).
+				on("worktree list --limit 10000 --json", worktreesJSON)
+			if _, err := orca.NewClient(fake).Wait(context.Background(), p, fastPoll); err != nil {
 				t.Errorf("Wait() error = %v", err)
 			}
 		})
