@@ -24,12 +24,12 @@ finding; do not work around it.
 ## Pick a recipe
 
 Recipe ids follow `<provider>-<profile>-ssh`. cc-remote derives one recipe for
-every provider and profile pair in the cc-remote config, so the profile names
-in the config become the ids. A profile's `machine` entry for a provider sets
-that machine's image, size, and region; generation fails when a provider
-cannot run a profile, such as a Namespace pairing with no image or size. The config's
-top-level `provider` and `profile` make the default recipe, and its name ends
-in `(default)`. Print the generated set:
+each provider a profile's `machine` section names, so the profile names in the
+config become the ids. A profile with no `machine` entries gets one recipe, on
+the config's top-level `provider`. Generation fails when a named machine cannot
+run, such as a Namespace machine with no image or size. The config's top-level
+`provider` and `profile` make the default recipe, and its name ends in
+`(default)`. Print the generated set:
 
 ```sh
 cc-remote orca recipes
@@ -88,14 +88,14 @@ cc-remote writes each workspace's SSH settings as a `Host` block in
 `$XDG_STATE_HOME/cc-remote` when it is unset, where `$XDG_STATE_HOME` defaults
 to `~/.local/state`. Orca resolves a workspace's host through your SSH config,
 so add an `Include` of those blocks above every `Host` and `Match` block in
-`~/.ssh/config`, with the state path spelled out in full:
+`~/.ssh/config`. With the default state directory, the line is:
 
 ```sshconfig
-Include /Users/<you>/.local/state/cc-remote/ssh/*.ssh
+Include ~/.local/state/cc-remote/ssh/*.ssh
 ```
 
-`wait` refuses to start until that exact line is there, and prints it when it
-is missing.
+`wait` refuses to start until that `Include` is there, and prints the line for
+your state directory when it is missing.
 
 `cc-remote orca recipes --plugin <dir>` writes the same recipes as an Orca
 plugin, an `orca-plugin.json` that lists them under `contributes.vmRecipes`.

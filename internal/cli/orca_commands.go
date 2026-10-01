@@ -162,13 +162,16 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 				}
 			}
 			preflight := orca.Preflight{
-				Recipe:     recipe,
-				Lifecycle:  lifecycle,
-				Workspace:  args[1],
-				RepoID:     repoID,
-				Checkout:   checkout,
-				SSHConfig:  filepath.Join(home, ".ssh", "config"),
-				SSHInclude: orca.SSHIncludeOf(cfg),
+				Recipe:    recipe,
+				Lifecycle: lifecycle,
+				Workspace: args[1],
+				RepoID:    repoID,
+				Checkout:  checkout,
+				SSH: orca.SSHConfig{
+					Path:    filepath.Join(home, ".ssh", "config"),
+					Home:    home,
+					Include: cfg.State().SSHInclude(),
+				},
 			}
 			workspace, err := orca.NewClient(runner).Wait(cmd.Context(), preflight, orca.Poll{Interval: 10 * time.Second, Timeout: timeout})
 			if err != nil {

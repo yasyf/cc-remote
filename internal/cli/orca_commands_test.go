@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,27 +36,34 @@ func execCLI(args ...string) (string, error) {
 	return out.String(), err
 }
 
-const leanSprites = `repository: https://github.com/example/app
+const spritesAndNamespace = `repository: https://github.com/example/app
 ref: main
 provider: sprites
 profile: lean
+inventory: ./inventory.yaml
 providers:
   sprites:
     org: example
     rate: { hourlyUSD: 1 }
-%s
+  namespace:
+    platform: linux/amd64
+    volumeSizeGB: 125
+    idleTimeout: 30m
+    callTimeout: 60s
+    readyTimeout: 10m
+    hourlyUSD: { l: 0.96 }
 workspace_dirs:
   sprites: /home/sprite
-%s
+  namespace: /workspaces
 profiles:
-  lean: %s
+%s
 budget: { ledger: default, cap_usd: 10, trial_hours: 1 }
 `
 
-func writeConfig(t *testing.T, providers, roots, lean string) string {
+func writeConfig(t *testing.T, profiles string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, fmt.Appendf(nil, leanSprites, providers, roots, lean), 0o600); err != nil {
+	if err := os.WriteFile(path, fmt.Appendf(nil, spritesAndNamespace, profiles), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -143,37 +151,55 @@ func TestOrcaRecipes(t *testing.T) {
 }
 
 func TestOrcaRecipesFromProfiles(t *testing.T) {
-	t.Run("a profile with no machine entries still yields its Sprites recipe", func(t *testing.T) {
-		path := writeConfig(t, "", "", "{}")
-		recipes, err := orca.Recipes(orca.Source{Provider: "sprites", Profile: "lean", Providers: []string{"sprites"}, Profiles: []string{"lean"}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		want, err := orca.MergeYAML(nil, orca.Lifecycle{Binary: "cc-remote", Config: path}, recipes)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := runCLI(t, "orca", "recipes", "--config", path); got != string(want) {
-			t.Errorf("stdout =\n%s\nwant\n%s", got, want)
-		}
-	})
-	t.Run("a Namespace pairing the profile cannot run is an error", func(t *testing.T) {
-		namespace := `  namespace:
-    platform: linux/amd64
-    volumeSizeGB: 125
-    idleTimeout: 30m
-    callTimeout: 60s
-    readyTimeout: 10m
-    hourlyUSD: { l: 0.96 }`
-		for lean, want := range map[string]string{
-			"{}": "a namespace spec needs a size",
-			"{ machine: { namespace: { size: l } } }": "a namespace spec needs an image",
-		} {
-			path := writeConfig(t, namespace, "  namespace: /workspaces", lean)
-			_, err := execCLI("orca", "recipes", "--config", path)
-			if err == nil || !strings.Contains(err.Error(), "profile lean on namespace: "+want) {
-				t.Errorf("lean: %s: recipes error = %v, want %q", lean, err, want)
+	tests := []struct {
+		name     string
+		profiles string
+		want     []string
+		wantErr  string
+	}{
+		{
+			name:     "an empty profile pairs only with the default provider",
+			profiles: "  lean: {}",
+			want:     []string{"sprites-lean-ssh"},
+		},
+		{
+			name: "each profile pairs only with the providers it configures",
+			profiles: `  lean:
+    machine: { sprites: {} }
+  full:
+    machine: { namespace: { image: cc-remote-linux, size: l } }`,
+			want: []string{"sprites-lean-ssh", "namespace-full-ssh"},
+		},
+		{
+			name: "a configured Namespace machine without an image is an error",
+			profiles: `  lean:
+    machine: { sprites: {}, namespace: { size: l } }`,
+			wantErr: "profile lean on namespace: a namespace spec needs an image",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := execCLI("orca", "recipes", "--config", writeConfig(t, tt.profiles))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("recipes error = %v, want %q", err, tt.wantErr)
+				}
+				return
 			}
-		}
-	})
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries, err := orca.ParseYAML([]byte(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(entries))
+			for _, e := range entries {
+				got = append(got, e.ID)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("recipe ids = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

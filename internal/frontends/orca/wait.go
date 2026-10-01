@@ -34,13 +34,18 @@ type Poll struct {
 }
 
 type Preflight struct {
-	Recipe     Recipe
-	Lifecycle  Lifecycle
-	Workspace  string
-	RepoID     string
-	Checkout   string
-	SSHConfig  string
-	SSHInclude string
+	Recipe    Recipe
+	Lifecycle Lifecycle
+	Workspace string
+	RepoID    string
+	Checkout  string
+	SSH       SSHConfig
+}
+
+type SSHConfig struct {
+	Path    string
+	Home    string
+	Include string
 }
 
 type SSHWorkspace struct {
@@ -108,7 +113,7 @@ func (c Client) preflight(ctx context.Context, p Preflight) (Repo, error) {
 	if err := report.err(p.Lifecycle); err != nil {
 		return Repo{}, err
 	}
-	if err := checkSSHInclude(p.SSHConfig, p.SSHInclude); err != nil {
+	if err := p.SSH.check(); err != nil {
 		return Repo{}, err
 	}
 	return repo, nil
@@ -183,29 +188,62 @@ func checkOrcaYAML(path string, l Lifecycle, r Recipe) error {
 	return nil
 }
 
-func checkSSHInclude(path, include string) error {
-	data, err := os.ReadFile(path)
+func (s SSHConfig) check() error {
+	data, err := os.ReadFile(s.Path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("read %s: %w", path, err)
+		return fmt.Errorf("read %s: %w", s.Path, err)
 	}
 	for line := range strings.Lines(string(data)) {
-		line = strings.TrimSpace(line)
-		if line == include {
-			return nil
-		}
-		if keyword := sshKeyword(line); keyword == "host" || keyword == "match" {
-			break
+		switch keyword, args := sshDirective(line); keyword {
+		case "include":
+			if slices.ContainsFunc(args, func(arg string) bool { return s.expand(arg) == s.Include }) {
+				return nil
+			}
+		case "host", "match":
+			return s.missing()
 		}
 	}
-	return fmt.Errorf("add %q to %s above every Host and Match block, so Orca resolves workspace hosts through the Host blocks cc-remote writes", include, path)
+	return s.missing()
 }
 
-func sshKeyword(line string) string {
-	fields := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' || r == '=' })
-	if len(fields) == 0 {
-		return ""
+func (s SSHConfig) expand(arg string) string {
+	if rest, ok := strings.CutPrefix(arg, "~/"); ok {
+		return filepath.Join(s.Home, rest)
 	}
-	return strings.ToLower(fields[0])
+	return arg
+}
+
+func (s SSHConfig) missing() error {
+	include := s.Include
+	if strings.ContainsAny(include, " \t") {
+		include = `"` + include + `"`
+	}
+	return fmt.Errorf("add `Include %s` to %s above every Host and Match block, so Orca resolves workspace hosts through the Host blocks cc-remote writes", include, s.Path)
+}
+
+func sshDirective(line string) (string, []string) {
+	line = strings.TrimSpace(line)
+	i := strings.IndexAny(line, " \t=")
+	if i < 0 {
+		return strings.ToLower(line), nil
+	}
+	keyword := strings.ToLower(line[:i])
+	rest := strings.TrimPrefix(strings.TrimLeft(line[i:], " \t"), "=")
+	var args []string
+	for rest = strings.TrimSpace(rest); rest != ""; rest = strings.TrimSpace(rest) {
+		var arg string
+		if quoted, ok := strings.CutPrefix(rest, `"`); ok {
+			arg, rest, _ = strings.Cut(quoted, `"`)
+		} else {
+			end := strings.IndexAny(rest, " \t")
+			if end < 0 {
+				end = len(rest)
+			}
+			arg, rest = rest[:end], rest[end:]
+		}
+		args = append(args, arg)
+	}
+	return keyword, args
 }
 
 func poll[T any](ctx context.Context, p Poll, check func(context.Context) (T, bool, error)) (T, error) {

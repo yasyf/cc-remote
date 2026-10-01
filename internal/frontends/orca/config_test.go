@@ -20,13 +20,14 @@ func exampleConfig(t *testing.T) *config.Config {
 }
 
 func TestSourceOf(t *testing.T) {
+	cfg := exampleConfig(t)
+	cfg.Profiles["bare"] = config.Profile{}
 	want := orca.Source{
-		Provider:  "sprites",
-		Profile:   "lean",
-		Providers: []string{"namespace", "sprites"},
-		Profiles:  []string{"full", "lean"},
+		Provider: "sprites",
+		Profile:  "lean",
+		Profiles: map[string][]string{"lean": {"namespace", "sprites"}, "full": {"namespace"}, "bare": {"sprites"}},
 	}
-	if got := orca.SourceOf(exampleConfig(t)); !reflect.DeepEqual(got, want) {
+	if got := orca.SourceOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("SourceOf() = %+v, want %+v", got, want)
 	}
 }
@@ -80,25 +81,6 @@ func TestPluginOf(t *testing.T) {
 			}
 			if err != nil || got != tt.want {
 				t.Errorf("PluginOf() = %+v, %v; want %+v", got, err, tt.want)
-			}
-		})
-	}
-}
-
-func TestSSHIncludeOf(t *testing.T) {
-	tests := []struct {
-		stateDir string
-		want     string
-	}{
-		{"/srv/cc-remote", "Include /srv/cc-remote/ssh/*.ssh"},
-		{"/Users/me/Library/Application Support/cc-remote", `Include "/Users/me/Library/Application Support/cc-remote/ssh/*.ssh"`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.stateDir, func(t *testing.T) {
-			cfg := exampleConfig(t)
-			cfg.StateDir = tt.stateDir
-			if got := orca.SSHIncludeOf(cfg); got != tt.want {
-				t.Errorf("SSHIncludeOf() = %q, want %q", got, tt.want)
 			}
 		})
 	}

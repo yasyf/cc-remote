@@ -19,10 +19,9 @@ var defaultSprites = orca.Recipe{
 func defaultRecipes(t *testing.T) []orca.Recipe {
 	t.Helper()
 	recipes, err := orca.Recipes(orca.Source{
-		Provider:  "sprites",
-		Profile:   "agents",
-		Providers: []string{"namespace", "sprites"},
-		Profiles:  []string{"agents", "stack"},
+		Provider: "sprites",
+		Profile:  "agents",
+		Profiles: map[string][]string{"agents": {"namespace", "sprites"}, "stack": {"namespace"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +39,6 @@ func TestRecipes(t *testing.T) {
 		"sprites-agents-ssh | Sprites agents over SSH (default) | The default. A Sprites machine with the agents profile, reached over SSH.",
 		"namespace-agents-ssh | Namespace agents over SSH | A Namespace machine with the agents profile, reached over SSH.",
 		"namespace-stack-ssh | Namespace stack over SSH | A Namespace machine with the stack profile, reached over SSH.",
-		"sprites-stack-ssh | Sprites stack over SSH | A Sprites machine with the stack profile, reached over SSH.",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("Recipes() =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -54,13 +52,13 @@ func TestRecipesRejectsBadSource(t *testing.T) {
 		want string
 	}{
 		{
-			name: "default provider is not configured",
-			src:  orca.Source{Provider: "sprites", Profile: "full", Providers: []string{"namespace"}, Profiles: []string{"full"}},
-			want: `default provider "sprites" and profile "full" must be among the configured ones`,
+			name: "default profile has no machine on the default provider",
+			src:  orca.Source{Provider: "sprites", Profile: "full", Profiles: map[string][]string{"full": {"namespace"}}},
+			want: `default profile "full" configures no sprites machine`,
 		},
 		{
 			name: "unsafe profile name",
-			src:  orca.Source{Provider: "sprites", Profile: "lean", Providers: []string{"sprites"}, Profiles: []string{"a b", "lean"}},
+			src:  orca.Source{Provider: "sprites", Profile: "lean", Profiles: map[string][]string{"lean": {"sprites"}, "a b": {"sprites"}}},
 			want: `profile "a b" must match`,
 		},
 	}
