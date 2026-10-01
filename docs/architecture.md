@@ -5,9 +5,10 @@ a different profile when its task needs a complete platform. The repository's
 setup commands belong to that profile; the environment manager supplies the
 host, checkout, tools, and lifecycle.
 
-This is the architecture target for `cc-remote`. The current main branch contains
-the version-only CLI scaffold. The core, provider backends, and Orca adapter are
-under development.
+This is the architecture target for `cc-remote`. The Sprites and Namespace
+provider backends and the image/tool-inventory implementation have landed.
+The CLI exposes `version` and `images render|fingerprint|build`; workspace
+lifecycle, prepared claims, and the Orca adapter are under development.
 
 ## Separate the client from the host
 
@@ -49,7 +50,8 @@ platform startup are task-specific actions. A profile can supply those commands
 when needed, including a full-stack Namespace environment.
 
 Prepared capacity holds unused environments with a verified tool set. A matching
-tool fingerprint allows a claim to reuse that preparation. The claim still
+[readiness stamp](tool-inventory.md#fingerprints-and-readiness) allows a claim to
+reuse that preparation. The claim still
 renews workspace identity and materializes the requested checkout at the pinned
 source commit.
 
