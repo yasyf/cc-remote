@@ -1,0 +1,47 @@
+version: '3'
+
+vars:
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  LDFLAGS: >-
+    -s -w
+    -X github.com/yasyf/cc-remote/internal/version.Version={{.VERSION}}
+
+tasks:
+  build:
+    desc: Build the binary into ./bin
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/cc-remote ./cmd/cc-remote
+
+  run:
+    desc: Run the CLI (pass args after --)
+    cmds:
+      - go run ./cmd/cc-remote {{.CLI_ARGS}}
+
+  test:
+    desc: Run the test suite with the race detector
+    cmds:
+      - go test -race -count=1 ./...
+
+  vet:
+    desc: Vet the module
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Lint with golangci-lint
+    cmds:
+      - golangci-lint run
+
+  fmt:
+    desc: Format with gofumpt + goimports (via golangci-lint)
+    cmds:
+      - golangci-lint fmt
+
+  ci:
+    desc: Everything CI runs
+    cmds:
+      - task: vet
+      - task: lint
+      - task: test
+      - task: build

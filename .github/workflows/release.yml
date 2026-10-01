@@ -1,0 +1,161 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag is on main
+        uses: yasyf/homebrew-tap/.github/actions/verify-tag-on-main@2281a3ea884422db190de44fad65ce9bc08b19c4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify source
+        run: |
+          set -euo pipefail
+          go mod verify
+          go vet ./...
+          go test -race -count=1 ./...
+
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build static binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/yasyf/cc-remote/internal/version.Version=${RELEASE_TAG}" \
+            -o "dist/cc-remote_${GOOS}_${GOARCH}" ./cmd/cc-remote
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cc-remote_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/cc-remote_${{ matrix.goos }}_${{ matrix.goarch }}
+          if-no-files-found: error
+
+  smoke:
+    name: smoke ${{ matrix.asset }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset: cc-remote_linux_amd64
+          - runner: macos-latest
+            asset: cc-remote_darwin_arm64
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.asset }}
+          path: bin
+
+      - name: Smoke the binary
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          chmod +x "bin/$ASSET"
+          test "$("bin/$ASSET" version)" = "$RELEASE_TAG"
+
+  release:
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cc-remote_*
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS.txt and the asset manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          cd dist
+          test "$(find . -maxdepth 1 -type f -name 'cc-remote_*' | wc -l | tr -d ' ')" = 4
+          find . -maxdepth 1 -type f -name 'cc-remote_*' -printf '%f\0' \
+            | LC_ALL=C sort -z \
+            | xargs -0 sha256sum > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          manifest="$RUNNER_TEMP/cc-remote-release-assets"
+          find "$PWD" -maxdepth 1 -type f -print | LC_ALL=C sort > "$manifest"
+          test "$(wc -l < "$manifest" | tr -d ' ')" = 5
+          prerelease=false
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then prerelease=true; fi
+          {
+            echo "path=$manifest"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stage and verify the draft release
+        id: stage
+        uses: yasyf/homebrew-tap/.github/actions/stage-draft-release@e4c3108e693681df1a3c666bae80e890bc44cf3e
+        with:
+          token: ${{ github.token }}
+          tag: ${{ env.RELEASE_TAG }}
+          title: ${{ env.RELEASE_TAG }}
+          manifest: ${{ steps.manifest.outputs.path }}
+          prerelease: ${{ steps.manifest.outputs.prerelease }}
+
+      - name: Verify checksums from the staged release
+        env:
+          DOWNLOAD_DIR: ${{ steps.stage.outputs['download-dir'] }}
+        run: |
+          set -euo pipefail
+          cd "$DOWNLOAD_DIR"
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Publish the verified release
+        uses: yasyf/homebrew-tap/.github/actions/publish-draft-release@54e3e194bda69896894a82c17fcdb2822beefab5
+        with:
+          token: ${{ github.token }}
+          release-id: ${{ steps.stage.outputs['release-id'] }}
+          tag: ${{ env.RELEASE_TAG }}
+          manifest: ${{ steps.manifest.outputs.path }}
+          prerelease: ${{ steps.manifest.outputs.prerelease }}
+          make-latest: ${{ steps.manifest.outputs.prerelease == 'false' }}
