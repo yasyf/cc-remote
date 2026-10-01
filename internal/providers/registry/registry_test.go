@@ -107,6 +107,13 @@ func TestNewRejects(t *testing.T) {
 		{"unknown kind", "fly", spritesSection(""), `unknown provider kind "fly"; want sprites or namespace`},
 		{"malformed section", sprites.Name, func(any) error { return malformed }, "providers.sprites: field orgg not found"},
 		{"sprites without an org", sprites.Name, func(any) error { return nil }, "providers.sprites: sprites needs an org; set it in the sprites config"},
+		{"namespace with a free size", namespace.Name, func(into any) error {
+			if err := namespaceSection(into); err != nil {
+				return err
+			}
+			into.(*namespace.Config).HourlyUSD["m"] = 0
+			return nil
+		}, "providers.namespace: namespace needs a positive hourlyUSD for each size and a non-negative storageGBMonthUSD"},
 		{"namespace without timeouts", namespace.Name, func(into any) error {
 			if err := namespaceSection(into); err != nil {
 				return err

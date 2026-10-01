@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,13 +43,15 @@ func (c Config) validate() error {
 		return errors.New("namespace needs a cli, an sshDir, and an absolute state directory")
 	case c.Platform == "" || c.VolumeSizeGB <= 0 || c.IdleTimeout <= 0:
 		return errors.New("namespace needs a platform, a positive volumeSizeGB, and a positive idleTimeout")
-	case len(c.HourlyUSD) == 0 || c.StorageGBMonthUSD < 0:
-		return errors.New("namespace needs hourlyUSD by size and a non-negative storageGBMonthUSD")
+	case len(c.HourlyUSD) == 0 || slices.ContainsFunc(slices.Collect(maps.Values(c.HourlyUSD)), free) || c.StorageGBMonthUSD < 0:
+		return errors.New("namespace needs a positive hourlyUSD for each size and a non-negative storageGBMonthUSD")
 	case c.CallTimeout <= 0 || c.ReadyTimeout <= 0:
 		return errors.New("namespace needs a positive callTimeout and readyTimeout")
 	}
 	return nil
 }
+
+func free(usd float64) bool { return usd <= 0 }
 
 type Provider struct {
 	Config
