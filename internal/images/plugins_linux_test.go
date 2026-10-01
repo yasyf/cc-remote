@@ -158,6 +158,15 @@ case "$1" in
 esac
 `
 
+const fakeSynckitReader = `#!/bin/sh
+state=missing
+if [ -f "$XDG_CONFIG_HOME/synckit/state.json" ]; then
+  state=present
+fi
+echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
+[ "$2" != get ]
+`
+
 type fakeState struct {
 	Marketplaces []map[string]any `json:"marketplaces"`
 	Plugins      []map[string]any `json:"plugins"`
@@ -202,6 +211,8 @@ func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, s
 	files := map[string][]byte{
 		"claude":     []byte(fakeClaude),
 		"git":        []byte(fakeGit),
+		"sprite-env": []byte(fakeSynckitReader),
+		"cookiesync": []byte(fakeSynckitReader),
 		"plugins.sh": scripts.Plugins,
 		"state.json": mustJSON(t, state),
 	}
@@ -233,6 +244,7 @@ func (h pluginsHost) run(name string, args ...string) (string, error) {
 	cmd.Stdin = strings.NewReader("\n")
 	cmd.Env = append(os.Environ(),
 		"HOME="+h.home,
+		"XDG_CONFIG_HOME="+filepath.Join(h.home, ".config"),
 		"PATH="+h.fakes+":"+os.Getenv("PATH"),
 		"FAKE_STATE="+filepath.Join(h.fakes, "state.json"),
 		"FAKE_CATALOG="+filepath.Join(h.fakes, "catalog.json"),
@@ -662,6 +674,83 @@ func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 				t.Errorf("install passed on a failed plugin list:\n%s", out)
 			}
 			h.unready()
+		})
+	}
+}
+
+func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
+	inventory := Inventory{
+		Version:    SchemaVersion,
+		Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
+		Cookiesync: &Cookiesync{SchemaFingerprint: digest},
+		Services:   []Service{{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}}},
+		Configure:  Configure{Run: []string{"cookiesync check"}},
+	}
+	pinned := `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + digest + `"}}`
+	tests := []struct {
+		name     string
+		existing string
+		wantErr  string
+	}{
+		{name: "fresh host"},
+		{name: "existing state at the pinned fingerprint", existing: `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + digest + `"},"synckit":{"kept":true}}`},
+		{name: "stale state", existing: `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + strings.Repeat("3", 64) + `"}}`, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+		{name: "wrong identity", existing: `{"schema":{"identity":"broken-state","version":1,"fingerprint":"` + digest + `"}}`, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+		{name: "missing identity", existing: `{"schema":{"version":1,"fingerprint":"` + digest + `"}}`, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+		{name: "two documents", existing: `{"schema":{"identity":"broken-state"}}` + "\n" + pinned, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			state := filepath.Join(h.home, ".config", "synckit", "state.json")
+			if tt.existing != "" {
+				if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(state, []byte(tt.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := h.plugins("configure")
+			calls := h.calls()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(out, tt.wantErr) {
+					t.Fatalf("configure = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
+				}
+				if slices.ContainsFunc(calls, func(call string) bool {
+					return strings.HasPrefix(call, "sprite-env services create") || strings.HasPrefix(call, "cookiesync check")
+				}) {
+					t.Errorf("configure ran a command or started a service on an invalid state:\n%s", strings.Join(calls, "\n"))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("configure failed: %v\n%s", err, out)
+			}
+			start := slices.IndexFunc(calls, func(call string) bool {
+				return strings.HasPrefix(call, "sprite-env services create cc-remote-cookiesync ")
+			})
+			check := slices.Index(calls, "cookiesync check state=present")
+			install := slices.Index(calls, "cookiesync install state=present")
+			if check < 0 || start < check || !strings.HasSuffix(calls[start], " state=present") || install < start {
+				t.Errorf("want configure.run and the service to see state.json, then cookiesync install:\n%s", strings.Join(calls, "\n"))
+			}
+			raw, err := os.ReadFile(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var written struct {
+				Schema struct {
+					Identity    string `json:"identity"`
+					Fingerprint string `json:"fingerprint"`
+				} `json:"schema"`
+			}
+			if err := json.Unmarshal(raw, &written); err != nil || written.Schema.Identity != "synckit-state-v1" || written.Schema.Fingerprint != digest {
+				t.Errorf("state.json = %s, %v", raw, err)
+			}
+			if tt.existing != "" && string(raw) != tt.existing {
+				t.Errorf("configure rewrote an existing state.json:\n%s", raw)
+			}
 		})
 	}
 }
