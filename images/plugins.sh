@@ -90,10 +90,36 @@ checkout() {
 }
 
 register_marketplace() {
-  if grep -qxF "$1" <<< "$2"; then
+  if jq -e --arg name "$1" 'any(.[]; .name == $name)' <<< "$2" > /dev/null; then
     claude plugin marketplace update "$1"
   else
     claude plugin marketplace add "$marketplace_dir/$1"
+  fi
+}
+
+branch_source() {
+  jq -r --arg name "$1" '.[] | select(.name == $name) | "\(.source) \(.repo // "") \(.ref // "")"' <<< "$2"
+}
+
+pin_branch_marketplace() {
+  local name="$1" repo="$2" branch="$3" known source
+  known="$(claude plugin marketplace list --json)"
+  source="$(branch_source "$name" "$known")"
+  if [ "$source" = "github $repo $branch" ]; then
+    return
+  fi
+  if [ -n "$source" ]; then
+    claude plugin marketplace remove "$name"
+  fi
+  claude plugin marketplace add "$repo#$branch"
+}
+
+verify_branch_marketplace() {
+  local name="$1" repo="$2" branch="$3" known
+  known="$(claude plugin marketplace list --json)"
+  if [ "$(branch_source "$name" "$known")" != "github $repo $branch" ]; then
+    echo "cc-remote: marketplace $name is not registered from github $repo at branch $branch" >&2
+    exit 1
   fi
 }
 
@@ -109,9 +135,13 @@ install_plugin() {
 
 install_plugins() {
   local known
-  known="$(claude plugin marketplace list --json | jq -r '.[].name')"
+  known="$(claude plugin marketplace list --json)"
 {{- range .Claude.Marketplaces}}
+{{- if .Ref}}
   register_marketplace {{q .Name}} "$known"
+{{- else}}
+  claude plugin marketplace update {{q .Name}}
+{{- end}}
 {{- end}}
 {{- range .Claude.Plugins}}
   install_plugin {{q .ID}} {{q .Version}}
@@ -268,7 +298,11 @@ run_install() {
   ln -sfn "$system_bin_dir/"{{q .}} "$bin_dir/"{{q .}}
 {{- end}}
 {{- range .Claude.Marketplaces}}
+{{- if .Ref}}
   checkout {{q .Name}} {{q .GitHub}} {{q .Ref}} {{if .Private}}private{{else}}public{{end}}
+{{- else}}
+  pin_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}
+{{- end}}
 {{- end}}
 {{- if .Claude.Plugins}}
   installed="$(healthy)"
@@ -352,6 +386,11 @@ run_verify() {
 {{- end}}
 {{- range .Links}}
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
+{{- end}}
+{{- range .Claude.Marketplaces}}
+{{- if .Branch}}
+  verify_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}
+{{- end}}
 {{- end}}
 {{- if .Claude.Plugins}}
   check_plugins

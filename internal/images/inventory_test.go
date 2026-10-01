@@ -134,6 +134,17 @@ func TestValidateRejects(t *testing.T) {
 			i.CodexRuntime = nil
 		}, "claude: no system or tools artifact provides the claude bin"},
 		{"short ref", func(i *Inventory) { i.Claude.Marketplaces[0].Ref = "main" }, `claude.marketplaces[market]: ref "main" is not a 40-digit commit`},
+		{"ref and branch", func(i *Inventory) { i.Claude.Marketplaces[0].Branch = "main" }, "claude.marketplaces[market]: set exactly one of ref and branch"},
+		{"neither ref nor branch", func(i *Inventory) { i.Claude.Marketplaces[0].Ref = "" }, "claude.marketplaces[market]: set exactly one of ref and branch"},
+		{"bad branch", func(i *Inventory) {
+			i.Claude.Marketplaces = append(i.Claude.Marketplaces, Marketplace{Name: "official", GitHub: "anthropics/official", Branch: "main..x"})
+		}, `claude.marketplaces[official]: branch "main..x" is not a branch name`},
+		{"private branch", func(i *Inventory) {
+			i.Claude.Marketplaces = append(i.Claude.Marketplaces, Marketplace{Name: "official", GitHub: "anthropics/official", Branch: "main", Private: true})
+		}, "claude.marketplaces[official]: Claude Code clones a branch marketplace itself, so a private one needs a token-fetched ref"},
+		{"python from a branch marketplace", func(i *Inventory) {
+			i.Claude.Marketplaces[0] = Marketplace{Name: "market", GitHub: "owner/market", Branch: "main"}
+		}, `python.user[example-tool]: marketplace "market" is registered by branch, so it has no pinned checkout to install from`},
 		{"plugin unknown marketplace", func(i *Inventory) { i.Claude.Plugins[0].ID = "hooks@elsewhere" }, `claude.plugins[hooks@elsewhere]: marketplace "elsewhere" is not under claude.marketplaces`},
 		{"undeclared env", func(i *Inventory) { i.Claude.Env["DOMAIN"] = "${HOST}" }, "claude.env: DOMAIN references ${HOST}, which configure.env does not declare"},
 		{"codex runtime without codex", func(i *Inventory) { i.System = i.System[:2] }, "codexRuntime: no system or tools artifact provides the codex bin"},
