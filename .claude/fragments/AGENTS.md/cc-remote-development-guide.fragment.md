@@ -20,9 +20,10 @@ cc-remote/
 │   └── architecture.md    # planned packages
 ├── .github/workflows/
 │   ├── ci.yml             # vet/test -race/build on Ubuntu + macOS; golangci-lint, govulncheck, actionlint
-│   ├── release.yml        # tag-driven GitHub releases: linux/darwin amd64/arm64 binaries + SHA256SUMS.txt
+│   ├── release.yml        # v* tags call the shared homebrew-tap release-go workflow
 │   ├── guides.yml         # render guides from fragments
 │   └── cc-notes.yml       # reconcile merged tasks
+├── .goreleaser.yaml       # signed linux/darwin binaries and the Homebrew cask
 ├── .claude/fragments/     # cc-guides layouts; edit fragments, never rendered files
 ├── AGENTS.md              # rendered development guide
 ├── STYLEGUIDE.md          # Go style rules

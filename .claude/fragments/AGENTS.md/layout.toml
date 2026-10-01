@@ -8,6 +8,7 @@ fragments = [
   "cc-remote-style",
   "cc-remote-hook-style",
   "cc-skills:version-control",
+  "releases",
 ]
 
 [sources.cc-skills]

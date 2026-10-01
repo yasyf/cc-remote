@@ -1,0 +1,62 @@
+version: 2
+
+project_name: cc-remote
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cc-remote
+    main: ./cmd/cc-remote
+    binary: cc-remote
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/yasyf/cc-remote/internal/version.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: cc-remote
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+notarize:
+  macos:
+    - enabled: true
+      ids:
+        - cc-remote
+      sign:
+        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "{{ .Env.MACOS_NOTARY_KEY }}"
+        wait: true
+        timeout: 20m
+
+checksum:
+  name_template: checksums.txt
+
+homebrew_casks:
+  - name: cc-remote
+    binaries:
+      - cc-remote
+    repository:
+      owner: yasyf
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/yasyf/cc-remote
+    description: Remote agent workspaces, ready with your tools.
+
+release:
+  prerelease: auto
+
+changelog:
+  use: github
