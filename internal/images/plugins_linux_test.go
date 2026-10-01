@@ -37,7 +37,7 @@ def fail(message):
 
 
 if args == ["plugin", "marketplace", "list", "--json"]:
-    print(json.dumps([{k: v for k, v in m.items() if k != "key"} for m in state["marketplaces"]]))
+    print(json.dumps([{k: v for k, v in m.items() if k not in ("key", "snapshot")} for m in state["marketplaces"]]))
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = args[3]
     if source.startswith("/"):
@@ -56,11 +56,14 @@ elif args[:3] == ["plugin", "marketplace", "add"]:
         fail("The marketplace name 'claude-plugins-official' can only be used with GitHub sources from the 'anthropics' org")
     if marketplace(name):
         fail("marketplace " + name + " is already installed")
-    state["marketplaces"].append(dict(entry, name=name, key=key))
+    state["marketplaces"].append(dict(entry, name=name, key=key, snapshot=catalog[key]["plugins"]))
     save()
 elif args[:3] == ["plugin", "marketplace", "update"]:
-    if not marketplace(args[3]):
+    source = marketplace(args[3])
+    if not source:
         fail("no marketplace " + args[3])
+    source["snapshot"] = catalog[source["key"]]["plugins"]
+    save()
 elif args[:3] == ["plugin", "marketplace", "remove"]:
     if not marketplace(args[3]):
         fail("no marketplace " + args[3])
@@ -74,7 +77,7 @@ elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
     source = marketplace(market)
     if not source:
         fail("no marketplace " + market)
-    version = catalog[source["key"]]["plugins"][name]
+    version = source["snapshot"][name]
     state["plugins"] = [p for p in state["plugins"] if p["id"] != args[2]]
     state["plugins"].append({"id": args[2], "version": version, "enabled": True, "errors": []})
     save()
@@ -90,7 +93,10 @@ case "$1" in
     dir="$2"
     shift 2
     case "$1" in
-      fetch) echo "$6" > "$dir/.fake-head" ;;
+      fetch)
+        [ -n "$6" ] || exit 128
+        echo "$6" > "$dir/.fake-head"
+        ;;
       checkout) ;;
       rev-parse) cat "$dir/.fake-head" 2> /dev/null || exit 128 ;;
       *) exit 2 ;;
@@ -133,14 +139,15 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				"claude plugin marketplace add anthropics/claude-plugins-official#main",
 				"claude plugin install datadog@claude-plugins-official",
 			},
+			absentCalls: []string{"git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "official added without a ref",
 			marketplaces: []Marketplace{tools, official},
 			state: fakeState{
 				Marketplaces: []map[string]any{
-					{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market"},
-					{"name": "claude-plugins-official", "source": "github", "repo": "anthropics/claude-plugins-official", "key": "github:anthropics/claude-plugins-official"},
+					{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market", "snapshot": map[string]string{"hook": "1.0.0"}},
+					{"name": "claude-plugins-official", "source": "github", "repo": "anthropics/claude-plugins-official", "key": "github:anthropics/claude-plugins-official", "snapshot": map[string]string{"datadog": "0.7.17"}},
 				},
 				Plugins: []map[string]any{healthy("hook@tools-market", "1.0.0"), healthy("datadog@claude-plugins-official", "0.7.17")},
 			},
@@ -155,12 +162,28 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			marketplaces: []Marketplace{tools, official},
 			state: fakeState{
 				Marketplaces: []map[string]any{
-					{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market"},
-					{"name": "claude-plugins-official", "source": "github", "repo": "anthropics/claude-plugins-official", "ref": "main", "key": "github:anthropics/claude-plugins-official#main"},
+					{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market", "snapshot": map[string]string{"hook": "1.0.0"}},
+					{"name": "claude-plugins-official", "source": "github", "repo": "anthropics/claude-plugins-official", "ref": "main", "key": "github:anthropics/claude-plugins-official#main", "snapshot": map[string]string{"datadog": "0.7.17"}},
 				},
 				Plugins: []map[string]any{healthy("hook@tools-market", "1.0.0"), healthy("datadog@claude-plugins-official", "0.7.17")},
 			},
-			absentCalls: []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update"},
+			absentCalls: []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
+		},
+		{
+			name:         "pinned official refreshed by update",
+			marketplaces: []Marketplace{tools, official},
+			state: fakeState{
+				Marketplaces: []map[string]any{
+					{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market", "snapshot": map[string]string{"hook": "1.0.0"}},
+					{"name": "claude-plugins-official", "source": "github", "repo": "anthropics/claude-plugins-official", "ref": "main", "key": "github:anthropics/claude-plugins-official#main", "snapshot": map[string]string{"datadog": "0.7.16"}},
+				},
+				Plugins: []map[string]any{healthy("hook@tools-market", "1.0.0"), healthy("datadog@claude-plugins-official", "0.7.16")},
+			},
+			wantCalls: []string{
+				"claude plugin marketplace update claude-plugins-official",
+				"claude plugin update datadog@claude-plugins-official",
+			},
+			absentCalls: []string{"claude plugin marketplace remove", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "official from a local checkout",

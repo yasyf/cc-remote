@@ -88,6 +88,36 @@ func TestParseRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestBranchName(t *testing.T) {
+	tests := []struct {
+		branch string
+		want   bool
+	}{
+		{"main", true},
+		{"release/2026.10", true},
+		{"feature/foo+bar", true},
+		{"v1.x", true},
+		{"main..x", false},
+		{"foo.lock", false},
+		{"team/foo.lock", false},
+		{".hidden", false},
+		{"team/.hidden", false},
+		{"trailing/", false},
+		{"/leading", false},
+		{"double//slash", false},
+		{"ends.", false},
+		{"main#x", false},
+		{"main x", false},
+		{"main~1", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := branchName(tt.branch); got != tt.want {
+			t.Errorf("branchName(%q) = %v, want %v", tt.branch, got, tt.want)
+		}
+	}
+}
+
 func TestValidInventoryValidates(t *testing.T) {
 	if err := validInventory().Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
