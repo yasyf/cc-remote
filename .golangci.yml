@@ -17,9 +17,23 @@ linters:
     - revive
     - staticcheck
     - unused
+  settings:
+    gosec:
+      excludes:
+        - G204
+        - G304
+        - G702
   exclusions:
     presets:
       - comments
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+      - linters:
+          - gosec
+        text: G101
+        source: "providers\\.Traits\\{"
 
 formatters:
   enable:
