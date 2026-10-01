@@ -52,6 +52,8 @@ if args == ["plugin", "marketplace", "list", "--json"]:
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = args[3]
     if source.startswith("/"):
+        if not os.path.isfile(os.path.join(source, ".fake-head")):
+            fail("no checkout at " + source)
         key = "dir:" + os.path.basename(source)
         entry = {"source": "directory", "path": source}
     else:
@@ -122,9 +124,12 @@ case "$1" in
     case "$1" in
       fetch)
         [ -n "$6" ] || exit 128
-        echo "$6" > "$dir/.fake-head"
+        echo "$6" > "$dir/.fake-fetch"
         ;;
-      checkout) ;;
+      checkout)
+        [ "$3" = FETCH_HEAD ] || exit 2
+        cp "$dir/.fake-fetch" "$dir/.fake-head"
+        ;;
       rev-parse) cat "$dir/.fake-head" 2> /dev/null || exit 128 ;;
       *) exit 2 ;;
     esac
@@ -253,7 +258,7 @@ func (h pluginsHost) unready() {
 	}
 }
 
-func (h pluginsHost) version(id string) string {
+func (h pluginsHost) state() fakeState {
 	raw, err := os.ReadFile(filepath.Join(h.fakes, "state.json"))
 	if err != nil {
 		h.t.Fatal(err)
@@ -262,7 +267,24 @@ func (h pluginsHost) version(id string) string {
 	if err := json.Unmarshal(raw, &state); err != nil {
 		h.t.Fatal(err)
 	}
-	for _, p := range state.Plugins {
+	return state
+}
+
+func (h pluginsHost) editState(edit func(fakeState)) {
+	state := h.state()
+	edit(state)
+	if err := os.WriteFile(filepath.Join(h.fakes, "state.json"), mustJSON(h.t, state), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h pluginsHost) checkedOut(name string) string {
+	head, _ := os.ReadFile(filepath.Join(h.home, ".local", "share", "cc-remote", "marketplaces", name, ".fake-head"))
+	return strings.TrimSpace(string(head))
+}
+
+func (h pluginsHost) version(id string) string {
+	for _, p := range h.state().Plugins {
 		if p["id"] == id {
 			return p["version"].(string)
 		}
@@ -354,6 +376,21 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
 		{
+			name:         "tools market switched from branch to ref",
+			marketplaces: []Marketplace{toolsRef, officialBranch},
+			state: func() fakeState {
+				state := registered("main", "0.7.17")
+				state.Marketplaces[0] = map[string]any{"name": "tools-market", "source": "github", "repo": "owner/tools-market", "ref": "main", "key": "github:owner/tools-market#main", "snapshot": map[string]string{"hook": "1.0.0"}}
+				return state
+			}(),
+			wantCalls: []string{
+				"claude plugin marketplace remove tools-market",
+				"claude plugin marketplace add HOME/.local/share/cc-remote/marketplaces/tools-market",
+				"claude plugin install hook@tools-market",
+			},
+			absentCalls: []string{"claude plugin marketplace remove claude-plugins-official"},
+		},
+		{
 			name:         "pinned official refreshed by update",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.16"),
@@ -411,6 +448,9 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			}
 			if got := h.declared("claude-plugins-official"); !reflect.DeepEqual(got, heldOfficial) {
 				t.Errorf("settings declare claude-plugins-official as %v, want %v", got, heldOfficial)
+			}
+			if got := h.checkedOut("tools-market"); got != commit {
+				t.Errorf("tools-market checkout = %q, want %s", got, commit)
 			}
 			if tt.settings != nil {
 				if got := h.settings()["env"]; !reflect.DeepEqual(got, tt.settings["env"]) {
@@ -474,6 +514,52 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 			h.unready()
 			if got := h.declared("claude-plugins-official"); !reflect.DeepEqual(got, heldOfficial) {
 				t.Errorf("reinstall left claude-plugins-official declared as %v, want %v", got, heldOfficial)
+			}
+		})
+	}
+}
+
+func TestPluginsVerifyRegistrations(t *testing.T) {
+	tests := []struct {
+		name    string
+		edit    func(fakeState)
+		wantErr string
+	}{
+		{
+			name: "branch registration moved",
+			edit: func(state fakeState) {
+				state.Marketplaces[1]["ref"] = "release"
+			},
+			wantErr: "marketplace claude-plugins-official is not registered from github anthropics/claude-plugins-official main",
+		},
+		{
+			name: "ref registration moved",
+			edit: func(state fakeState) {
+				state.Marketplaces[0]["path"] = "/elsewhere/tools-market"
+			},
+			wantErr: "marketplace tools-market is not registered from directory ",
+		},
+		{
+			name: "ref registration replaced by github",
+			edit: func(state fakeState) {
+				state.Marketplaces[0] = map[string]any{"name": "tools-market", "source": "github", "repo": "owner/tools-market", "ref": "main"}
+			},
+			wantErr: "marketplace tools-market is not registered from directory ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPluginsHost(t, []Marketplace{toolsRef, officialBranch}, marketplaceCatalog("0.7.17"), fakeState{}, nil)
+			if out, err := h.plugins("install", digest); err != nil {
+				t.Fatalf("install failed: %v\n%s", err, out)
+			}
+			if out, err := h.plugins("verify"); err != nil {
+				t.Fatalf("verify after install failed: %v\n%s", err, out)
+			}
+			h.editState(tt.edit)
+			out, err := h.plugins("verify")
+			if err == nil || !strings.Contains(out, tt.wantErr) {
+				t.Fatalf("verify = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 			}
 		})
 	}
