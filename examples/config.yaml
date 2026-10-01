@@ -11,6 +11,8 @@ providers:
     platform: linux/amd64
     volumeSizeGB: 125
     idleTimeout: 30m
+    callTimeout: 60s
+    readyTimeout: 10m
     hourlyUSD: { s: 0.24, m: 0.48, l: 0.96, xl: 1.92 }
     storageGBMonthUSD: 0.2
 
