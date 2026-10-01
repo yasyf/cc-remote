@@ -22,7 +22,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 ```json
 {
-  "tools": "e2dbe2aeb97cb44378effb91faee4ba33c153cf5fe93688e359c3a63af6fed56",
+  "tools": "7890c2f4fd24d90aac9888f99cdd64184e0af408b8f38a93d9c1cf672f7b31ac",
   "image": "a377d3eccaf38e09d1e85443838af36aa20136ba24760fb04e58c3188dde8553"
 }
 ```
@@ -83,16 +83,17 @@ has no commit pin and is registered through Claude Code as `owner/repo#<branch>`
 because Claude Code clones sources with `git clone --branch` and cannot use a
 40-character commit as a GitHub ref. `claude-plugins-official` publishes no tags
 and Claude Code refuses a local-directory source for that reserved name, so it
-must use `branch`. Plugin versions stay pinned, and install and verify fail when
-an installed version differs from the inventory; an upstream version bump fails
-closed until the inventory is bumped. cc-remote rewrites each branch
-marketplace's declaration in `~/.claude/settings.json` under
-`extraKnownMarketplaces` with `autoUpdate: false` every install run because
-Claude Code auto-updates `claude-plugins-official` by default. An entry
-registered under the same name with a different source, repo, or branch,
-including Claude Code's automatically added unpinned entry, is removed and
-re-added at the pinned branch before this write; verify fails if the
-registration or declaration differs.
+must use `branch`. On every install run, cc-remote reconciles every
+marketplace's registration with the inventory, removing and re-adding entries
+whose recorded source differs in type, repo, branch, or directory path,
+including Claude Code's automatically added unpinned entry. cc-remote registers
+branch entries at the pinned branch before rewriting each branch marketplace's
+declaration in `~/.claude/settings.json` under `extraKnownMarketplaces` with
+`autoUpdate: false` on every install run because Claude Code auto-updates
+`claude-plugins-official` by default. Verify checks both `ref` and `branch`
+registrations and fails if a registration or declaration differs; install and
+verify reject versions that differ from their plugin pins, so upstream version
+bumps fail closed until the inventory is bumped.
 
 `claude.env` and service `env` values may reference `${NAME}` when `NAME` is
 declared in `configure.env`. Configuration requires exactly those declared names
