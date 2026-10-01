@@ -6,7 +6,7 @@ setup commands belong to that profile; the environment manager supplies the
 host, checkout, tools, and lifecycle.
 
 cc-remote implements this separation with Sprites and Namespace backends,
-image and tool preparation, workspace lifecycle, prepared claims, and an Orca
+image and tool preparation, workspace lifecycle, and an Orca
 adapter. The [workspace guide](orca-workspaces.md) describes the client setup.
 The Orca composer flow and live personal-tailnet enrollment still need live
 verification; startup timings for this implementation have not been measured.
@@ -33,7 +33,7 @@ change the provider lifecycle.
 
 | Layer | Responsibility |
 | --- | --- |
-| Core | Lifecycle, checkout, tool readiness, prepared capacity, identity, and ownership |
+| Core | Lifecycle, checkout, tool readiness, identity, and ownership |
 | Backend | Provider creation, execution, transport, wake, suspension or idle behavior, and deletion |
 | Frontend | Client request mapping, result rendering, workspace registration, and client lifecycle events |
 | Configuration | Repository settings, tool inventory, provider choices, and optional setup commands |
@@ -43,18 +43,18 @@ commands and image choices belong to the backend. The core receives explicit
 configuration and has no dependency on a particular repository or its build
 infrastructure.
 
-## Prepare tools once
+## Prepare tools and checkout
 
 The lean profile selects Sprites over SSH with configured tools and plugins and
 a shallow checkout of the requested ref. Project dependency installation and
 platform startup are task-specific actions. A profile can supply those commands
 when needed, including a full-stack Namespace environment.
 
-Prepared capacity holds unused environments with a verified tool set. A matching
-[readiness stamp](tool-inventory.md#fingerprints-and-readiness) allows a claim to
-reuse that preparation. The claim still
-renews workspace identity and materializes the requested checkout at the pinned
-source commit.
+Each create request provisions a fresh provider machine named for the workspace.
+The selected image can supply tools; cc-remote runs the inventory's tool and
+plugin installation scripts and materializes the requested checkout at the
+pinned source commit. The [readiness stamp](tool-inventory.md#fingerprints-and-readiness)
+records that preparation so resume can check for changed tools or images.
 
 | Part of the lean profile | Task-specific setup |
 | --- | --- |
@@ -69,28 +69,27 @@ costs and lifetimes.
 
 ## Give each environment its own identity
 
-Images and prepared capacity contain no authenticated agent session, tailnet
-state, or retained checkout credential. A claim assigns a distinct host identity
-and enrolls the assigned environment on the configured tailnet. Prepared hosts
-remain unenrolled.
+Images contain tool payloads, with no authenticated agent session, tailnet state,
+or retained checkout credential. Each fresh workspace has its own host identity
+and joins the configured tailnet.
 
 Cleanup uses the exact provider resource and recorded tailnet node. A retry
 distinguishes a node it enrolled from one it reattached. A failed retry preserves
 the existing node, and the resource lock covers reattachment, result delivery,
 and any enrollment cleanup.
 
-State belongs to `cc-remote` and records machine ownership and exclusive claims.
-A repeated request reattaches its successfully activated spare; another request
-cannot claim it. Agent environments use their own images and pools, independent
-of build infrastructure.
+State belongs to `cc-remote` and records one workspace owner for each machine.
+Create rejects a name that already has a workspace record; resume reconnects the
+recorded workspace. Cleanup checks the provider's workspace ownership label
+before deleting the machine. Agent environments use their own images,
+independent of build infrastructure.
 
 ## Measure the complete startup path
 
-Provider creation, prepared claiming, SSH readiness, tool readiness, checkout
-readiness, and client registration are separate timestamps. A completed test
-workload measures useful work after startup.
+Fresh provider creation, tool readiness, checkout readiness, SSH readiness, and
+client registration are separate timestamps. Measure resume separately. A
+completed test workload measures useful work after startup.
 
-A prepared claim does not establish the empty-pool create time. An SSH connection
-does not establish that the tools and checkout are ready. Keeping those results
-separate makes the cost of each layer visible and prevents installation or test
-time from being reported as provider startup.
+An SSH connection does not establish that the tools and checkout are ready.
+Keeping those results separate makes the cost of each layer visible and prevents
+installation or test time from being reported as provider startup.

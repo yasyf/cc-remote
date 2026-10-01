@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	warmStamp    = remote.StateDir + "/warm-head"
 	githubOrigin = "https://github.com/"
 )
 
@@ -93,21 +92,6 @@ func RefreshScript(root string, env, steps []string) string {
 		lines = append(lines, "export "+remote.Quote(pair))
 	}
 	return remote.Script(append(lines, steps...)...)
-}
-
-func WarmScript(root string, inputs, steps []string) string {
-	if len(inputs) == 0 {
-		return RefreshScript(root, nil, steps)
-	}
-	return RefreshScript(root, nil, slices.Concat(
-		[]string{
-			`if [ -s "` + warmStamp + `" ] && git diff --quiet "$(cat "` + warmStamp + `")" HEAD -- ` + remote.QuoteAll(inputs) + `; then`,
-			`echo "` + remote.Prefix + `: nothing the warm steps read changed since $(cat "` + warmStamp + `"); skipping them" >&2`,
-			"else",
-		},
-		steps,
-		[]string{`mkdir -p "` + remote.StateDir + `"`, `git rev-parse HEAD > "` + warmStamp + `"`, "fi"},
-	))
 }
 
 func ForwardEnv(forwards []Forward, labels []LabelledEnv) map[string]string {

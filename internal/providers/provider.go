@@ -45,10 +45,8 @@ const (
 )
 
 type Traits struct {
-	TailnetMode      TailnetMode
-	Supervisor       Supervisor
-	HostKeys         bool
-	CredentialHelper string
+	TailnetMode TailnetMode
+	Supervisor  Supervisor
 }
 
 type Spec struct {

@@ -35,8 +35,6 @@ func ValidateName(name string) error {
 	return nil
 }
 
-func (d Dir) Spares() string { return filepath.Join(string(d), "spares.json") }
-
 func (d Dir) Workspace(name string) string {
 	return filepath.Join(string(d), "workspaces", name+".json")
 }
@@ -45,9 +43,6 @@ func (d Dir) SSH(name string) string {
 	return filepath.Join(string(d), "ssh", name+".ssh")
 }
 func (d Dir) SSHInclude() string { return filepath.Join(string(d), "ssh", "*.ssh") }
-func (d Dir) Log(kind, name string) string {
-	return filepath.Join(string(d), "logs", kind, name+".log")
-}
 
 type Held struct {
 	Name   string

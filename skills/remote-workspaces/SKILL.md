@@ -196,8 +196,8 @@ Never use them on a remote workspace.
 
 Record your own measurements here; they are observations, not promises.
 
-| Recipe | Fresh create to SSH-ready (p50/p90) | Prepared claim to SSH-ready (p50/p90) | Resume | Source |
-| --- | --- | --- | --- | --- |
-| `<default recipe>` | `<fill>` | `<fill>` | `<fill>` | `<link to your run log>` |
+| Recipe | Fresh create to SSH-ready (p50/p90) | Resume | Source |
+| --- | --- | --- | --- |
+| `<default recipe>` | `<fill>` | `<fill>` | `<link to your run log>` |
 
 Set `wait --timeout` above the p90 of your fresh creates.

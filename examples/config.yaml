@@ -27,17 +27,9 @@ profiles:
     checkout: full
     prepare:
       - ./tools/bootstrap-project.sh
-    warm:
       - ./tools/install-project-deps.sh
-    warm_inputs:
-      - package.json
-      - "*.lock"
     machine:
       namespace: { image: <image-name-or-digest>, size: xl }
-
-spares:
-  sprites: { lean: 1 }
-  namespace: { full: 0 }
 
 inventory: ./inventory.yaml
 
@@ -52,6 +44,3 @@ tailnet:
 
 git:
   token_command: [gh, auth, token]
-
-identity:
-  forbidden_paths: []

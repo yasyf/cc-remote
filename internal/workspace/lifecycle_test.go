@@ -21,7 +21,6 @@ import (
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
-	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/tailnet"
 )
@@ -36,8 +35,6 @@ const (
 	renews     = `rm -rf "$HOME"/.claude.json`
 	checkout   = "clone --quiet"
 	prepares   = "cd /home/fake/app\n"
-	warms      = "warm-head"
-	cleans     = "this spare is not clean"
 	noState    = `{"BackendState":"NoState"}`
 	provisions = "sudo bash -s"
 	installs   = "plugins.sh install "
@@ -102,7 +99,7 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 		return providers.Result{Stderr: []byte("the machine went away"), ExitCode: 1}
 	}
 	if joined && strings.Contains(script, freshens) {
-		return providers.Result{Stderr: []byte("cc-remote: this machine already carries /var/lib/tailscale/tailscaled.state, so its image or spare joined a tailnet before this claim; rebuild it unenrolled"), ExitCode: 1}
+		return providers.Result{Stderr: []byte("cc-remote: this machine already carries /var/lib/tailscale/tailscaled.state, so its image joined a tailnet before this workspace was created; rebuild it unenrolled"), ExitCode: 1}
 	}
 	switch {
 	case strings.Contains(script, enrolls):
@@ -123,12 +120,6 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 		m.setStatus(noState)
 	}
 	return providers.Result{}
-}
-
-func (m *scripted) lose(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.ready, id)
 }
 
 func (m *scripted) ran(id, fragment string) int {
@@ -250,17 +241,17 @@ type harness struct {
 	inventory string
 }
 
-func newHarness(t *testing.T, spares int, withTailnet bool) *harness {
+func newHarness(t *testing.T, withTailnet bool) *harness {
 	t.Helper()
-	return build(t, spares, withTailnet, inventory, "")
+	return build(t, withTailnet, inventory, "")
 }
 
 func newImagedHarness(t *testing.T) *harness {
 	t.Helper()
-	return build(t, 0, false, imaged, "agent-host")
+	return build(t, false, imaged, "agent-host")
 }
 
-func build(t *testing.T, spares int, withTailnet bool, tools, image string) *harness {
+func build(t *testing.T, withTailnet bool, tools, image string) *harness {
 	t.Helper()
 	machine := &scripted{status: noState, minted: "nNEW"}
 	fake := &providertest.Fake{Handle: machine.Handle}
@@ -282,16 +273,12 @@ workspace_dirs:
 profiles:
   lean:
     prepare: [true]
-    warm: ["yarn install"]
-    warm_inputs: [yarn.lock]
     machine:
       fake: { image: %q }
-spares:
-  fake: { lean: %d }
 inventory: %s
 forwards:
   - { label: web, env: WEB_PORT }
-`, t.TempDir(), image, spares, inventoryPath)
+`, t.TempDir(), image, inventoryPath)
 	if withTailnet {
 		text += "tailnet:\n  tag: " + tag + "\n"
 	}
@@ -313,7 +300,7 @@ forwards:
 
 func (h *harness) open() *Session {
 	h.t.Helper()
-	session, err := Open(h.cfg, h.provider, "fake", "lean", Platform{Daemon: tailnet.Daemon{Mode: tailnet.Kernel, Supervisor: tailnet.SpriteEnv}, HostKeys: true})
+	session, err := Open(h.cfg, h.provider, "fake", "lean", Platform{Daemon: tailnet.Daemon{Mode: tailnet.Kernel, Supervisor: tailnet.SpriteEnv}})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -370,15 +357,6 @@ func (h *harness) bind(to tailnet.Binding) {
 	}
 }
 
-func (h *harness) spares() sparestate.Spares {
-	h.t.Helper()
-	spares, err := h.session.Pool.Store.Read()
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	return spares
-}
-
 func (h *harness) record(name string) (Record, bool) {
 	h.t.Helper()
 	var record Record
@@ -396,24 +374,12 @@ func (h *harness) saveRecord(record Record) {
 	}
 }
 
-func (h *harness) prepared() string {
-	h.t.Helper()
-	if err := h.session.Prepare(context.Background()); err != nil {
-		h.t.Fatal(err)
-	}
-	for id := range h.spares() {
-		return id
-	}
-	h.t.Fatal("prepare left no spare")
-	return ""
-}
-
 func (h *harness) calls() string {
 	return strings.Join(h.fake.Calls(), " ")
 }
 
 func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	result, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"})
 	if err != nil {
 		t.Fatal(err)
@@ -424,8 +390,8 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 			t.Fatalf("scripts ran out of order: %v", order)
 		}
 	}
-	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", warms) != 0 || h.machine.ran("ws-1", readies) != 0 {
-		t.Error("a fresh create renewed identity, warmed, or checked a ready stamp it could not have")
+	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 {
+		t.Error("a fresh create renewed identity or checked a ready stamp it could not have")
 	}
 	if got := h.machine.stdins["ws-1"][order[1]]; got != "" {
 		t.Errorf("the tool install read %q on stdin although no private marketplace needs a token", got)
@@ -442,10 +408,10 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if !strings.Contains(h.machine.scripts["ws-1"][order[0]], "--depth 1") || !strings.Contains(h.machine.scripts["ws-1"][order[0]], "ref=feature") {
 		t.Error("the lean checkout is not a shallow checkout of the requested ref")
 	}
-	if result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Source.Ref != "feature" {
+	if result.Machine != "ws-1" || !strings.Contains(h.calls(), "create ws-1") || result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Source.Ref != "feature" {
 		t.Errorf("result = %+v", result)
 	}
-	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || record.Claimed {
+	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" {
 		t.Errorf("record = %+v, %v", record, found)
 	}
 	if h.bound() != (tailnet.Binding{NodeID: "nNEW"}) {
@@ -457,126 +423,22 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	}
 }
 
-func TestAClaimRenewsIdentityBeforeInstallingThenWarmsAndEnrolls(t *testing.T) {
-	h := newHarness(t, 1, true)
-	spare := h.prepared()
-	if h.machine.ran(spare, enrolls) != 0 || h.machine.ran(spare, freshens) != 1 || h.machine.ran(spare, cleans) != 1 || h.machine.ran(spare, warms) != 1 {
-		t.Errorf("prepare ran %q", h.machine.scripts[spare])
-	}
-	if sealed := h.machine.order(spare, 0, freshens, provisions); sealed[0] < 0 || sealed[1] < sealed[0] {
-		t.Errorf("prepare provisioned the spare before proving it never joined a tailnet: %v", sealed)
-	}
-	if machine, _ := h.fake.Get(context.Background(), spare); machine.State != providers.StateSuspended || machine.Labels[LabelSpare] != h.session.Pool.Fingerprint {
-		t.Errorf("the ready spare is %+v", machine)
-	}
-	refills := 0
-	h.session.Refill = func() error { refills++; return nil }
-	before := len(h.machine.scripts[spare])
-	result, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	order := h.machine.order(spare, before, renews, readies, checkout, prepares, warms, configures, freshens, enrolls)
-	for i := 1; i < len(order); i++ {
-		if order[i-1] < 0 || order[i] <= order[i-1] {
-			t.Fatalf("the claim ran scripts out of order: %v (prepare ran %d)", order, before)
-		}
-	}
-	if from := h.machine.scripts[spare][before:]; strings.Contains(strings.Join(from, "\n"), installs) || strings.Contains(strings.Join(from, "\n"), provisions) {
-		t.Errorf("a claim of a spare at the current stamp installed tools again: %q", from)
-	}
-	if fresh := h.machine.scripts[spare][order[0]]; !strings.Contains(fresh, "sudo -n ssh-keygen -A") {
-		t.Errorf("the claim kept the spare's host keys: %q", fresh)
-	}
-	if refills != 1 || result.Machine != spare || !strings.Contains(h.calls(), "wake "+spare) {
-		t.Errorf("refills %d, machine %s, calls %s", refills, result.Machine, h.calls())
-	}
-	if spare := h.spares()[spare]; spare.State != sparestate.Claimed || spare.ActivatedAt == nil || spare.Request != "ws-1" {
-		t.Errorf("spare = %+v", spare)
-	}
-	if record, found := h.record("ws-1"); !found || !record.Claimed || record.Machine != spare || record.Tailnet == nil {
-		t.Errorf("record = %+v, %v", record, found)
-	}
-}
-
-func TestARetriedCreateReattachesItsClaimWithoutRenewingIdentity(t *testing.T) {
-	h := newHarness(t, 1, true)
-	spare := h.prepared()
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
-		t.Fatal(err)
-	}
-	identities, minted := h.machine.ran(spare, renews), h.api.mintedKeys()
-	calls := len(h.fake.Calls())
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
-		t.Fatal(err)
-	}
-	if h.machine.ran(spare, renews) != identities || h.api.mintedKeys() != minted || h.machine.ran(spare, checkout) != 2 {
-		t.Error("the retry renewed the identity of a workspace already handed out, or enrolled again")
-	}
-	if got := verbs(h.fake.Calls()[calls:]); strings.Contains(got, "create") || strings.Contains(got, "destroy") || !strings.HasPrefix(got, "wake exec") {
-		t.Errorf("the retry ran %q; want a wake, a refresh and a reconnect only", got)
-	}
-	if h.spares()[spare].State != sparestate.Claimed {
-		t.Errorf("the reattached spare is %s", h.spares()[spare].State)
-	}
-}
-
-func TestAFailedReattachLeavesTheWorkspace(t *testing.T) {
-	h := newHarness(t, 1, true)
-	h.prepared()
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+func TestARetriedFreshCreateLeavesTheWorkspaceItMade(t *testing.T) {
+	h := newHarness(t, false)
+	if err := h.session.save(&Record{Name: "ws-1", Provider: h.session.Kind, Profile: h.session.Profile, Machine: "ws-1"}); err != nil {
 		t.Fatal(err)
 	}
 	h.machine.failAll = true
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil {
-		t.Fatal("the reattach succeeded on a machine that fails every command")
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("the retry of a fresh create returned %v; want a refusal before any machine call", err)
 	}
-	if strings.Contains(h.calls(), "destroy") {
-		t.Error("a failed reattach destroyed the workspace it was handed")
-	}
-	if _, found := h.record("ws-1"); !found {
-		t.Error("a failed reattach forgot the workspace")
-	}
-}
-
-func TestARetryOfAnUnfinishedCreateTouchesNothing(t *testing.T) {
-	h := newHarness(t, 1, false)
-	spare := h.prepared()
-	if _, assignment, err := h.session.Pool.Assign("ws-1", time.Now()); err != nil || assignment != NewClaim {
-		t.Fatal(assignment, err)
-	}
-	calls := len(h.fake.Calls())
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "never finished") {
-		t.Fatalf("a retry reattached a claim whose first create never finished: %v", err)
-	}
-	if len(h.fake.Calls()) != calls {
-		t.Errorf("the refused retry ran %v on the machine", h.fake.Calls()[calls:])
-	}
-	if h.spares()[spare].State != sparestate.Claimed {
-		t.Error("the refused retry changed the claim")
-	}
-}
-
-func TestARetriedFreshCreateLeavesTheWorkspaceItMade(t *testing.T) {
-	for name, spares := range map[string]int{"pooled": 1, "unpooled": 0} {
-		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, spares, false)
-			if err := h.session.save(&Record{Name: "ws-1", Provider: h.session.Kind, Profile: h.session.Profile, Machine: "ws-1"}); err != nil {
-				t.Fatal(err)
-			}
-			h.machine.failAll = true
-			if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already exists") {
-				t.Fatalf("the retry of a fresh create returned %v; want a refusal before any machine call", err)
-			}
-			if len(h.fake.Calls()) != 0 {
-				t.Errorf("the refused retry ran %v on the machine", h.fake.Calls())
-			}
-		})
+	if len(h.fake.Calls()) != 0 {
+		t.Errorf("the refused retry ran %v on the machine", h.fake.Calls())
 	}
 }
 
 func TestAFailedCreateLeavesTheTailnetThenDiscardsWhatItMade(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	h.provider.unreachable.Store(true)
 	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
 	if err == nil || !strings.Contains(err.Error(), "no route") {
@@ -594,7 +456,7 @@ func TestAFailedCreateLeavesTheTailnetThenDiscardsWhatItMade(t *testing.T) {
 }
 
 func TestAFailedCreateDestroysTheMachineEvenWhenItsNodeCannotBeRevoked(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	h.api.refuse = true
 	h.provider.unreachable.Store(true)
 	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
@@ -621,7 +483,7 @@ func TestAFailedResumeRevokesOnlyTheNodeItEnrolled(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, 0, true)
+			h := newHarness(t, true)
 			h.api.devices = []tailnet.Device{owned("nMINE"), owned("nNEW")}
 			if _, err := h.fake.Create(context.Background(), providers.Spec{Name: "ws-1"}); err != nil {
 				t.Fatal(err)
@@ -643,7 +505,7 @@ func TestAFailedResumeRevokesOnlyTheNodeItEnrolled(t *testing.T) {
 }
 
 func TestAConcurrentResumeNeverRevokesTheNodeAnotherEstablished(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	if _, err := h.fake.Create(context.Background(), providers.Spec{Name: "ws-1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +560,7 @@ func TestAConcurrentResumeNeverRevokesTheNodeAnotherEstablished(t *testing.T) {
 }
 
 func TestAWorkspaceWithNoTailnetNeverTouchesTheTailnet(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -718,7 +580,7 @@ func TestAWorkspaceWithNoTailnetNeverTouchesTheTailnet(t *testing.T) {
 }
 
 func TestDestroyLeavesTheTailnetBeforeTheMachine(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -752,7 +614,7 @@ func TestDestroyLeavesTheTailnetBeforeTheMachine(t *testing.T) {
 }
 
 func TestSuspendAndResumeRetainTheWorkspace(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -781,7 +643,7 @@ func TestSuspendAndResumeRetainTheWorkspace(t *testing.T) {
 }
 
 func TestResumeRefusesAnUnknownOrForeignWorkspace(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	if _, err := h.session.Resume(context.Background(), "ws-1"); err == nil || !strings.Contains(err.Error(), "no workspace") {
 		t.Errorf("err = %v", err)
 	}
@@ -791,40 +653,8 @@ func TestResumeRefusesAnUnknownOrForeignWorkspace(t *testing.T) {
 	}
 }
 
-func TestAClaimFromAPoolKeptAtZeroStartsNoRefill(t *testing.T) {
-	h := newHarness(t, 0, false)
-	refills := 0
-	h.session.Refill = func() error { refills++; return nil }
-	h.session.replaceClaimed()
-	if refills != 0 {
-		t.Error("a pool kept at zero spares started a refill")
-	}
-}
-
-func TestPrepareFillsMultipleSpares(t *testing.T) {
-	h := newHarness(t, 2, false)
-	if err := h.session.Prepare(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(h.spares()) != 2 {
-		t.Errorf("the pool holds %d spares; preparation fills its configured capacity", len(h.spares()))
-	}
-}
-
-func TestAFailedPrepareDiscardsTheSpare(t *testing.T) {
-	h := newHarness(t, 1, false)
-	h.machine.failAll = true
-	if err := h.session.Prepare(context.Background()); err == nil {
-		t.Fatal("prepare passed on a machine that fails every command")
-	}
-	if len(h.spares()) != 0 || !strings.Contains(h.calls(), "destroy cc-remote-spare-lean-") {
-		t.Errorf("the failed spare stayed: %v, %s", h.spares(), h.calls())
-	}
-}
-
-func TestStatusReportsWorkspacesAndPool(t *testing.T) {
-	h := newHarness(t, 1, false)
-	spare := h.prepared()
+func TestStatusReportsWorkspaces(t *testing.T) {
+	h := newHarness(t, false)
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
@@ -832,16 +662,13 @@ func TestStatusReportsWorkspacesAndPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Workspaces) != 1 || status.Workspaces[0].Name != "ws-1" || status.Workspaces[0].Machine != spare {
+	if len(status.Workspaces) != 1 || status.Workspaces[0].Name != "ws-1" || status.Workspaces[0].Machine != "ws-1" {
 		t.Errorf("workspaces = %+v", status.Workspaces)
-	}
-	if status.Pool.Target != 1 || status.Pool.Pooled != 0 || status.Pool.Spares[spare] == nil || status.Pool.Fingerprint != h.session.Pool.Fingerprint {
-		t.Errorf("pool = %+v", status.Pool)
 	}
 }
 
 func TestAFreshCreateNeverDestroysAMachineItDidNotMake(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	ctx := context.Background()
 	if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1", Labels: map[string]string{LabelWorkspace: "someone-else"}}); err != nil {
 		t.Fatal(err)
@@ -860,85 +687,8 @@ func TestAFreshCreateNeverDestroysAMachineItDidNotMake(t *testing.T) {
 	}
 }
 
-func TestCreateWithAClaimedMachineNamePreservesTheOriginalWorkspace(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := t.Context()
-	spare := h.prepared()
-	result, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Machine != spare {
-		t.Fatalf("created %s, want claimed spare %s", result.Machine, spare)
-	}
-	calls := len(h.fake.Calls())
-	if _, err := h.session.Create(ctx, spare, Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already exists as a spare") {
-		t.Fatalf("colliding create error = %v", err)
-	}
-	if len(h.fake.Calls()) != calls {
-		t.Errorf("colliding create touched the provider: %v", h.fake.Calls()[calls:])
-	}
-	if item := h.spares()[spare]; item == nil || item.Request != "ws-1" || item.State != sparestate.Claimed {
-		t.Fatalf("original claim = %+v", item)
-	}
-	if _, found := h.record(spare); found {
-		t.Error("colliding create left a workspace record")
-	}
-	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
-		t.Fatalf("destroy original workspace: %v", err)
-	}
-	if _, err := h.fake.Get(ctx, spare); !errors.Is(err, providers.ErrNotFound) {
-		t.Fatalf("original machine survived destroy: %v", err)
-	}
-}
-
-func TestCreateRefusesANameAnotherPoolRecorded(t *testing.T) {
-	h := newHarness(t, 0, true)
-	ctx := context.Background()
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
-		t.Fatal(err)
-	}
-	h.session.Pool.Store = sparestate.Store{Path: filepath.Join(t.TempDir(), "spares.json")}
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already recorded") {
-		t.Fatalf("err = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
-		t.Error("the refused create destroyed the recorded workspace's machine")
-	}
-	if len(h.api.deletedNodes()) != 0 || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) {
-		t.Errorf("the refused create revoked the recorded workspace's node: deleted %v, bound %v", h.api.deletedNodes(), h.bound())
-	}
-	if _, found := h.record("ws-1"); !found {
-		t.Error("the refused create forgot the recorded workspace")
-	}
-}
-
-func TestDestroyReleasesAClaimWhoseCreateNeverRecordedIt(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := context.Background()
-	spare := h.prepared()
-	if _, assignment, err := h.session.Pool.Assign("ws-1", time.Now()); err != nil || assignment != NewClaim {
-		t.Fatal(assignment, err)
-	}
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "never finished") {
-		t.Fatalf("err = %v", err)
-	}
-	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
-		t.Fatalf("Destroy = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, spare); !errors.Is(err, providers.ErrNotFound) {
-		t.Errorf("the claimed spare survived: %v", err)
-	}
-	if _, held := h.spares()[spare]; held {
-		t.Error("the claim survived destroy")
-	}
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
-		t.Errorf("the name could not be created after the orphaned claim was destroyed: %v", err)
-	}
-}
-
 func TestDestroyHoldsTheResourceUntilTheMachineIsGone(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -984,31 +734,8 @@ func (s *slowDestroy) Destroy(ctx context.Context, id string) error {
 	return s.Provider.Destroy(ctx, id)
 }
 
-func TestPrepareNeverDestroysAMachineItDidNotMake(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := context.Background()
-	h.session.Provider = &collidingCreate{Provider: h.provider}
-	if err := h.session.Prepare(ctx); !errors.Is(err, providers.ErrExists) {
-		t.Fatalf("err = %v", err)
-	}
-	if calls := h.calls(); strings.Contains(calls, "destroy") || strings.Contains(calls, "exec") {
-		t.Errorf("the refused prepare ran %s", calls)
-	}
-	if len(h.spares()) != 0 {
-		t.Errorf("the refused prepare left %v", h.spares())
-	}
-}
-
-type collidingCreate struct {
-	providers.Provider
-}
-
-func (c *collidingCreate) Create(context.Context, providers.Spec) (providers.Machine, error) {
-	return providers.Machine{}, providers.ErrExists
-}
-
 func TestAFailedCreateKeepsItsRecordWhenTheMachineCannotBeRemoved(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	h.provider.unreachable.Store(true)
 	gone := newRefusingDestroy(h.provider)
@@ -1046,45 +773,8 @@ func newRefusingDestroy(p providers.Provider) *refusingDestroy {
 	return r
 }
 
-func TestDestroyRefusesAClaimAnotherProviderOrProfileHolds(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := context.Background()
-	spare := h.prepared()
-	if _, assignment, err := h.session.Pool.Assign("ws-1", time.Now()); err != nil || assignment != NewClaim {
-		t.Fatal(assignment, err)
-	}
-	other := *h.session
-	other.Profile = "full"
-	if err := other.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "fake/lean") {
-		t.Fatalf("err = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, spare); err != nil {
-		t.Error("the other profile destroyed the claimed spare")
-	}
-	if _, held := h.spares()[spare]; !held {
-		t.Error("the other profile released the claim")
-	}
-}
-
-func TestARefusedCreateConsumesNoSpare(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := context.Background()
-	spare := h.prepared()
-	calls := len(h.fake.Calls())
-	h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Source: Source{Ref: "main"}, Machine: "ws-1"})
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already recorded") {
-		t.Fatalf("err = %v", err)
-	}
-	if got := h.spares()[spare]; got == nil || got.State != sparestate.Ready {
-		t.Errorf("the refused create changed the spare: %+v", got)
-	}
-	if len(h.fake.Calls()) != calls {
-		t.Errorf("the refused create took a spare or touched a machine: %v", h.fake.Calls()[calls:])
-	}
-}
-
 func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	ctx := context.Background()
 	h.api.devices = append(h.api.devices, owned("nOLD"))
 	h.bind(tailnet.Binding{NodeID: "nOLD"})
@@ -1105,27 +795,8 @@ func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testin
 	}
 }
 
-func TestAClaimProvisionsASpareThatLostItsReadyStamp(t *testing.T) {
-	h := newHarness(t, 1, false)
-	spare := h.prepared()
-	h.machine.lose(spare)
-	before := len(h.machine.scripts[spare])
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
-		t.Fatal(err)
-	}
-	order := h.machine.order(spare, before, readies, provisions, installs, checkout)
-	for i := 1; i < len(order); i++ {
-		if order[i-1] < 0 || order[i] <= order[i-1] {
-			t.Fatalf("the claim ran scripts out of order: %v", order)
-		}
-	}
-	if h.machine.ready[spare] != h.session.Stamp {
-		t.Errorf("the claim left the spare at stamp %q", h.machine.ready[spare])
-	}
-}
-
 func TestTheInstallReadsTheTokenOnlyForPrivateMarketplaces(t *testing.T) {
-	h := build(t, 0, false, private, "")
+	h := build(t, false, private, "")
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1141,7 +812,7 @@ func TestTheInstallReadsTheTokenOnlyForPrivateMarketplaces(t *testing.T) {
 }
 
 func TestResumeProvisionsAnEnrolledHostInPlace(t *testing.T) {
-	h := newHarness(t, 0, true)
+	h := newHarness(t, true)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -1179,31 +850,8 @@ func TestResumeProvisionsAnEnrolledHostInPlace(t *testing.T) {
 	}
 }
 
-func TestPrepareRefusesASpareThatAlreadyJoinedATailnet(t *testing.T) {
-	h := newHarness(t, 1, true)
-	h.machine.joined = true
-	err := h.session.Prepare(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "rebuild it unenrolled") {
-		t.Fatalf("Prepare = %v", err)
-	}
-	if len(h.machine.scripts) != 1 {
-		t.Fatalf("prepare touched %d machines", len(h.machine.scripts))
-	}
-	for spare, scripts := range h.machine.scripts {
-		if len(scripts) != 1 || !strings.Contains(scripts[0], freshens) {
-			t.Errorf("prepare ran %q on a spare that joined a tailnet; want only the purity check", scripts)
-		}
-		if _, err := h.fake.Get(context.Background(), spare); !errors.Is(err, providers.ErrNotFound) {
-			t.Errorf("the joined spare survived: Get = %v", err)
-		}
-	}
-	if spares := h.spares(); len(spares) != 0 {
-		t.Errorf("the pool kept %v", spares)
-	}
-}
-
 func TestResumeProvisionsInPlaceWhenTheInventoryDrifted(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -1312,7 +960,7 @@ func TestDestroyKeepsAnUnlabelledMachineAndItsRecord(t *testing.T) {
 		"with no creation time":   func() time.Time { return time.Time{} },
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, 0, false)
+			h := newHarness(t, false)
 			ctx := context.Background()
 			h.fake.Now = created
 			if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1"}); err != nil {
@@ -1354,55 +1002,8 @@ func (c *createFailed) Create(context.Context, providers.Spec) (providers.Machin
 	return providers.Machine{}, errors.New("the provider api timed out before answering")
 }
 
-func TestDrainKeepsAnUnlabelledSpareAndStillRemovesTheRest(t *testing.T) {
-	h := newHarness(t, 2, false)
-	ctx := context.Background()
-	stripping := &labelsDroppedOnce{Provider: h.provider}
-	h.session.Provider = stripping
-	if err := h.session.Prepare(ctx); err != nil {
-		t.Fatal(err)
-	}
-	h.session.Provider = h.provider
-	unlabelled := stripping.name
-	if len(h.spares()) != 2 || unlabelled == "" {
-		t.Fatalf("spares = %v, unlabelled %q", h.spares(), unlabelled)
-	}
-	err := h.session.Drain(ctx, true)
-	if err == nil || !strings.Contains(err.Error(), unlabelled) || !strings.Contains(err.Error(), "without a label proving this workspace state made it") {
-		t.Fatalf("Drain = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, unlabelled); err != nil {
-		t.Error("drain removed a spare of unknown ownership")
-	}
-	left := h.spares()
-	if len(left) != 1 || left[unlabelled] == nil {
-		t.Errorf("drain left %v; want only the unlabelled spare, still accounted", left)
-	}
-	for id := range h.spares() {
-		if id != unlabelled {
-			t.Errorf("drain kept the labelled spare %s", id)
-		}
-	}
-	if machines, _ := h.fake.List(ctx, map[string]string{LabelSpare: h.session.Pool.Fingerprint}); len(machines) != 0 {
-		t.Errorf("drain left labelled spares %v", machines)
-	}
-}
-
-type labelsDroppedOnce struct {
-	providers.Provider
-	name string
-}
-
-func (l *labelsDroppedOnce) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
-	if l.name != "" {
-		return l.Provider.Create(ctx, spec)
-	}
-	l.name = spec.Name
-	return l.Provider.Create(ctx, providers.Spec{Name: spec.Name})
-}
-
 func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -1416,34 +1017,8 @@ func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {
 	}
 }
 
-func TestDrainKeepsASpareWhoseReceiptNamesAnotherFingerprint(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := context.Background()
-	h.session.Provider = &relabelled{Provider: h.provider}
-	spare := h.prepared()
-	h.session.Provider = h.provider
-	err := h.session.Drain(ctx, true)
-	if err == nil || !strings.Contains(err.Error(), "without a label proving this workspace state made it") || !strings.Contains(err.Error(), h.session.Pool.Fingerprint) {
-		t.Fatalf("Drain = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, spare); err != nil {
-		t.Error("drain removed a spare whose receipt names another fingerprint")
-	}
-	if left := h.spares(); left[spare] == nil {
-		t.Errorf("drain left %v; want the spare still accounted", left)
-	}
-}
-
-type relabelled struct {
-	providers.Provider
-}
-
-func (r *relabelled) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
-	return r.Provider.Create(ctx, providers.Spec{Name: spec.Name, Labels: map[string]string{LabelSpare: "stale"}})
-}
-
 func TestDestroyOfAMachineAlreadyGoneRetiresWithoutAProviderDestroy(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -1463,23 +1038,6 @@ func TestDestroyOfAMachineAlreadyGoneRetiresWithoutAProviderDestroy(t *testing.T
 	}
 }
 
-func TestAChangedImageReferenceClaimsNoSpareBuiltFromTheOldOne(t *testing.T) {
-	h := build(t, 1, false, imaged, "agent-host")
-	ctx := context.Background()
-	spare := h.prepared()
-	moved := h.reimage("agent-host-v2")
-	result, err := moved.Create(ctx, "ws-1", Source{Ref: "main"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Machine == spare || result.Machine != "ws-1" {
-		t.Errorf("the create claimed %s; want a fresh machine", result.Machine)
-	}
-	if record, found := h.record("ws-1"); !found || record.Claimed || record.Image != "agent-host-v2" {
-		t.Errorf("record = %+v, %v", record, found)
-	}
-}
-
 type destroyIgnored struct {
 	providers.Provider
 }
@@ -1489,7 +1047,7 @@ func (d *destroyIgnored) Destroy(context.Context, string) error {
 }
 
 func TestAPartialCreateKeepsItsRecordUntilDestroyVerifiesTheMachine(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	h.session.Provider = &createdThenFailed{Provider: h.provider}
 	_, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"})
@@ -1527,47 +1085,8 @@ func (c *createdThenFailed) Create(ctx context.Context, spec providers.Spec) (pr
 	return providers.Machine{}, errors.New("configure-ssh: the provider api timed out")
 }
 
-func TestPrepareKeepsUnknownCreateUntilDrainSettlesIt(t *testing.T) {
-	h := newHarness(t, 1, false)
-	ctx := context.Background()
-	h.session.Provider = &createdThenFailed{Provider: h.provider}
-	if err := h.session.Prepare(ctx); err == nil || !strings.Contains(err.Error(), "preparation record is kept") {
-		t.Fatalf("err = %v", err)
-	}
-	spares := h.spares()
-	if len(spares) != 1 {
-		t.Fatalf("spares = %v", spares)
-	}
-	var name string
-	for id, spare := range spares {
-		name = id
-		if spare.State != sparestate.Preparing {
-			t.Errorf("spare = %+v", spare)
-		}
-	}
-	if _, err := h.fake.Get(ctx, name); err != nil {
-		t.Fatal("the machine that may exist was destroyed on an unverified failure")
-	}
-	if err := h.session.Pool.Store.Update(func(spares sparestate.Spares) error {
-		spares[name].Preparer = 1 << 30
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	h.session.Provider = h.provider
-	if err := h.session.Drain(ctx, false); err != nil {
-		t.Fatalf("Drain = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, name); !errors.Is(err, providers.ErrNotFound) {
-		t.Error("drain left the machine")
-	}
-	if len(h.spares()) != 0 {
-		t.Error("drain did not remove the preparation record")
-	}
-}
-
 func TestConnectWritesTheSSHFragmentOrcaResolvesByTheWorkspaceName(t *testing.T) {
-	h := newHarness(t, 0, false)
+	h := newHarness(t, false)
 	ctx := context.Background()
 	knownHosts := filepath.Join(t.TempDir(), "ws-1.known_hosts")
 	identityFile := filepath.Join(t.TempDir(), "ws-1")
@@ -1619,4 +1138,33 @@ func (p *pinnedSSH) SSHTarget(_ context.Context, id string) (providers.Target, e
 		ProxyCommand:  "cc-remote proxy -- " + id,
 		HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyPinned, Alias: id + ".sprite.cc-remote", KnownHostsFile: p.knownHosts},
 	}, nil
+}
+
+func TestAFreshCreateRefusesAnAlreadyEnrolledImage(t *testing.T) {
+	h := newHarness(t, true)
+	h.machine.joined = true
+	if _, err := h.session.Create(t.Context(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "rebuild it unenrolled") {
+		t.Fatalf("Create = %v", err)
+	}
+	if h.api.mintedKeys() != 0 || h.machine.ran("ws-1", enrolls) != 0 {
+		t.Error("the already enrolled image was enrolled again")
+	}
+}
+
+func TestDestroyRefusesALegacySpareOwnershipLabel(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := t.Context()
+	if _, err := h.fake.Create(ctx, providers.Spec{Name: "legacy", Labels: map[string]string{"cc-remote/spare": "old-fingerprint"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Machine: "legacy"})
+	if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "without a label proving this workspace state made it") {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, "legacy"); err != nil {
+		t.Fatal("the legacy resource was removed")
+	}
+	if _, found := h.record("ws-1"); !found {
+		t.Fatal("the legacy workspace record was removed")
+	}
 }

@@ -76,56 +76,6 @@ func TestCheckoutScriptNeverPutsTheTokenInArgv(t *testing.T) {
 	}
 }
 
-func TestWarmStepsRerunOnlyWhenTheirInputsChange(t *testing.T) {
-	root, home := t.TempDir(), t.TempDir()
-	git(t, root, "init", "-q")
-	runs := filepath.Join(t.TempDir(), "runs")
-	commit := func(name, body string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		git(t, root, "add", ".")
-		git(t, root, "commit", "-qm", name)
-	}
-	warm := func(inputs []string) int {
-		t.Helper()
-		if out, err := runScript(t, home, workspace.WarmScript(root, inputs, []string{"echo ran >> " + runs}), ""); err != nil {
-			t.Fatalf("%v: %s", err, out)
-		}
-		raw, err := os.ReadFile(runs)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.Count(string(raw), "ran")
-	}
-	inputs := []string{"yarn.lock", "*package.json"}
-	commit("yarn.lock", "a\n")
-	for _, step := range []struct {
-		change string
-		want   int
-	}{
-		{"", 1},
-		{"README.md", 1},
-		{"yarn.lock", 2},
-		{"README.md", 2},
-		{"api/package.json", 3},
-	} {
-		if step.change != "" {
-			commit(step.change, step.change+fmt.Sprint(step.want))
-		}
-		if got := warm(inputs); got != step.want {
-			t.Fatalf("after changing %q the warm steps had run %d times, want %d", step.change, got, step.want)
-		}
-	}
-	if got := warm(nil); got != 4 {
-		t.Errorf("warm steps with no inputs ran %d times in total, want every call to run them", got)
-	}
-}
-
 func TestRefreshScriptExportsTheForwardPortsBeforeTheSteps(t *testing.T) {
 	root := t.TempDir()
 	out, err := runScript(t, t.TempDir(), workspace.RefreshScript(root, []string{"WEB_PORT=4321", "ODD=it's"}, []string{`printf '%s %s %s' "$WEB_PORT" "$ODD" "$(pwd)"`}), "")

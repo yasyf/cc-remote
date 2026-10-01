@@ -17,7 +17,6 @@ func TestFakeProviderSatisfiesTheLifecycleContract(t *testing.T) {
 			Kind:     "fake",
 			Platform: workspace.Platform{Daemon: tailnet.Daemon{Mode: tailnet.Userspace, Supervisor: tailnet.Setsid}},
 			Root:     local.Root + "/machines",
-			Spares:   2,
 		}
 	})
 }

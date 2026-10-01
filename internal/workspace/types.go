@@ -22,9 +22,7 @@ type LabelledEnv struct {
 }
 
 type Platform struct {
-	Daemon           tailnet.Daemon
-	HostKeys         bool
-	CredentialHelper string
+	Daemon tailnet.Daemon
 }
 
 type Record struct {
@@ -35,7 +33,6 @@ type Record struct {
 	Machine    string        `json:"machine"`
 	Image      string        `json:"image,omitempty"`
 	ImageSpec  string        `json:"imageSpec,omitempty"`
-	Claimed    bool          `json:"claimed,omitempty"`
 	Ready      bool          `json:"ready,omitempty"`
 	Unverified bool          `json:"unverified,omitempty"`
 	CreatedAt  time.Time     `json:"createdAt"`

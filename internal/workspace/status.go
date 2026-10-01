@@ -2,14 +2,11 @@ package workspace
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 
-	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
@@ -17,15 +14,7 @@ type Status struct {
 	Provider   string            `json:"provider"`
 	Profile    string            `json:"profile"`
 	Workspaces []Record          `json:"workspaces"`
-	Pool       PoolStatus        `json:"pool"`
 	Checks     map[string]string `json:"checks,omitempty"`
-}
-
-type PoolStatus struct {
-	Fingerprint string                       `json:"fingerprint"`
-	Target      int                          `json:"target"`
-	Pooled      int                          `json:"pooled"`
-	Spares      map[string]*sparestate.Spare `json:"spares"`
 }
 
 func (s *Session) Status() (*Status, error) {
@@ -33,16 +22,7 @@ func (s *Session) Status() (*Status, error) {
 	if err != nil {
 		return nil, err
 	}
-	spares, err := s.Pool.Store.Read()
-	if err != nil {
-		return nil, err
-	}
-	status := &Status{Provider: s.Kind, Profile: s.Profile, Workspaces: records, Pool: PoolStatus{Fingerprint: s.Pool.Fingerprint, Target: s.Pool.Spares, Pooled: spares.Pooled(s.Pool.Fingerprint), Spares: map[string]*sparestate.Spare{}}}
-	for id, item := range spares {
-		if item.Provider == s.Kind && item.Profile == s.Profile {
-			status.Pool.Spares[id] = item
-		}
-	}
+	status := &Status{Provider: s.Kind, Profile: s.Profile, Workspaces: records}
 	return status, nil
 }
 
@@ -109,22 +89,4 @@ func (s *Session) stateWritable() error {
 func lookPath(name string) error {
 	_, err := exec.LookPath(name)
 	return err
-}
-
-func StartDetached(argv []string, logPath string) (int, error) {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return 0, err
-	}
-	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return 0, err
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = log, log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		return 0, errors.Join(err, log.Close())
-	}
-	pid := cmd.Process.Pid
-	return pid, errors.Join(cmd.Process.Release(), log.Close())
 }

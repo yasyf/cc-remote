@@ -62,10 +62,8 @@ func New(config Config) (*Provider, error) {
 
 func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
-		TailnetMode:      providers.TailnetUserspace,
-		Supervisor:       providers.SupervisorSetsid,
-		HostKeys:         false,
-		CredentialHelper: "/.namespace/devbox/git-credential-nsc",
+		TailnetMode: providers.TailnetUserspace,
+		Supervisor:  providers.SupervisorSetsid,
 	}
 }
 

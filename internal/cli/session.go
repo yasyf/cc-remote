@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/spf13/cobra"
 
@@ -59,7 +58,6 @@ func (f *selection) open() (*workspace.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	session.Refill = func() error { return refill(cfg, f.provider, f.profile, session) }
 	return session, nil
 }
 
@@ -77,20 +75,8 @@ func openProvider(cfg *config.Config, kind string) (providers.Provider, error) {
 
 func platform(traits providers.Traits) workspace.Platform {
 	return workspace.Platform{
-		Daemon:           tailnet.Daemon{Mode: tailnet.Mode(traits.TailnetMode), Supervisor: tailnet.Supervisor(traits.Supervisor)},
-		HostKeys:         traits.HostKeys,
-		CredentialHelper: traits.CredentialHelper,
+		Daemon: tailnet.Daemon{Mode: tailnet.Mode(traits.TailnetMode), Supervisor: tailnet.Supervisor(traits.Supervisor)},
 	}
-}
-
-func refill(cfg *config.Config, provider, profile string, session *workspace.Session) error {
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	argv := []string{self, "prepare", "--config", cfg.Path, "--provider", provider, "--profile", profile}
-	_, err = workspace.StartDetached(argv, session.State.Log("prepare", provider+"-"+profile))
-	return err
 }
 
 func emit(out io.Writer, value any) error {
@@ -104,9 +90,8 @@ func newCreateCmd() *cobra.Command {
 	var ref, connection string
 	cmd := &cobra.Command{
 		Use:   "create [name]",
-		Short: "Create a workspace, claiming a prepared spare when one matches",
-		Long: `create claims a ready spare with the current fingerprint or creates a fresh
-machine, checks out the requested ref, runs the profile's prepare steps and the
+		Short: "Create a workspace on a fresh provider machine",
+		Long: `create creates a fresh provider machine, checks out the requested ref, runs the profile's prepare steps and the
 bootstrap script, enrolls the machine in the tailnet when one is configured,
 and prints the connection as JSON on stdout. A failed create removes what it
 made, leaving the tailnet only when this attempt enrolled.
@@ -256,54 +241,11 @@ func newDestroyCmd() *cobra.Command {
 	return cmd
 }
 
-func newPrepareCmd() *cobra.Command {
-	var flags selection
-	cmd := &cobra.Command{
-		Use:     "prepare",
-		Aliases: []string{"warm"},
-		Short:   "Prepare suspended spares until the pool is full",
-		Long: `prepare creates machines with the profile's tools, a shallow checkout of the
-config ref and its warm steps, checks that each holds no credential, suspends
-it, and marks it ready. A spare never joins the tailnet; create enrolls it at
-claim time with a fresh identity. Stale spares are destroyed first.`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			session, err := flags.open()
-			if err != nil {
-				return err
-			}
-			return session.Prepare(cmd.Context())
-		},
-	}
-	flags.bind(cmd)
-	return cmd
-}
-
-func newDrainCmd() *cobra.Command {
-	var flags selection
-	var all bool
-	cmd := &cobra.Command{
-		Use:   "drain",
-		Short: "Destroy unclaimed spares; stale ones by default, every one with --all",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			session, err := flags.open()
-			if err != nil {
-				return err
-			}
-			return session.Drain(cmd.Context(), all)
-		},
-	}
-	flags.bind(cmd)
-	cmd.Flags().BoolVar(&all, "all", false, "destroy current spares too")
-	return cmd
-}
-
 func newStatusCmd() *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print workspaces and the spare pool as JSON",
+		Short: "Print recorded workspaces as JSON",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			session, err := flags.open()
