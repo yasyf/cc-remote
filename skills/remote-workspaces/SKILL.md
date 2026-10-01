@@ -80,6 +80,12 @@ that works on other machines, pass `--config` with a config checked into the
 repo, named relative to the repo root; the commands carry that path unchanged.
 Pass the same `--config` to `wait`.
 
+Orca runs recipe commands from the repo root in a non-login shell, so a bare
+`cc-remote` must be on the `PATH` Orca starts with. To run a wrapper checked
+into the repo instead, pass `--binary` with a `./`-prefixed path, such as
+`--binary ./tools/cc-remote/bin/cc-remote`. The recipes carry that path
+unchanged, and `wait` needs the same `--binary`.
+
 Run `cc-remote ledger init` once on the Mac before the first create.
 cc-remote refuses every create until a budget ledger exists.
 

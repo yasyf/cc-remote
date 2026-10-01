@@ -111,6 +111,20 @@ func TestOrcaRecipes(t *testing.T) {
 			t.Errorf("recipes omit --config %s, so Orca's environment would pick another config:\n%s", custom, got)
 		}
 	})
+	t.Run("writes a repo-relative binary into the recipes as given", func(t *testing.T) {
+		wrapper := orca.Lifecycle{Binary: "./tools/cc-remote/bin/cc-remote", Config: exampleConfig}
+		want, err := orca.MergeYAML(nil, wrapper, recipes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := runCLI(t, "orca", "recipes", "--config", exampleConfig, "--binary", wrapper.Binary)
+		if got != string(want) {
+			t.Errorf("stdout =\n%s\nwant\n%s", got, want)
+		}
+		if !strings.Contains(got, "create: ./tools/cc-remote/bin/cc-remote create --provider sprites --profile lean") {
+			t.Errorf("recipes do not run the repo-relative wrapper:\n%s", got)
+		}
+	})
 	t.Run("rewrites orca.yaml in place and keeps other keys", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "orca.yaml")
 		if err := os.WriteFile(path, []byte("setup: ./setup.sh\nenvironmentRecipes: []\n"), 0o600); err != nil {
