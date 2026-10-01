@@ -191,6 +191,29 @@ func TestCheckoutScriptPinsTheRequestedCommitOnTheRequestedBranch(t *testing.T) 
 	}
 }
 
+func TestCheckoutDisablesCredentialHelpersWhileTheTokenIsInUse(t *testing.T) {
+	repository := workspacetest.GitRepository(t)
+	home := t.TempDir()
+	root := filepath.Join(home, "app")
+	store := exec.Command("git", "config", "--global", "credential.helper", "store")
+	store.Env = append(os.Environ(), "HOME="+home)
+	if out, err := store.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	script := workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, true)
+	if !strings.Contains(script, `set -- -c credential.helper=; else set --; fi`) || !strings.Contains(script, `git "$@" clone`) || !strings.Contains(script, `git "$@" -C "$root" fetch`) {
+		t.Errorf("script = %s", script)
+	}
+	for _, stdin := range []string{workspacetest.Token + "\n", "\n"} {
+		if out, err := runScript(t, home, script, stdin); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".git-credentials")); err == nil {
+		t.Error("the configured store helper kept the token")
+	}
+}
+
 func TestSourceValidationKeepsOptionsOutOfGit(t *testing.T) {
 	for _, bad := range []workspace.Source{
 		{Ref: "--upload-pack=touch /tmp/x"},

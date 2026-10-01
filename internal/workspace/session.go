@@ -202,20 +202,22 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 	if err != nil && !errors.Is(err, errNotRecorded) {
 		return nil, err
 	}
+	if err := s.reconcile(name, recorded); err != nil {
+		return nil, err
+	}
+	if recorded == nil {
+		if err := s.unbound(name); err != nil {
+			return nil, err
+		}
+	}
 	now := s.Now()
 	machine, assignment, err := s.Pool.Assign(name, now)
 	if err != nil {
 		return nil, err
 	}
 	if assignment == Reclaim {
-		if recorded == nil {
-			return nil, fmt.Errorf("%s holds a claim but no record under %s, so destroy %s before creating again", name, s.State, name)
-		}
 		s.Log.Info("reattaching the spare this workspace already claimed", "workspace", name, "machine", machine)
 		return s.restore(ctx, held, recorded)
-	}
-	if recorded != nil {
-		return nil, fmt.Errorf("%s is already recorded under %s as machine %s, which the ledger does not know; resolve the two before creating again", name, s.State, recorded.Machine)
 	}
 	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: machine, Claimed: assignment == NewClaim, CreatedAt: now}
 	if err := s.save(record); err != nil {
@@ -239,6 +241,42 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 	}
 	return result, nil
+}
+
+func (s *Session) reconcile(name string, recorded *Record) error {
+	ledger, err := s.Pool.Ledger.Read()
+	if err != nil {
+		return err
+	}
+	claimed, err := s.Pool.Claimed(name)
+	if err != nil {
+		return err
+	}
+	switch {
+	case recorded == nil && claimed != "":
+		return fmt.Errorf("%s holds a claim on %s from a create that never finished and left no record under %s, so destroy %s before creating again", name, claimed, s.State, name)
+	case recorded == nil:
+		return nil
+	case recorded.Claimed && claimed == recorded.Machine:
+		return nil
+	case !recorded.Claimed && ledger.Vacant(name) != nil:
+		return ledger.Vacant(name)
+	}
+	return fmt.Errorf("%s is already recorded under %s as machine %s, which ledger %s does not know; resolve the two before creating again", name, s.State, recorded.Machine, s.Pool.Ledger.Path)
+}
+
+func (s *Session) unbound(name string) error {
+	if s.Enroller == nil {
+		return nil
+	}
+	binding, err := s.Enroller.Bindings.Read(name)
+	if err != nil {
+		return err
+	}
+	if binding != (tailnet.Binding{}) {
+		return fmt.Errorf("%s is still bound to tailnet node %v from an earlier attempt whose cleanup did not finish, so destroy %s before creating again", name, binding, name)
+	}
+	return nil
 }
 
 func (s *Session) provision(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
@@ -270,6 +308,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 
 func (s *Session) install(ctx context.Context, record *Record) error {
 	machine, root := record.Machine, s.ProjectRoot()
+	if err := record.Source.Validate(); err != nil {
+		return err
+	}
 	token, err := s.checkoutToken(ctx)
 	if err != nil {
 		return err
@@ -368,7 +409,10 @@ func (s *Session) abandon(ctx context.Context, held *state.Held, record *Record)
 			left = fmt.Errorf("removing the tailnet node of %s after the failed create also failed, so delete it from the tailnet by hand: %w", record.Name, err)
 		}
 	}
-	return errors.Join(left, s.discard(ctx, record.Machine), s.forget(record.Name))
+	if err := errors.Join(left, s.discard(ctx, record.Machine)); err != nil {
+		return fmt.Errorf("%w; the record of %s is kept so that destroy can retry", err, record.Name)
+	}
+	return s.forget(record.Name)
 }
 
 func (s *Session) discard(ctx context.Context, machine string) error {
@@ -473,6 +517,9 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	if errors.Is(err, errNotRecorded) {
 		record, err = s.orphanedClaim(name, err)
 	}
+	if errors.Is(err, errNotRecorded) {
+		return s.forgetBinding(ctx, held, err)
+	}
 	if err != nil {
 		return err
 	}
@@ -490,13 +537,31 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	return s.forget(name)
 }
 
+func (s *Session) forgetBinding(ctx context.Context, held *state.Held, missing error) error {
+	if s.Enroller == nil {
+		return missing
+	}
+	binding, err := s.Enroller.Bindings.Read(held.Name)
+	if err != nil {
+		return err
+	}
+	if binding == (tailnet.Binding{}) {
+		return missing
+	}
+	s.Log.Info("revoking the tailnet node an earlier attempt left bound to this name", "workspace", held.Name, "bound", binding)
+	return s.Enroller.Forget(ctx, held)
+}
+
 func (s *Session) orphanedClaim(name string, missing error) (*Record, error) {
-	machine, ok, err := s.Pool.Ledger.ClaimedFor(name)
+	machine, resource, err := s.Pool.Ledger.ClaimedFor(name)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	if machine == "" {
 		return nil, missing
+	}
+	if resource.Provider != s.Kind || resource.Profile != s.Profile {
+		return nil, fmt.Errorf("%s holds a claim on %s, a %s/%s spare, not %s/%s", name, machine, resource.Provider, resource.Profile, s.Kind, s.Profile)
 	}
 	s.Log.Info("destroying the spare a create claimed for this name but never recorded", "workspace", name, "machine", machine)
 	return &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Machine: machine, Claimed: true}, nil
@@ -512,6 +577,11 @@ func (s *Session) Prepare(ctx context.Context) error {
 		if err != nil || !reserved {
 			return err
 		}
+		s.Log.Info("preparing a spare", "machine", name, "provider", s.Kind, "profile", s.Profile)
+		if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelSpare: s.Pool.Fingerprint})); err != nil {
+			return errors.Join(err, s.Pool.Retire(name, s.Now()))
+		}
+		s.Log.Info("created", "machine", name)
 		if err := s.prepareSpare(ctx, name); err != nil {
 			s.Log.Error("preparing the spare failed; removing it", "machine", name)
 			return errors.Join(err, s.discard(context.WithoutCancel(ctx), name))
@@ -524,11 +594,6 @@ func (s *Session) Prepare(ctx context.Context) error {
 }
 
 func (s *Session) prepareSpare(ctx context.Context, name string) error {
-	s.Log.Info("preparing a spare", "machine", name, "provider", s.Kind, "profile", s.Profile)
-	if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelSpare: s.Pool.Fingerprint})); err != nil {
-		return err
-	}
-	s.Log.Info("created", "machine", name)
 	if err := s.install(ctx, &Record{Machine: name, Source: Source{Ref: s.Config.Ref}}); err != nil {
 		return err
 	}

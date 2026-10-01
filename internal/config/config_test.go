@@ -149,6 +149,7 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 			return s + "forwards:\n  - { label: a, env: A }\n  - { label: a, env: B }\n"
 		}, "forward"},
 		{"forbidden path with a quote", func(s string) string { return s + "identity:\n  forbidden_paths: [\"it's\"]\n" }, "forbidden_paths"},
+		{"forbidden path with a backslash", func(s string) string { return s + "identity:\n  forbidden_paths: ['$HOME/a\\\\\"']\n" }, "forbidden_paths"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

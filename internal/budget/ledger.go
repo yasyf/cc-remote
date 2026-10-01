@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/state"
@@ -86,8 +87,15 @@ const (
 
 var ErrNoLedger = errors.New("no ledger")
 
-func archived(id string, destroyed time.Time) string {
-	return id + "~" + destroyed.UTC().Format("20060102T150405Z")
+func (l *Ledger) archive(id string, destroyed time.Time) string {
+	stamp := id + "~" + destroyed.UTC().Format("20060102T150405.000000000Z")
+	key := stamp
+	for n := 2; ; n++ {
+		if _, taken := l.Resources[key]; !taken {
+			return key
+		}
+		key = stamp + "~" + strconv.Itoa(n)
+	}
 }
 
 func (l *Ledger) Running(id string) bool {
@@ -121,11 +129,7 @@ func (l *Ledger) Committed(now time.Time) float64 {
 func (l *Ledger) Start(id, provider, profile string, rate Rate, reserved float64, now time.Time) error {
 	resource, ok := l.Resources[id]
 	if ok && resource.Destroyed != nil {
-		history := archived(id, *resource.Destroyed)
-		if _, taken := l.Resources[history]; taken {
-			return fmt.Errorf("%s was destroyed at %s and its history is already archived as %s", id, resource.Destroyed.Format(time.RFC3339), history)
-		}
-		l.Resources[history] = resource
+		l.Resources[l.archive(id, *resource.Destroyed)] = resource
 		ok = false
 	}
 	if !ok {

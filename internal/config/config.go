@@ -238,7 +238,7 @@ func (c *Config) validate() error {
 		labels[forward.Label] = true
 	}
 	for _, path := range c.Identity.ForbiddenPaths {
-		if path == "" || strings.ContainsAny(path, "'\"`\n") || strings.Contains(path, "$(") {
+		if path == "" || strings.ContainsAny(path, "'\"`\\\n") || strings.Contains(path, "$(") {
 			return fmt.Errorf("identity.forbidden_paths entry %q is not a plain path", path)
 		}
 	}

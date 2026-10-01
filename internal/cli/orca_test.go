@@ -48,12 +48,18 @@ func TestOrcaSourceDemandsSchemaTwoAndThePinnedCheckout(t *testing.T) {
 
 func TestOrcaNameComesFromTheRecipeAndInstance(t *testing.T) {
 	name, err := orcaName(env(map[string]string{"ORCA_RECIPE_ID": "sprites.lean_SSH", "ORCA_VM_INSTANCE_ID": "Inst-01"}))
-	if err != nil || name != "orca-sprites-lean-ssh-inst-01" {
+	if err != nil || !strings.HasPrefix(name, "orca-sprites-lean-ssh-inst-01-") || len(name) != len("orca-sprites-lean-ssh-inst-01-")+orcaDigest {
 		t.Errorf("name = %q, %v", name, err)
 	}
 	long, err := orcaName(env(map[string]string{"ORCA_RECIPE_ID": strings.Repeat("r", 40), "ORCA_VM_INSTANCE_ID": strings.Repeat("i", 40)}))
-	if err != nil || len(long) != 55 {
-		t.Errorf("long name = %q (%d), %v", long, len(long), err)
+	other, _ := orcaName(env(map[string]string{"ORCA_RECIPE_ID": strings.Repeat("r", 40), "ORCA_VM_INSTANCE_ID": strings.Repeat("i", 39) + "j"}))
+	if err != nil || len(long) != 55 || long == other || long[:40] != other[:40] {
+		t.Errorf("long names = %q and %q (%d), %v", long, other, len(long), err)
+	}
+	same, _ := orcaName(env(map[string]string{"ORCA_RECIPE_ID": "a-b", "ORCA_VM_INSTANCE_ID": "c"}))
+	split, _ := orcaName(env(map[string]string{"ORCA_RECIPE_ID": "a", "ORCA_VM_INSTANCE_ID": "b-c"}))
+	if same == split {
+		t.Errorf("recipe and instance boundaries collapsed into one name %q", same)
 	}
 	if _, err := orcaName(env(map[string]string{})); err == nil {
 		t.Error("a name was invented with no recipe or instance")

@@ -2,8 +2,10 @@ package budget
 
 import (
 	"errors"
+	"maps"
 	"math"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -99,18 +101,29 @@ func TestRetiredResourcesStayRetired(t *testing.T) {
 	if err := ledger.Start("a", "namespace", "agents", Rate{HourlyUSD: 2}, 0, epoch.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	history := ledger.Resources["a~20260930T120000Z"]
+	history := ledger.Resources["a~20260930T120000.000000000Z"]
 	if history == nil || history.Destroyed == nil || ledger.Resources["a"].Rate.HourlyUSD != 2 || ledger.Resources["a"].Destroyed != nil {
 		t.Fatalf("a recreated name did not archive its history: %+v", ledger.Resources)
 	}
 	if err := ledger.Retire("a", epoch.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if ledger.Resources["a"].Destroyed == nil || ledger.Resources["a~20260930T120000Z"] != history {
+	if ledger.Resources["a"].Destroyed == nil || ledger.Resources["a~20260930T120000.000000000Z"] != history {
 		t.Fatal("retiring the recreated resource touched its history")
 	}
-	if err := ledger.Start("a", "namespace", "agents", Rate{}, 0, epoch.Add(time.Hour)); err != nil || ledger.Resources["a~20260930T130000Z"] == nil {
+	if err := ledger.Start("a", "namespace", "agents", Rate{}, 0, epoch.Add(time.Hour)); err != nil || ledger.Resources["a~20260930T130000.000000000Z"] == nil {
 		t.Fatalf("a second recreation did not archive the second life: %v", err)
+	}
+	for range 3 {
+		if err := ledger.Retire("a", epoch.Add(2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := ledger.Start("a", "namespace", "agents", Rate{}, 0, epoch.Add(2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(ledger.Resources) != 6 || ledger.Resources["a~20260930T140000.000000000Z~3"] == nil {
+		t.Errorf("retiring the same name in one instant lost history: %v", slices.Sorted(maps.Keys(ledger.Resources)))
 	}
 }
 

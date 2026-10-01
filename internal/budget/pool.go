@@ -109,18 +109,21 @@ func (sp Spares) MarkReady(l *Ledger, id string, now time.Time) error {
 	return l.Stop(id, now)
 }
 
-func (s Store) ClaimedFor(request string) (string, bool, error) {
+func (s Store) ClaimedFor(request string) (string, *Resource, error) {
 	ledger, err := s.Read()
 	if err != nil {
-		return "", false, err
+		return "", nil, err
 	}
 	spares, err := s.ReadSpares()
 	if err != nil {
-		return "", false, err
+		return "", nil, err
 	}
 	spares.DropRetired(ledger)
 	id, ok := spares.HeldBy(request)
-	return id, ok, nil
+	if !ok {
+		return "", nil, nil
+	}
+	return id, ledger.Resources[id], nil
 }
 
 func (sp Spares) HeldBy(request string) (string, bool) {

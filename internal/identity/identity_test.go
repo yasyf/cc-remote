@@ -30,7 +30,7 @@ func gitRepo(t *testing.T, origin string) string {
 func runClean(t *testing.T, home, root, credentialHelper string, forbidden ...string) error {
 	t.Helper()
 	cmd := exec.Command("sh", "-c", CleanScript(root, repository, credentialHelper, forbidden))
-	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME=", "TMPDIR="+t.TempDir(), "LC_ALL=en_US.UTF-8")
+	cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME=", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0", "TMPDIR="+t.TempDir(), "LC_ALL=en_US.UTF-8")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, out)
@@ -302,5 +302,56 @@ func TestSSHKeyPairIsGeneratedOnceAndRemovedWhole(t *testing.T) {
 	}
 	if err := pair.Remove(); err != nil {
 		t.Errorf("removing an absent pair: %v", err)
+	}
+}
+
+func TestCleanScriptReadsTheEffectiveGitConfig(t *testing.T) {
+	token := "ghs_" + strings.Repeat("c", 36)
+	tests := map[string]func(home, root string){
+		"local include naming a helper": func(_, root string) {
+			included := filepath.Join(root, ".git", "extra")
+			if err := os.WriteFile(included, []byte("[credential]\n\thelper = store\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("git", "-C", root, "config", "--local", "include.path", included).CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+		},
+		"global include naming a helper": func(home, _ string) {
+			appendGitConfig(t, home, "[include]\n\tpath = "+filepath.Join(home, "more")+"\n")
+			if err := os.WriteFile(filepath.Join(home, "more"), []byte("[credential]\n\thelper = cache\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"global authorization header": func(home, _ string) {
+			appendGitConfig(t, home, "[http \"https://github.com\"]\n\textraHeader = Authorization: Bearer "+token+"\n")
+		},
+		"local extra header": func(_, root string) {
+			if out, err := exec.Command("git", "-C", root, "config", "--local", "http.extraHeader", "X-Auth: secret").CombinedOutput(); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+		},
+		"refresh token in a config": func(home, _ string) {
+			if err := os.MkdirAll(filepath.Join(home, ".config", "tool"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, ".config", "tool", "auth"), []byte("ghr_"+strings.Repeat("d", 30)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"token in a git hook": func(_, root string) {
+			if err := os.WriteFile(filepath.Join(root, ".git", "hooks", "pre-push"), []byte("#!/bin/sh\ncurl -H 'Authorization: token "+token+"'\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, plant := range tests {
+		t.Run(name, func(t *testing.T) {
+			home, root := t.TempDir(), gitRepo(t, repository)
+			plant(home, root)
+			if err := runClean(t, home, root, ""); err == nil {
+				t.Errorf("a spare holding %s passed", name)
+			}
+		})
 	}
 }

@@ -33,7 +33,7 @@ const (
 	freshens = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
 	logsOut  = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
 	renews   = `rm -rf "$HOME"/.claude.json`
-	checkout = "git clone --quiet"
+	checkout = "clone --quiet"
 	prepares = "cd /home/fake/app\n"
 	warms    = "warm-head"
 	cleans   = "this spare is not clean"
@@ -921,4 +921,130 @@ func (s *slowDestroy) Destroy(ctx context.Context, id string) error {
 	close(s.started)
 	<-s.release
 	return s.Provider.Destroy(ctx, id)
+}
+
+func TestPrepareNeverDestroysAMachineItDidNotMake(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := context.Background()
+	h.session.Provider = &collidingCreate{Provider: h.provider}
+	if err := h.session.Prepare(ctx); !errors.Is(err, providers.ErrExists) {
+		t.Fatalf("err = %v", err)
+	}
+	if calls := h.calls(); strings.Contains(calls, "destroy") || strings.Contains(calls, "exec") {
+		t.Errorf("the refused prepare ran %s", calls)
+	}
+	if len(h.spares()) != 0 {
+		t.Errorf("the refused prepare left %v", h.spares())
+	}
+	for id, resource := range h.ledger().Resources {
+		if resource.Destroyed == nil {
+			t.Errorf("the ledger still runs %s", id)
+		}
+	}
+}
+
+type collidingCreate struct {
+	providers.Provider
+}
+
+func (c *collidingCreate) Create(context.Context, providers.Spec) (providers.Machine, error) {
+	return providers.Machine{}, providers.ErrExists
+}
+
+func TestAFailedCreateKeepsItsRecordWhenTheMachineCannotBeRemoved(t *testing.T) {
+	h := newHarness(t, 0, false)
+	ctx := context.Background()
+	h.provider.unreachable.Store(true)
+	gone := newRefusingDestroy(h.provider)
+	h.session.Provider = gone
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "kept so that destroy can retry") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, found := h.record("ws-1"); !found {
+		t.Fatal("the record was forgotten while the machine survived")
+	}
+	gone.refuse.Store(false)
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+		t.Error("the machine survived the retried destroy")
+	}
+}
+
+type refusingDestroy struct {
+	providers.Provider
+	refuse atomic.Bool
+}
+
+func (r *refusingDestroy) Destroy(ctx context.Context, id string) error {
+	if r.refuse.Load() {
+		return errors.New("the provider api is down")
+	}
+	return r.Provider.Destroy(ctx, id)
+}
+
+func newRefusingDestroy(p providers.Provider) *refusingDestroy {
+	r := &refusingDestroy{Provider: p}
+	r.refuse.Store(true)
+	return r
+}
+
+func TestDestroyRefusesAClaimAnotherProviderOrProfileHolds(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := context.Background()
+	spare := h.prepared()
+	if _, assignment, err := h.session.Pool.Assign("ws-1", time.Now()); err != nil || assignment != NewClaim {
+		t.Fatal(assignment, err)
+	}
+	other := *h.session
+	other.Profile = "full"
+	if err := other.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "fake/lean") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := h.fake.Get(ctx, spare); err != nil {
+		t.Error("the other profile destroyed the claimed spare")
+	}
+	if _, held := h.spares()[spare]; !held {
+		t.Error("the other profile released the claim")
+	}
+}
+
+func TestARefusedCreateConsumesNoSpareOrBudget(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := context.Background()
+	spare := h.prepared()
+	calls := len(h.fake.Calls())
+	h.saveRecord(Record{Name: "ws-1", Provider: "fake", Profile: "lean", Source: Source{Ref: "main"}, Machine: "ws-1"})
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already recorded") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := h.spares()[spare]; got == nil || got.State != budget.Ready {
+		t.Errorf("the refused create changed the spare: %+v", got)
+	}
+	if h.ledger().Running("ws-1") || len(h.fake.Calls()) != calls {
+		t.Errorf("the refused create reserved budget or touched a machine: %v", h.fake.Calls()[calls:])
+	}
+}
+
+func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testing.T) {
+	h := newHarness(t, 0, true)
+	ctx := context.Background()
+	h.api.devices = append(h.api.devices, owned("nOLD"))
+	h.bind(tailnet.Binding{NodeID: "nOLD"})
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "still bound") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(h.fake.Calls()) != 0 || len(h.api.deletedNodes()) != 0 || h.ledger().Running("ws-1") {
+		t.Errorf("the refused create ran %v, deleted %v", h.fake.Calls(), h.api.deletedNodes())
+	}
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("Destroy = %v", err)
+	}
+	if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nOLD" || h.bound() != (tailnet.Binding{}) {
+		t.Errorf("deleted %v, bound %v", deleted, h.bound())
+	}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Errorf("create after the revoke: %v", err)
+	}
 }

@@ -16,7 +16,7 @@ import (
 const (
 	forgetAgent  = `rm -rf "$HOME"/.claude.json "$HOME"/.claude.json.* "$HOME/.claude/backups"`
 	ShareDir     = "$HOME/.local/share/" + remote.Prefix
-	tokenPattern = `gh[opsu]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}` //nolint:gosec // the shape of a token, not one
+	tokenPattern = `gh[a-z]_[A-Za-z0-9_-]{20,}|github_pat_[A-Za-z0-9_]{30,}` //nolint:gosec // the shape of a token, not one
 )
 
 var credentialFiles = []string{
@@ -31,12 +31,14 @@ var credentialFiles = []string{
 
 var tokenScan = []string{
 	`"$HOME/.config"`,
+	`"${XDG_CONFIG_HOME:-$HOME/.config}"`,
+	`"$HOME/.gitconfig"`,
 	`"$HOME/.claude"`,
 	`"$HOME/.claude.json"`,
 	`"$HOME/.codex"`,
 	`"` + remote.StateDir + `"`,
 	`"` + ShareDir + `"`,
-	`"$root/.git/config"`,
+	`"$root/.git"`,
 	`"${TMPDIR:-/tmp}"`,
 }
 
@@ -65,31 +67,28 @@ done
 export LC_ALL=C
 records="$(mktemp)" lines="$(mktemp)"
 trap 'rm -f "$records" "$lines"' EXIT
-for config in "$HOME/.gitconfig" "${XDG_CONFIG_HOME:-$HOME/.config}/git/config"; do
-  if [ ! -e "$config" ]; then continue; fi
-  if [ ! -r "$config" ]; then dirty "$config is unreadable"; fi
-  git -C "$root" config --file "$config" --includes --null --get-regexp '^credential\.' >> "$records" || [ $? -eq 1 ]
-done
+git -C "$root" config --includes --null --get-regexp '^credential\.' >> "$records" || [ $? -eq 1 ]
 tr -d '\001' < "$records" > "$lines"
-if ! cmp -s "$lines" "$records"; then dirty "global git config holds a credential setting with a control character"; fi
+if ! cmp -s "$lines" "$records"; then dirty "git config holds a credential setting with a control character"; fi
 tr '\000\n' '\n\001' < "$records" > "$lines"
 separator="$(printf '\001')"
 while IFS= read -r record; do
   case "$record" in
-    *"$separator"*"$separator"*) dirty "global git config holds a credential setting of more than one line" ;;
+    *"$separator"*"$separator"*) dirty "git config holds a credential setting of more than one line" ;;
     *"$separator"*) ;;
-    *) dirty "global git config holds a credential setting with no value" ;;
+    *) dirty "git config holds a credential setting with no value" ;;
   esac
   key="${record%%"$separator"*}"
   value="${record#*"$separator"}"
   case "$key" in
-    *.helper) if [ -n "$value" ] && [ "$value" != ` + remote.Quote(credentialHelper) + ` ]; then dirty "global git config names a credential helper other than the provider's"; fi ;;
+    *.helper) if [ -n "$value" ] && [ "$value" != ` + remote.Quote(credentialHelper) + ` ]; then dirty "git config names a credential helper other than the provider's"; fi ;;
     *.usehttppath) ;;
-    *) dirty "global git config sets a credential key other than helper or useHttpPath" ;;
+    *) dirty "git config sets a credential key other than helper or useHttpPath" ;;
   esac
 done < "$lines"
 rm -f "$records" "$lines"
-if git -C "$root" config --local --get-regexp '^credential\.' > /dev/null; then dirty "$root/.git/config holds a credential setting"; fi
+if git -C "$root" config --local --includes --get-regexp '^credential\.' > /dev/null; then dirty "$root/.git/config holds a credential setting"; fi
+if git -C "$root" config --includes --name-only --get-regexp '^http\.(.*\.)?extraheader$' > /dev/null; then dirty "git config sends an extra http header"; fi
 origin="$(git -C "$root" remote get-url origin)"
 if [ "${origin%.git}" != ` + remote.Quote(strings.TrimSuffix(repository, ".git")) + ` ]; then dirty "origin is not ` + repository + `"; fi
 set --

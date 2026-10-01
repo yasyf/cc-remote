@@ -116,6 +116,11 @@ func (p Pool) Assign(request string, now time.Time) (string, Assignment, error) 
 	return name, assignment, err
 }
 
+func (p Pool) Claimed(request string) (string, error) {
+	machine, _, err := p.Ledger.ClaimedFor(request)
+	return machine, err
+}
+
 func (p Pool) Activate(name string, now time.Time) error {
 	return p.Ledger.UpdateSpares(func(_ *budget.Ledger, spares budget.Spares) error {
 		return spares.Activate(name, now)

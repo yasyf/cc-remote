@@ -193,6 +193,32 @@ func (e *Enroller) Leave(ctx context.Context, held *state.Held, machine Runner, 
 	return e.depart(ctx, bound, machine, binding, node, running)
 }
 
+func (e *Enroller) Forget(ctx context.Context, held *state.Held) error {
+	bound := e.Bindings.Of(held)
+	binding, err := bound.Read()
+	if err != nil {
+		return err
+	}
+	switch {
+	case binding == Binding{}:
+		return nil
+	case binding.Unresolved:
+		return fmt.Errorf("the last enrollment of %s never reported a node and its machine is gone, so check the tailnet for hostname %s and remove its binding by hand", held.Name, held.Name)
+	}
+	client, err := e.Client(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.DeleteNode(ctx, binding.NodeID, held.Name); err != nil {
+		return err
+	}
+	if err := bound.Transition(binding, Binding{}); err != nil {
+		return err
+	}
+	e.Log.Info("revoked the node an earlier attempt left behind", "resource", held.Name, "node", binding.NodeID)
+	return nil
+}
+
 func (e *Enroller) depart(ctx context.Context, bound *Bound, machine Runner, binding Binding, node Node, running bool) error {
 	name := bound.Resource()
 	if running && node.NodeID != binding.NodeID {
@@ -201,6 +227,9 @@ func (e *Enroller) depart(ctx context.Context, bound *Bound, machine Runner, bin
 	client, err := e.Client(ctx)
 	if err != nil {
 		return err
+	}
+	if err := client.Owns(ctx, binding.NodeID, name); err != nil && !errors.Is(err, ErrNoNode) {
+		return fmt.Errorf("refusing to delete: %w", err)
 	}
 	if node.NodeID == binding.NodeID {
 		logout, cancel := context.WithTimeout(ctx, logoutTimeout)

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,7 @@ const (
 	envRepoBranch    = "ORCA_REPO_BRANCH"
 	envRecipeID      = "ORCA_RECIPE_ID"
 	envInstanceID    = "ORCA_VM_INSTANCE_ID"
+	orcaDigest       = 12
 )
 
 var unnamed = regexp.MustCompile(`[^a-z0-9]+`)
@@ -102,11 +105,13 @@ func orcaName(env func(string) string) (string, error) {
 	if recipe == "" || instance == "" {
 		return "", fmt.Errorf("name the workspace, or let Orca set %s and %s", envRecipeID, envInstanceID)
 	}
+	digest := sha256.Sum256([]byte(recipe + "\x00" + instance))
+	suffix := "-" + hex.EncodeToString(digest[:])[:orcaDigest]
 	name := strings.Trim(unnamed.ReplaceAllString(strings.ToLower("orca-"+recipe+"-"+instance), "-"), "-")
-	if len(name) > state.NameLimit {
-		name = strings.TrimRight(name[:state.NameLimit], "-")
+	if len(name)+len(suffix) > state.NameLimit {
+		name = strings.TrimRight(name[:state.NameLimit-len(suffix)], "-")
 	}
-	return name, state.ValidateName(name)
+	return name + suffix, state.ValidateName(name + suffix)
 }
 
 func orcaResource(stdin io.Reader) (string, error) {

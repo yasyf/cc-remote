@@ -639,3 +639,53 @@ func TestACleanupPausedAfterObservingTheDaemonHoldsOffAReplacement(t *testing.T)
 		t.Errorf("the cleanup's logout did not precede the replacement's enrollment: %q", m.scripts)
 	}
 }
+
+func TestLeaveChecksOwnershipBeforeLoggingOutAStoppedNode(t *testing.T) {
+	for name, binding := range map[string]Binding{"unresolved": intent, "bound": boundTo("nOTHER")} {
+		t.Run(name, func(t *testing.T) {
+			m := &machine{status: loggedOut("nOTHER")}
+			api := &fakeTailnet{devices: []Device{foreign("nOTHER")}}
+			h := newHarness(t, m, api)
+			h.bind(binding)
+			if err := h.leave(nil); err == nil || !strings.Contains(err.Error(), "refusing to delete") {
+				t.Errorf("err = %v", err)
+			}
+			if m.ran(logsOut) != 0 || len(api.deleted) != 0 {
+				t.Errorf("a stopped node another workspace owns was logged out %d times and deleted %v", m.ran(logsOut), api.deleted)
+			}
+		})
+	}
+}
+
+func TestForgetRevokesOnlyABoundNodeTheTailnetConfirms(t *testing.T) {
+	tests := map[string]struct {
+		binding Binding
+		devices []Device
+		deleted int
+		bound   Binding
+		err     string
+	}{
+		"nothing bound":     {none, nil, 0, none, ""},
+		"bound and owned":   {boundTo("nMINE"), []Device{owned("nMINE")}, 1, none, ""},
+		"bound and gone":    {boundTo("nGONE"), nil, 0, none, ""},
+		"bound and foreign": {boundTo("nOTHER"), []Device{foreign("nOTHER")}, 0, boundTo("nOTHER"), "refusing to delete"},
+		"unresolved":        {intent, nil, 0, intent, "by hand"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			m := &machine{status: noState}
+			api := &fakeTailnet{devices: tt.devices}
+			h := newHarness(t, m, api)
+			if tt.binding != none {
+				h.bind(tt.binding)
+			}
+			err := h.enroller.Forget(context.Background(), h.hold())
+			if (err == nil) != (tt.err == "") || (err != nil && !strings.Contains(err.Error(), tt.err)) {
+				t.Errorf("err = %v", err)
+			}
+			if len(api.deleted) != tt.deleted || h.bound() != tt.bound || len(m.scripts) != 0 {
+				t.Errorf("deleted %v, bound %v, ran %q", api.deleted, h.bound(), m.scripts)
+			}
+		})
+	}
+}
