@@ -49,6 +49,12 @@ def fail(message):
 
 if args == ["plugin", "marketplace", "list", "--json"]:
     print(json.dumps([{k: v for k, v in m.items() if k not in ("key", "snapshot")} for m in state["marketplaces"]]))
+    tail_path = os.path.join(os.path.dirname(state_path), "list-tail")
+    tail = open(tail_path).read() if os.path.exists(tail_path) else ""
+    if tail == "garbage":
+        print("garbage")
+    elif tail == "exit":
+        sys.exit(42)
 elif args[:3] == ["plugin", "marketplace", "add"]:
     source = args[3]
     if source.startswith("/"):
@@ -582,6 +588,27 @@ func TestPluginsVerifyRegistrations(t *testing.T) {
 			if err == nil || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("verify = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 			}
+		})
+	}
+}
+
+func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
+	for _, tail := range []string{"exit", "garbage"} {
+		t.Run(tail, func(t *testing.T) {
+			h := newPluginsHost(t, []Marketplace{toolsRef, officialBranch}, marketplaceCatalog("0.7.17"), fakeState{}, nil)
+			if out, err := h.plugins("install", digest); err != nil {
+				t.Fatalf("install failed: %v\n%s", err, out)
+			}
+			if err := os.WriteFile(filepath.Join(h.fakes, "list-tail"), []byte(tail), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := h.plugins("verify"); err == nil {
+				t.Errorf("verify passed on a failed marketplace list:\n%s", out)
+			}
+			if out, err := h.plugins("install", digest); err == nil {
+				t.Errorf("install passed on a failed marketplace list:\n%s", out)
+			}
+			h.unready()
 		})
 	}
 }

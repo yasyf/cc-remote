@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+shopt -s inherit_errexit
 
 phase="${1:?usage: plugins.sh install STAMP|ready STAMP|configure|verify}"
 
@@ -90,7 +91,9 @@ checkout() {
 }
 
 recorded_source() {
-  jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$(claude plugin marketplace list --json)"
+  local known
+  known="$(claude plugin marketplace list --json)"
+  jq -sr --arg name "$1" 'if length == 1 then .[0][] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ") else error("expected one JSON document") end' <<< "$known"
 }
 
 pin_marketplace() {
@@ -105,7 +108,9 @@ pin_marketplace() {
 }
 
 verify_marketplace() {
-  if [ "$(recorded_source "$1")" != "$2" ]; then
+  local recorded
+  recorded="$(recorded_source "$1")"
+  if [ "$recorded" != "$2" ]; then
     echo "cc-remote: marketplace $1 is not registered from $2" >&2
     exit 1
   fi
@@ -132,7 +137,7 @@ pin_branch_marketplace() {
 verify_branch_marketplace() {
   local name="$1" repo="$2" branch="$3"
   verify_marketplace "$name" "github $repo $branch"
-  if ! jq -e --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" '.extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
+  if ! jq -se --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" 'length == 1 and .[0].extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
     echo "cc-remote: marketplace $name is not declared in Claude settings at branch $branch with auto-update off" >&2
     exit 1
   fi
