@@ -227,23 +227,43 @@ func sshDirective(line string) (string, []string) {
 	if i < 0 {
 		return strings.ToLower(line), nil
 	}
-	keyword := strings.ToLower(line[:i])
-	rest := strings.TrimPrefix(strings.TrimLeft(line[i:], " \t"), "=")
+	return strings.ToLower(line[:i]), sshArgs(strings.TrimPrefix(strings.TrimLeft(line[i:], " \t"), "="))
+}
+
+func sshArgs(s string) []string {
 	var args []string
-	for rest = strings.TrimSpace(rest); rest != ""; rest = strings.TrimSpace(rest) {
-		var arg string
-		if quoted, ok := strings.CutPrefix(rest, `"`); ok {
-			arg, rest, _ = strings.Cut(quoted, `"`)
-		} else {
-			end := strings.IndexAny(rest, " \t")
-			if end < 0 {
-				end = len(rest)
-			}
-			arg, rest = rest[:end], rest[end:]
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case ' ', '\t':
+			i++
+			continue
+		case '#':
+			return args
 		}
-		args = append(args, arg)
+		var arg strings.Builder
+		var quote byte
+	token:
+		for ; i < len(s); i++ {
+			switch c := s[i]; {
+			case c == '\\' && i+1 < len(s) && (strings.IndexByte(`'"\`, s[i+1]) >= 0 || quote == 0 && s[i+1] == ' '):
+				i++
+				arg.WriteByte(s[i])
+			case quote == 0 && (c == ' ' || c == '\t'):
+				break token
+			case quote == 0 && (c == '"' || c == '\''):
+				quote = c
+			case quote != 0 && c == quote:
+				quote = 0
+			default:
+				arg.WriteByte(c)
+			}
+		}
+		if quote != 0 {
+			return nil
+		}
+		args = append(args, arg.String())
 	}
-	return keyword, args
+	return args
 }
 
 func poll[T any](ctx context.Context, p Poll, check func(context.Context) (T, bool, error)) (T, error) {

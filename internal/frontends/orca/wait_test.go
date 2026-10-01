@@ -221,6 +221,20 @@ func TestWaitPreflightFailures(t *testing.T) {
 			want: missing,
 		},
 		{
+			name: "ssh include commented out",
+			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
+				config := "# " + include + "\nInclude # " + fragments + "\nInclude \"" + fragments + "\nHost *\n"
+				if err := os.WriteFile(f.sshConfig, []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return f.preflight, newFakeOrca(t).
+					on("status --json", statusReady).
+					on("repo list --json", f.reposJSON()).
+					on(f.doctorCall(), doctorPassed)
+			},
+			want: missing,
+		},
+		{
 			name: "no ssh config",
 			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
 				if err := os.Remove(f.sshConfig); err != nil {
@@ -273,6 +287,9 @@ func TestWaitAcceptsIncludeForms(t *testing.T) {
 		"include ~/.local/state/cc-remote/ssh/*.ssh",
 		`Include="` + fragments + `"`,
 		"Include ~/.ssh/extra.conf " + fragments,
+		"Include " + fragments + " # cc-remote workspaces",
+		"Include '" + fragments + "'",
+		`Include "/Users/me/.local/state/cc-remote/ssh/"*.ssh`,
 	} {
 		t.Run(line, func(t *testing.T) {
 			f := newWaitFixture(t)
