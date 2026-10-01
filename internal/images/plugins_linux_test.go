@@ -2,6 +2,7 @@ package images
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,6 +54,8 @@ if args == ["plugin", "marketplace", "list", "--json"]:
     tail = open(tail_path).read() if os.path.exists(tail_path) else ""
     if tail == "garbage":
         print("garbage")
+    elif tail == "extra":
+        print("[]")
     elif tail == "exit":
         sys.exit(42)
 elif args[:3] == ["plugin", "marketplace", "add"]:
@@ -99,13 +102,17 @@ elif args == ["plugin", "list", "--json"]:
     print(json.dumps(state["plugins"]))
     tail_path = os.path.join(os.path.dirname(state_path), "plugin-list-tail")
     if os.path.exists(tail_path):
-        mode, skip = open(tail_path).read().split()
+        mode, skip, faults = open(tail_path).read().split()
         if int(skip) > 0:
-            open(tail_path, "w").write(mode + " " + str(int(skip) - 1))
-        elif mode == "garbage":
-            print("garbage")
-        elif mode == "exit":
-            sys.exit(42)
+            open(tail_path, "w").write(" ".join([mode, str(int(skip) - 1), faults]))
+        elif int(faults) > 0:
+            open(tail_path, "w").write(" ".join([mode, skip, str(int(faults) - 1)]))
+            if mode == "garbage":
+                print("garbage")
+            elif mode == "extra":
+                print("[]")
+            elif mode == "exit":
+                sys.exit(42)
 elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
     name, _, market = args[2].partition("@")
     source = marketplace(market)
@@ -622,21 +629,38 @@ func TestPluginsVerifyRegistrations(t *testing.T) {
 	}
 }
 
+func exitCode(err error) int {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode()
+	}
+	return 0
+}
+
 func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
-	for _, tail := range []string{"exit", "garbage"} {
-		t.Run(tail, func(t *testing.T) {
+	tests := []struct {
+		tail     string
+		wantCode int
+		wantOut  string
+	}{
+		{tail: "exit", wantCode: 42},
+		{tail: "garbage", wantCode: 1, wantOut: "did not print exactly one JSON document"},
+		{tail: "extra", wantCode: 1, wantOut: "did not print exactly one JSON document"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tail, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
 			if out, err := h.plugins("install", digest); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
-			if err := os.WriteFile(filepath.Join(h.fakes, "list-tail"), []byte(tail), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(h.fakes, "list-tail"), []byte(tt.tail), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if out, err := h.plugins("verify"); err == nil {
-				t.Errorf("verify passed on a failed marketplace list:\n%s", out)
-			}
-			if out, err := h.plugins("install", digest); err == nil {
-				t.Errorf("install passed on a failed marketplace list:\n%s", out)
+			for _, phase := range []string{"verify", "install"} {
+				out, err := h.plugins(phase, digest)
+				if exitCode(err) != tt.wantCode || !strings.Contains(out, tt.wantOut) {
+					t.Errorf("%s = %v\n%s\nwant exit %d with %q", phase, err, out, tt.wantCode, tt.wantOut)
+				}
 			}
 			h.unready()
 		})
@@ -645,35 +669,94 @@ func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
 
 func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 	tests := []struct {
-		name string
-		tail string
+		name     string
+		state    fakeState
+		phase    string
+		tail     string
+		wantCode int
+		wantOut  string
 	}{
-		{name: "plugin list exits non-zero", tail: "exit 0"},
-		{name: "plugin list prints trailing garbage", tail: "garbage 0"},
-		{name: "plugin root read exits non-zero", tail: "exit 1"},
+		{name: "plugin list exits non-zero", phase: "verify", tail: "exit 0 9", wantCode: 42},
+		{name: "plugin list prints trailing garbage", phase: "verify", tail: "garbage 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
+		{name: "plugin list prints a second document", phase: "verify", tail: "extra 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
+		{name: "plugin root read exits non-zero", phase: "verify", tail: "exit 1 1", wantCode: 42},
+		{name: "install plugin read exits non-zero once", state: registered("main", "0.7.16"), phase: "install", tail: "exit 1 1", wantCode: 42},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			inventory := marketplaceInventory([]Marketplace{toolsRef, officialBranch})
 			inventory.Claude.Plugins[1].Bins = []string{"bin/datadog"}
-			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
-				t.Fatalf("install failed: %v\n%s", err, out)
+			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), tt.state, nil)
+			if tt.phase == "verify" {
+				if out, err := h.plugins("install", digest); err != nil {
+					t.Fatalf("install failed: %v\n%s", err, out)
+				}
+				if err := os.Remove(filepath.Join(h.home, ".cc-remote", "ready")); err != nil {
+					t.Fatal(err)
+				}
 			}
-			tail := filepath.Join(h.fakes, "plugin-list-tail")
-			if err := os.WriteFile(tail, []byte(tt.tail), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(h.fakes, "plugin-list-tail"), []byte(tt.tail), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if out, err := h.plugins("verify"); err == nil {
-				t.Errorf("verify passed on a failed plugin list:\n%s", out)
-			}
-			if err := os.WriteFile(tail, []byte(tt.tail), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if out, err := h.plugins("install", digest); err == nil {
-				t.Errorf("install passed on a failed plugin list:\n%s", out)
+			out, err := h.plugins(tt.phase, digest)
+			if exitCode(err) != tt.wantCode || !strings.Contains(out, tt.wantOut) {
+				t.Errorf("%s = %v\n%s\nwant exit %d with %q", tt.phase, err, out, tt.wantCode, tt.wantOut)
 			}
 			h.unready()
+		})
+	}
+}
+
+func TestPluginsVerifyCaptainHookBuild(t *testing.T) {
+	uv := Artifact{Name: "uv", Version: "0.1.0", URL: "https://example.com/uv", SHA256: digest, Format: Binary}
+	inventory := Inventory{
+		Version:     SchemaVersion,
+		Tools:       []Artifact{uv},
+		CaptainHook: &CaptainHook{Version: "1.0.0", URL: "https://example.com/hook.tar.gz", SHA256: digest},
+	}
+	tests := []struct {
+		name    string
+		version string
+		wantErr bool
+	}{
+		{name: "pinned build", version: `{"build":"1.0.0"}`},
+		{name: "trailing garbage", version: `{"build":"1.0.0"}` + "\ngarbage", wantErr: true},
+		{name: "second document", version: `{"build":"1.0.0"}` + "\n" + `{"build":"1.0.0"}`, wantErr: true},
+		{name: "other build", version: `{"build":"0.9.0"}`, wantErr: true},
+		{name: "missing", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			tool := filepath.Join(h.home, ".local", "share", "cc-remote", "tools", "uv-0.1.0")
+			bin := filepath.Join(h.home, ".local", "bin")
+			for _, dir := range []string{tool, bin} {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(tool, ".cc-remote-digest"), []byte(digest+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tool, "uv"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(tool, "uv"), filepath.Join(bin, "uv")); err != nil {
+				t.Fatal(err)
+			}
+			if tt.version != "" {
+				host := filepath.Join(h.home, ".local", "share", "captain-hook", "host")
+				if err := os.MkdirAll(host, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(host, "version.json"), []byte(tt.version), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := h.plugins("verify")
+			if (err != nil) != tt.wantErr {
+				t.Errorf("verify = %v, want failure %v\n%s", err, tt.wantErr, out)
+			}
 		})
 	}
 }

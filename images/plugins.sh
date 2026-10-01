@@ -243,12 +243,12 @@ verify_codex_runtime() {
 }
 
 captain_hook_build() {
-  jq -r .build "$HOME/.local/share/captain-hook/host/version.json" 2> /dev/null
+  jq -sr 'if length == 1 then .[0].build else error("expected one JSON document") end' "$HOME/.local/share/captain-hook/host/version.json"
 }
 
 install_captain_hook() {
   local version="$1" url="$2" digest="$3" download="$tmp_dir/captain-hook.tar.gz"
-  if [ "$(captain_hook_build)" != "$version" ]; then
+  if [ "$(captain_hook_build 2> /dev/null)" != "$version" ]; then
     fetch "$url" "$download" sha256 "$digest"
     tar -xzf "$download" -C "$tmp_dir" capt-hookd
     "$tmp_dir/capt-hookd" package-install
@@ -256,7 +256,9 @@ install_captain_hook() {
 }
 
 verify_captain_hook() {
-  if [ "$(captain_hook_build)" != "$1" ]; then
+  local build
+  build="$(captain_hook_build)"
+  if [ "$build" != "$1" ]; then
     echo "cc-remote: the Captain Hook host is not at $1" >&2
     exit 1
   fi
