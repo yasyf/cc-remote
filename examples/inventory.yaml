@@ -1,0 +1,208 @@
+version: 1
+
+image:
+  name: example-agent-host
+  base: ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+  user: agent
+  workspaceDir: /workspaces
+  layer:
+    - ENV LANG=C.UTF-8
+
+apt:
+  install:
+    - git-lfs
+    - openssh-server
+    - tmux
+    - tzdata
+    - libdrm2
+    - libgbm1
+    - libnss3
+    - libxkbcommon0
+    - fonts-liberation
+    - fonts-noto-color-emoji
+  t64:
+    - libasound2
+    - libatk-bridge2.0-0
+    - libcups2
+    - libgtk-3-0
+  remove:
+    - watchman
+
+system:
+  - name: uv
+    version: 0.12.21
+    url: https://github.com/astral-sh/uv/releases/download/0.12.21/uv-x86_64-unknown-linux-musl.tar.gz
+    sha256: d69d543a55ec9cdf9d3d9f2648b0a161847e3dbddc477e3be6b5813a6d46f639
+    format: tar.gz
+    bins:
+      uv: uv-x86_64-unknown-linux-musl/uv
+      uvx: uv-x86_64-unknown-linux-musl/uvx
+    verify: [--version]
+  - name: claude
+    version: 2.1.285
+    url: https://downloads.claude.ai/claude-code-releases/2.1.285/linux-x64/claude
+    sha256: 33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29
+    format: binary
+    verify: [--version]
+  - name: codex
+    version: 0.159.2
+    url: https://github.com/openai/codex/releases/download/rust-v0.159.2/codex-x86_64-unknown-linux-musl.tar.gz
+    sha256: 26586b0d246d41a799b0ef8ee1add370f0fb0721b3709340f28db612381616ea
+    format: tar.gz
+    bins:
+      codex: codex-x86_64-unknown-linux-musl
+    verify: [--version]
+  - name: tailscale
+    version: 1.102.4
+    url: https://pkgs.tailscale.com/stable/tailscale_1.102.4_amd64.tgz
+    sha256: 50748df1045e60b5b695f19f4c56b0da36c019948b440fb456b6584a50f0d8b9
+    format: tar.gz
+    bins:
+      tailscale: tailscale_1.102.4_amd64/tailscale
+      tailscaled: tailscale_1.102.4_amd64/tailscaled
+  - name: orca
+    version: 1.4.215
+    url: https://github.com/stablyai/orca/releases/download/v1.4.215/orca-ide_1.4.215_amd64.deb
+    sha512: 1a971a0dab1d042a48e8284101f3102a70f3ddd0ac792cc691e2c06c09d2a0f7e8107a525b84fbb6f3ec5a040de53942f5bc2b9d5b84f95f61f33832c00bb98d
+    format: deb
+    bins:
+      orca: /opt/Orca/resources/bin/orca-ide
+
+tools:
+  - name: jq
+    version: 1.8.2
+    url: https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64
+    sha256: b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f
+    format: binary
+  - name: rg
+    version: 15.2.0
+    url: https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz
+    sha256: 33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+    format: tar.gz
+    bins:
+      rg: ripgrep-15.2.0-x86_64-unknown-linux-musl/rg
+  - name: gh
+    version: 2.102.0
+    url: https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.tar.gz
+    sha256: bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
+    format: tar.gz
+    bins:
+      gh: gh_2.102.0_linux_amd64/bin/gh
+  - name: rust-analyzer
+    version: 2026-09-28
+    url: https://github.com/rust-lang/rust-analyzer/releases/download/2026-09-28/rust-analyzer-x86_64-unknown-linux-gnu.gz
+    sha256: 23f711d86b5f826e22886f01d7355dc01e0f4c1357dafa29710a95b903b48c85
+    format: gzip
+  - name: agent-browser
+    version: 0.38.1
+    url: https://github.com/vercel-labs/agent-browser/releases/download/v0.38.1/agent-browser-linux-x64
+    sha256: 5100149a1903211c889de4e545bf36d90803740cea4f99aa22651649f9205ea1
+    format: binary
+  - name: chrome
+    version: 154.0.8037.92
+    url: https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-linux64.zip
+    sha256: ff43322f335e436b2f4dcdfeeec5db032299e335a7e8c1c618b326e100ce8732
+    format: zip
+    dest: .agent-browser/browsers/chrome-154.0.8037.92
+    bins:
+      google-chrome: chrome-linux64/chrome
+  - name: cookiesync
+    version: 0.30.0
+    url: https://github.com/yasyf/cookiesync/releases/download/v0.30.0/cookiesync_linux_amd64.tar.gz
+    sha256: ebf612ca04c3ba1ab300bc5e8ba6719f582996b1d26c60321a977d16f28e48c0
+    format: tar.gz
+    bins:
+      cookiesync: cookiesync
+
+links: [claude, codex, uv, uvx]
+
+python:
+  version: "3.13"
+  system:
+    - name: cc-transcript
+      version: 14.29.1
+      bins: [cc-transcript]
+      verify: [--version]
+    - name: ast-grep-cli
+      version: 0.45.3
+      bins: [ast-grep]
+      verify: [--version]
+  user:
+    - name: example-tool
+      package: example-tool[cli]
+      marketplace: example-marketplace
+      args: [--torch-backend, cpu]
+      bins: [example-tool]
+
+claude:
+  managedSettings:
+    channelsEnabled: true
+    allowedChannelPlugins:
+      - marketplace: example-marketplace
+        plugin: example-plugin
+  env:
+    EXAMPLE_MCP_DOMAIN: mcp.example.com
+  marketplaces:
+    - name: captain-hook
+      github: yasyf/captain-hook
+      ref: f0aa10a4da02aaaf5dc9e1e66cfda4c4fbe50744
+    - name: example-marketplace
+      github: example-org/example-marketplace
+      ref: 0000000000000000000000000000000000000000
+      private: true
+  plugins:
+    - id: captain-hook@captain-hook
+      version: 12.66.0
+    - id: example-plugin@example-marketplace
+      version: 0.1.0
+      bins: [bin/example-plugin]
+
+codexRuntime:
+  version: 26.930.10431
+  url: https://persistent.oaistatic.com/codex-primary-runtime/26.930.10431/codex-primary-runtime-linux-x64-26.930.10431.tar.xz
+  sha256: 7dd7d7355b996f73603992d59f507c2e7ee6a9b69416760f27ec9fd0a3853ac6
+  plugins: [documents, pdf, presentations, spreadsheets]
+
+captainHook:
+  version: 12.66.0
+  url: https://github.com/yasyf/captain-hook/releases/download/v12.66.0/captain-hook-v12.66.0-linux-amd64.tar.gz
+  sha256: c6fba4c8414a2c193db8bb120c10c70192c603c4cd5ce0b404346b6717040cee
+
+cookiesync:
+  schemaFingerprint: 2dc96a8a0930930535e711cbab04af029573c9b95318206f8a8fbad87677ca38
+
+services:
+  - name: capt-hookd
+    command: [capt-hookd, supervise]
+  - name: example-plugin
+    plugin: example-plugin@example-marketplace
+    command: [bin/example-plugin, serve]
+    env:
+      EXAMPLE_PORT: ${EXAMPLE_PORT}
+      EXAMPLE_URL: http://127.0.0.1:${EXAMPLE_PORT}
+  - name: cookiesync
+    command: [cookiesync, supervise]
+
+prepare:
+  - mkdir -p "$HOME/.cache/example"
+
+configure:
+  env: [EXAMPLE_PORT]
+  run:
+    - mkdir -p "$HOME/.example"
+
+profiles:
+  stack:
+    tools:
+      - name: kind
+        version: 0.29.0
+        url: https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
+        sha256: c72eda46430f065fb45c5f70e7c957cc9209402ef309294821978677c8fb3284
+        format: binary
+      - name: mise
+        version: 2026.9.18
+        url: https://github.com/jdx/mise/releases/download/v2026.9.18/mise-v2026.9.18-linux-x64
+        sha256: d24fe0bf7e613824ad99f7b8dac3f2b381a37b9f75f84dd250855217095a8de4
+        format: binary
+    prepare:
+      - mkdir -p "$HOME/.kube"
