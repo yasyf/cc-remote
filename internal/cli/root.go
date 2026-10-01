@@ -1,7 +1,12 @@
 package cli
 
 import (
+	"os"
+	"runtime"
+
 	"github.com/spf13/cobra"
+
+	"github.com/yasyf/cc-remote/internal/frontends/orca"
 )
 
 func NewRootCmd() *cobra.Command {
@@ -25,6 +30,7 @@ func NewRootCmd() *cobra.Command {
 		newLedgerCmd(),
 		newProxyCmd(),
 		newImagesCmd(),
+		newOrcaCmd(orca.ExecRunner{Command: orca.CLICommand(os.Getenv, runtime.GOOS)}),
 	)
 	return root
 }

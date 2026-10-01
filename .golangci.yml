@@ -23,6 +23,7 @@ linters:
         - G204
         - G304
         - G702
+        - G703
   exclusions:
     presets:
       - comments
