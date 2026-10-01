@@ -43,7 +43,7 @@ var (
 	aptPattern         = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*$`)
 	baseImagePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
 	imageNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*$`)
-	instructionPattern = regexp.MustCompile(`^([A-Z]+)\s+[^\n]*\S$`)
+	instructionPattern = regexp.MustCompile(`^([A-Z]+)[ \t]+[^\r\n]*[^\s\\]$`)
 	reference          = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 )
 
@@ -231,6 +231,8 @@ func (inv Inventory) validateImage() error {
 			return fmt.Errorf("image.layer: %q is not one Dockerfile instruction on one line", line)
 		case match[1] == "FROM":
 			return errors.New("image.layer: FROM would start a new stage after the provisioned one")
+		case strings.Contains(line, "<<"):
+			return fmt.Errorf("image.layer: %q opens a heredoc, which would swallow the lines after it", line)
 		}
 	}
 	return nil
@@ -253,11 +255,16 @@ func (inv Inventory) validateApt() error {
 
 func (inv Inventory) validateArtifacts() error {
 	systemBins := map[string]string{}
+	systemDirs := destinations{}
 	for _, artifact := range inv.System {
 		if err := artifact.validate("system", true); err != nil {
 			return err
 		}
-		if err := claim(systemBins, artifact.links(), "system["+artifact.Name+"]"); err != nil {
+		owner := "system[" + artifact.Name + "]"
+		if err := claim(systemBins, artifact.links(), owner); err != nil {
+			return err
+		}
+		if err := systemDirs.take(artifact.destination(true), owner); err != nil {
 			return err
 		}
 	}
@@ -280,11 +287,21 @@ func (inv Inventory) validateArtifacts() error {
 			return err
 		}
 	}
+	userDirs := destinations{}
+	for _, reserved := range []string{".cc-remote", ".local/bin", ".local/share/cc-remote/marketplaces"} {
+		if err := userDirs.take(destination{"$HOME", reserved}, "cc-remote"); err != nil {
+			return err
+		}
+	}
 	for _, artifact := range inv.Tools {
 		if err := artifact.validate("tools", false); err != nil {
 			return err
 		}
-		if err := claim(userBins, artifact.links(), "tools["+artifact.Name+"]"); err != nil {
+		owner := "tools[" + artifact.Name + "]"
+		if err := claim(userBins, artifact.links(), owner); err != nil {
+			return err
+		}
+		if err := userDirs.take(artifact.destination(false), owner); err != nil {
 			return err
 		}
 	}
@@ -293,12 +310,17 @@ func (inv Inventory) validateArtifacts() error {
 			return fmt.Errorf("profiles: %q is not a profile name", name)
 		}
 		profileBins := maps.Clone(userBins)
+		profileDirs := userDirs.clone()
 		for _, artifact := range inv.Profiles[name].Tools {
 			where := "profiles." + name + ".tools"
 			if err := artifact.validate(where, false); err != nil {
 				return err
 			}
-			if err := claim(profileBins, artifact.links(), where+"["+artifact.Name+"]"); err != nil {
+			owner := where + "[" + artifact.Name + "]"
+			if err := claim(profileBins, artifact.links(), owner); err != nil {
+				return err
+			}
+			if err := profileDirs.take(artifact.destination(false), owner); err != nil {
 				return err
 			}
 		}
@@ -317,6 +339,46 @@ func claim(owners map[string]string, bins []string, owner string) error {
 		owners[bin] = owner
 	}
 	return nil
+}
+
+type destination struct {
+	root string
+	dir  string
+}
+
+type destinations map[string][]claimedDir
+
+type claimedDir struct {
+	dir   string
+	owner string
+}
+
+func (d destinations) take(dest destination, owner string) error {
+	for _, prior := range d[dest.root] {
+		if prior.dir == dest.dir || strings.HasPrefix(dest.dir, prior.dir+"/") || strings.HasPrefix(prior.dir, dest.dir+"/") {
+			return fmt.Errorf("%s: installs into %s/%s, which overlaps %s/%s owned by %s", owner, dest.root, dest.dir, dest.root, prior.dir, prior.owner)
+		}
+	}
+	d[dest.root] = append(d[dest.root], claimedDir{dest.dir, owner})
+	return nil
+}
+
+func (d destinations) clone() destinations {
+	clone := destinations{}
+	for root, dirs := range d {
+		clone[root] = slices.Clone(dirs)
+	}
+	return clone
+}
+
+func (a Artifact) destination(system bool) destination {
+	switch {
+	case system:
+		return destination{"/opt/cc-remote/tools", a.dir()}
+	case a.Dest != "":
+		return destination{"$HOME", a.Dest}
+	}
+	return destination{"$HOME", ".local/share/cc-remote/tools/" + a.dir()}
 }
 
 func (a Artifact) validate(where string, system bool) error {

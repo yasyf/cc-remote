@@ -153,6 +153,25 @@ func TestValidateRejects(t *testing.T) {
 		{"layer FROM", func(i *Inventory) { i.Image.Layer = []string{"FROM scratch"} }, "image.layer: FROM would start a new stage after the provisioned one"},
 		{"layer multi-line", func(i *Inventory) { i.Image.Layer = []string{"RUN a\nRUN b"} }, `image.layer: "RUN a\nRUN b" is not one Dockerfile instruction on one line`},
 		{"layer lowercase", func(i *Inventory) { i.Image.Layer = []string{"run make"} }, `image.layer: "run make" is not one Dockerfile instruction on one line`},
+		{"layer newline after keyword", func(i *Inventory) { i.Image.Layer = []string{"RUN\nFROM scratch"} }, `image.layer: "RUN\nFROM scratch" is not one Dockerfile instruction on one line`},
+		{"layer carriage return", func(i *Inventory) { i.Image.Layer = []string{"RUN a\rUSER root"} }, `image.layer: "RUN a\rUSER root" is not one Dockerfile instruction on one line`},
+		{"layer continuation", func(i *Inventory) { i.Image.Layer = []string{`RUN make \`} }, `image.layer: "RUN make \\" is not one Dockerfile instruction on one line`},
+		{"layer heredoc", func(i *Inventory) { i.Image.Layer = []string{"RUN <<EOF"} }, `image.layer: "RUN <<EOF" opens a heredoc, which would swallow the lines after it`},
+		{"same tool dir", func(i *Inventory) {
+			i.Tools = append(i.Tools, Artifact{Name: "jq", Version: "1.8.2", URL: "https://example.com/jq2", SHA256: digest, Format: Binary, Bins: map[string]string{"jq2": "jq"}})
+		}, "tools[jq]: installs into $HOME/.local/share/cc-remote/tools/jq-1.8.2, which overlaps $HOME/.local/share/cc-remote/tools/jq-1.8.2 owned by tools[jq]"},
+		{"same system dir", func(i *Inventory) {
+			i.System = append(i.System, Artifact{Name: "uv", Version: "0.1.0", URL: "https://example.com/uv2.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"uv2": "uv/uv"}})
+		}, "system[uv]: installs into /opt/cc-remote/tools/uv-0.1.0, which overlaps /opt/cc-remote/tools/uv-0.1.0 owned by system[uv]"},
+		{"nested dests", func(i *Inventory) {
+			i.Tools[0].Dest = ".browsers/chrome"
+			i.Tools[1].Dest = ".browsers"
+		}, "tools[cookiesync]: installs into $HOME/.browsers, which overlaps $HOME/.browsers/chrome owned by tools[jq]"},
+		{"dest over managed state", func(i *Inventory) { i.Tools[0].Dest = ".cc-remote/jq" }, "tools[jq]: installs into $HOME/.cc-remote/jq, which overlaps $HOME/.cc-remote owned by cc-remote"},
+		{"dest over the bin dir", func(i *Inventory) { i.Tools[0].Dest = ".local" }, "tools[jq]: installs into $HOME/.local, which overlaps $HOME/.local/bin owned by cc-remote"},
+		{"profile tool dir clash", func(i *Inventory) {
+			i.Profiles["stack"].Tools[0].Dest = ".local/share/cc-remote/tools/jq-1.8.2"
+		}, "profiles.stack.tools[kind]: installs into $HOME/.local/share/cc-remote/tools/jq-1.8.2, which overlaps $HOME/.local/share/cc-remote/tools/jq-1.8.2 owned by tools[jq]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
