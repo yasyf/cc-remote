@@ -169,6 +169,7 @@ case "$1" in
         fi
         ;;
       rev-parse) cat "$dir/.fake-head" 2> /dev/null || exit 128 ;;
+      ls-tree | cat-file | hash-object) exec "$REAL_GIT" -C "$dir" "$@" ;;
       *) exit 2 ;;
     esac
     ;;
@@ -258,6 +259,10 @@ func (h pluginsHost) setCatalog(catalog map[string]any) {
 }
 
 func (h pluginsHost) run(name string, args ...string) (string, error) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		h.t.Fatal(err)
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = strings.NewReader("\n")
 	cmd.Env = append(os.Environ(),
@@ -268,6 +273,7 @@ func (h pluginsHost) run(name string, args ...string) (string, error) {
 		"FAKE_CATALOG="+filepath.Join(h.fakes, "catalog.json"),
 		"FAKE_LOG="+filepath.Join(h.fakes, "calls.log"),
 		"FAKE_SOURCES="+filepath.Join(h.fakes, "sources"),
+		"REAL_GIT="+git,
 	)
 	out, err := cmd.CombinedOutput()
 	return string(out), err

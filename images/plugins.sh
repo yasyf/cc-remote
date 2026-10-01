@@ -43,21 +43,39 @@ plugin_root() {
   jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath' <<< "$plugins"
 }
 
+pinned_blob() {
+  local dir="$1" ref="$2" path="$3" mode oid target
+  read -r mode _ oid _ <<< "$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "$path")"
+  if [ "$mode" = 120000 ]; then
+    target="$(git -C "$dir" cat-file blob "$oid")"
+    case "$target" in
+      "" | /* | */ | . | .. | */. | */..) return 1 ;;
+    esac
+    read -r mode _ oid _ <<< "$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "${path%/*}/$target")"
+  fi
+  case "$mode" in
+    100644 | 100755) printf '%s %s\n' "$mode" "$oid" ;;
+    *) return 1 ;;
+  esac
+}
+
 verify_plugin_bin() {
-  local id="$1" bin="$2" ref="$3" root source source_root
+  local id="$1" bin="$2" ref="$3" root dir source launcher descriptor text
   root="$(plugin_root "$id")"
   if [ ! -x "$root/$bin" ]; then
     echo "cc-remote: plugin $id has no executable $bin" >&2
     exit 1
   fi
   if [ -n "$ref" ] && [ "${id%@*}" != captain-hook ]; then
-    source="$(jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")' "$marketplace_dir/${id#*@}/.claude-plugin/marketplace.json")"
-    source_root="$marketplace_dir/${id#*@}/$source"
-    if [ -f "$source_root/$bin.binrun" ] \
-      && grep -qF 'DESCRIPTOR="$ROOT/'"$bin"'.binrun"' "$source_root/$bin" \
-      && grep -qF 'exec "$RUNNER_BIN" "$DESCRIPTOR" "$@"' "$source_root/$bin"; then
-      if ! cmp -s "$root/$bin" "$source_root/$bin" \
-        || ! cmp -s "$root/$bin.binrun" "$source_root/$bin.binrun"; then
+    dir="$marketplace_dir/${id#*@}"
+    source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')"
+    if descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
+      && launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")" \
+      && text="$(git -C "$dir" cat-file blob "${launcher#* }")" \
+      && grep -qF "DESCRIPTOR=\"\$ROOT/$bin.binrun\"" <<< "$text" \
+      && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" <<< "$text"; then
+      if [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
+        || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
         echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
         exit 1
       fi
