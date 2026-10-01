@@ -33,7 +33,7 @@ func newProvider(t *testing.T) (*Provider, *fakeSprites) {
 	t.Helper()
 	dir := t.TempDir()
 	cli := filepath.Join(dir, "sprite")
-	script := "#!/bin/sh\necho $$ > " + filepath.Join(dir, "proxy.pid") + "\ntrap '' HUP\nexec sleep 600\n"
+	script := "#!/bin/sh\necho $$ > " + filepath.Join(dir, "proxy.pid") + "\ntrap '' HUP\nexec sleep 60\n"
 	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -311,8 +311,13 @@ func TestProxyCommandStopsWithSSH(t *testing.T) {
 			if err := ssh.Start(); err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() {
+				if ssh.ProcessState == nil {
+					_ = ssh.Process.Kill()
+					_ = ssh.Wait()
+				}
+			})
 			pid := readPID(t, filepath.Join(filepath.Dir(p.CLI), "proxy.pid"))
-			t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 			if err := end(ssh, stdin); err != nil {
 				t.Fatal(err)
 			}
