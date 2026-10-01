@@ -1,7 +1,6 @@
 #!/bin/bash
 
 set -euo pipefail
-shopt -s inherit_errexit
 
 phase="${1:?usage: plugins.sh install STAMP|ready STAMP|configure|verify}"
 
@@ -30,7 +29,7 @@ require_env() {
 
 claude_json() {
   local output
-  output="$(claude "$@")"
+  output="$(claude "$@")" || exit
   if ! jq -se 'length == 1' <<< "$output" > /dev/null; then
     echo "plugins: claude $* did not print exactly one JSON document" >&2
     exit 1
@@ -40,7 +39,7 @@ claude_json() {
 
 plugin_root() {
   local plugins
-  plugins="$(claude_json plugin list --json)"
+  plugins="$(claude_json plugin list --json)" || exit
   jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath' <<< "$plugins"
 }
 
@@ -59,7 +58,7 @@ PINS
 
 healthy() {
   local plugins
-  plugins="$(claude_json plugin list --json)"
+  plugins="$(claude_json plugin list --json)" || exit
   jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$plugins" \
     | sort
 }
@@ -110,7 +109,7 @@ checkout() {
 
 recorded_source() {
   local known
-  known="$(claude_json plugin marketplace list --json)"
+  known="$(claude_json plugin marketplace list --json)" || exit
   jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$known"
 }
 
