@@ -43,16 +43,16 @@ func (s Store) ReadSpares() (Spares, error) {
 }
 
 func (s Store) UpdateSpares(change func(*Ledger, Spares) error) error {
-	sparesLock, err := state.Lock(s.SparesPath() + ".lock")
+	unlockSpares, err := state.Lock(s.SparesPath() + ".lock")
 	if err != nil {
 		return err
 	}
-	defer sparesLock.Close()
-	ledgerLock, err := state.Lock(s.Path + ".lock")
+	defer unlockSpares()
+	unlockLedger, err := state.Lock(s.Path + ".lock")
 	if err != nil {
 		return err
 	}
-	defer ledgerLock.Close()
+	defer unlockLedger()
 	spares, err := s.ReadSpares()
 	if err != nil {
 		return err

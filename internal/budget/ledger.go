@@ -173,11 +173,11 @@ func (s Store) Read() (*Ledger, error) {
 }
 
 func (s Store) Update(change func(*Ledger) error) error {
-	lock, err := state.Lock(s.Path + ".lock")
+	unlock, err := state.Lock(s.Path + ".lock")
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer unlock()
 	ledger, err := s.Read()
 	if err != nil {
 		return err

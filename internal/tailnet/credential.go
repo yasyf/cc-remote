@@ -11,9 +11,9 @@ import (
 
 const (
 	EnvClientID     = "TAILSCALE_OAUTH_CLIENT_ID"
-	EnvClientSecret = "TAILSCALE_OAUTH_CLIENT_SECRET"
+	EnvClientSecret = "TAILSCALE_OAUTH_CLIENT_SECRET" //nolint:gosec // the variable's name, not a credential
 	EnvSuffix       = "TAILSCALE_TAILNET_SUFFIX"
-	secretPrefix    = "tskey-client-"
+	secretPrefix    = "tskey-client-" //nolint:gosec // the prefix every OAuth client secret carries, not one
 )
 
 type Credential struct {

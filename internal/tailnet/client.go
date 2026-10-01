@@ -56,14 +56,18 @@ func (c *Client) token(ctx context.Context) (string, error) {
 	return token.AccessToken, nil
 }
 
+func readBody(resp *http.Response) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	return body, errors.Join(err, resp.Body.Close())
+}
+
 func (c *Client) call(req *http.Request, operation string, into any) error {
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s: %w", operation, err)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	body, err := readBody(resp)
 	if err != nil {
 		return fmt.Errorf("%s: %w", operation, err)
 	}
@@ -145,8 +149,7 @@ func (c *Client) Device(ctx context.Context, nodeID string) (Device, error) {
 	if err != nil {
 		return Device{}, fmt.Errorf("reading tailnet node %s: %w", nodeID, err)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	body, err := readBody(resp)
 	if err != nil {
 		return Device{}, fmt.Errorf("reading tailnet node %s: %w", nodeID, err)
 	}
@@ -197,8 +200,9 @@ func (c *Client) DeleteNode(ctx context.Context, nodeID, hostname string) error 
 	if err != nil {
 		return fmt.Errorf("deleting tailnet node %s: %w", nodeID, err)
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if _, err := readBody(resp); err != nil {
+		return fmt.Errorf("deleting tailnet node %s: %w", nodeID, err)
+	}
 	if resp.StatusCode != http.StatusNotFound && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
 		return fmt.Errorf("deleting tailnet node %s answered %s", nodeID, resp.Status)
 	}

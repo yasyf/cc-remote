@@ -12,6 +12,18 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors:     true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 	}
-	root.AddCommand(newVersionCmd(), newProxyCmd(), newImagesCmd())
+	root.AddCommand(
+		newVersionCmd(),
+		newCreateCmd(),
+		newResumeCmd(),
+		newSuspendCmd(),
+		newDestroyCmd(),
+		newPrepareCmd(),
+		newDrainCmd(),
+		newStatusCmd(),
+		newVerifyCmd(),
+		newProxyCmd(),
+		newImagesCmd(),
+	)
 	return root
 }

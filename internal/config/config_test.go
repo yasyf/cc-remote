@@ -14,6 +14,8 @@ provider: fake
 profile: lean
 providers:
   fake: { org: o }
+workspace_dirs:
+  fake: /home/fake
 profiles:
   lean:
     prepare: [true]
@@ -68,6 +70,12 @@ func TestParseFillsDefaults(t *testing.T) {
 	if err != nil || profile.Machine["fake"].Size != "s" {
 		t.Errorf("profile = %+v, %v", profile, err)
 	}
+	if cfg.ProjectRoot("fake") != "/home/fake/app" {
+		t.Errorf("ProjectRoot = %q", cfg.ProjectRoot("fake"))
+	}
+	if raw, err := cfg.RawProviderSection("fake"); err != nil || strings.TrimSpace(string(raw)) != "{org: o}" {
+		t.Errorf("raw section = %q, %v", raw, err)
+	}
 	if _, err := cfg.ProfileNamed("full"); err == nil {
 		t.Error("an unknown profile resolved")
 	}
@@ -110,8 +118,19 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"no ref", func(s string) string { return strings.Replace(s, "ref: main\n", "", 1) }, "ref"},
 		{"unknown default provider", func(s string) string { return strings.Replace(s, "provider: fake", "provider: other", 1) }, "provider \"other\""},
 		{"unknown default profile", func(s string) string { return strings.Replace(s, "profile: lean", "profile: full", 1) }, "profile \"full\""},
-		{"bad checkout", func(s string) string { return strings.Replace(s, "prepare: [true]", "prepare: [true]\n    checkout: deep", 1) }, "checkout"},
-		{"machine for unknown provider", func(s string) string { return strings.Replace(s, "fake: { size: s }", "fake: { size: s }\n      other: {}", 1) }, "machine names provider"},
+		{"bad checkout", func(s string) string {
+			return strings.Replace(s, "prepare: [true]", "prepare: [true]\n    checkout: deep", 1)
+		}, "checkout"},
+		{"relative workspace dir", func(s string) string { return strings.Replace(s, "fake: /home/fake", "fake: home", 1) }, "workspace_dirs.fake"},
+		{"workspace dir for unknown provider", func(s string) string {
+			return strings.Replace(s, "fake: /home/fake", "fake: /home/fake\n  other: /x", 1)
+		}, "workspace_dirs names provider"},
+		{"long profile name", func(s string) string {
+			return strings.ReplaceAll(s, "lean", "a-profile-name-over-twenty")
+		}, "profile \"a-profile-name-over-twenty\""},
+		{"machine for unknown provider", func(s string) string {
+			return strings.Replace(s, "fake: { size: s }", "fake: { size: s }\n      other: {}", 1)
+		}, "machine names provider"},
 		{"spares for unknown profile", func(s string) string { return s + "spares:\n  fake: { full: 1 }\n" }, "spares.fake names profile"},
 		{"negative spares", func(s string) string { return s + "spares:\n  fake: { lean: -1 }\n" }, "negative"},
 		{"zero cap", func(s string) string { return strings.Replace(s, "cap_usd: 100", "cap_usd: 0", 1) }, "budget"},

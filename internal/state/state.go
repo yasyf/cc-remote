@@ -35,34 +35,37 @@ func ValidateName(name string) error {
 	return nil
 }
 
-func (d Dir) Ledger(name string) string    { return filepath.Join(string(d), "ledgers", name+".json") }
-func (d Dir) Workspace(name string) string { return filepath.Join(string(d), "workspaces", name+".json") }
-func (d Dir) Tailnet() string              { return filepath.Join(string(d), "tailnet") }
+func (d Dir) Ledger(name string) string { return filepath.Join(string(d), "ledgers", name+".json") }
+
+func (d Dir) Workspace(name string) string {
+	return filepath.Join(string(d), "workspaces", name+".json")
+}
+func (d Dir) Tailnet() string { return filepath.Join(string(d), "tailnet") }
 func (d Dir) Log(kind, name string) string {
 	return filepath.Join(string(d), "logs", kind, name+".log")
 }
 
 type Held struct {
-	Name string
-	lock *os.File
+	Name   string
+	unlock func()
 }
 
 func (d Dir) Hold(name string) (*Held, error) {
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	lock, err := Lock(d.Workspace(name) + ".lock")
+	unlock, err := Lock(d.Workspace(name) + ".lock")
 	if err != nil {
 		return nil, err
 	}
-	return &Held{Name: name, lock: lock}, nil
+	return &Held{Name: name, unlock: unlock}, nil
 }
 
 func (h *Held) Release() {
-	h.lock.Close()
+	h.unlock()
 }
 
-func Lock(path string) (*os.File, error) {
+func Lock(path string) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -71,10 +74,9 @@ func Lock(path string) (*os.File, error) {
 		return nil, err
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		file.Close()
-		return nil, err
+		return nil, errors.Join(err, file.Close())
 	}
-	return file, nil
+	return func() { _ = file.Close() }, nil
 }
 
 func Save(path string, value any) error {
@@ -91,12 +93,10 @@ func Save(path string, value any) error {
 		return err
 	}
 	if _, err := file.Write(append(raw, '\n')); err != nil {
-		file.Close()
-		return err
+		return errors.Join(err, file.Close())
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
+		return errors.Join(err, file.Close())
 	}
 	if err := file.Close(); err != nil {
 		return err
@@ -133,6 +133,5 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer handle.Close()
-	return handle.Sync()
+	return errors.Join(handle.Sync(), handle.Close())
 }

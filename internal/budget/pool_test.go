@@ -149,7 +149,7 @@ func TestConcurrentClaimsNeverShareASpare(t *testing.T) {
 	for i := range 8 {
 		wg.Go(func() {
 			request := fmt.Sprintf("ow-req-%d", i)
-			_ = store.UpdateSpares(func(ledger *Ledger, spares Spares) error {
+			_ = store.UpdateSpares(func(_ *Ledger, spares Spares) error {
 				name, claimed := spares.Claim("f", request, epoch)
 				if claimed {
 					got <- [2]string{request, name}
@@ -199,7 +199,7 @@ func TestAHelperThatPredatesThePoolCannotEraseIt(t *testing.T) {
 	if len(fields) != 1 || fields["resources"] == nil {
 		t.Errorf("the ledger carries %d fields; any helper that rewrites it must lose nothing of the pool", len(fields))
 	}
-	if err := store.Update(func(ledger *Ledger) error { return nil }); err != nil {
+	if err := store.Update(func(*Ledger) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if spares, err := store.ReadSpares(); err != nil || spares["a"] == nil {

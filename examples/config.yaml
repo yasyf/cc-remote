@@ -6,12 +6,17 @@ profile: lean
 providers:
   sprites:
     org: <sprites-org>
-    project_root: /home/sprite/<repo>
+    rate: { hourlyUSD: 1.26, storageGB: 50, storageGBMonthUSD: 0.5 }
   namespace:
-    workspace_dir: /workspaces
     platform: linux/amd64
-    volume_size_gb: 125
-    idle_timeout: 30m
+    volumeSizeGB: 125
+    idleTimeout: 30m
+    hourlyUSD: { s: 0.24, m: 0.48, l: 0.96, xl: 1.92 }
+    storageGBMonthUSD: 0.2
+
+workspace_dirs:
+  sprites: /home/sprite
+  namespace: /workspaces
 
 profiles:
   lean:

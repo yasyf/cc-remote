@@ -53,16 +53,22 @@ func TestCleanScriptRefusesEveryCredentialASpareCouldKeep(t *testing.T) {
 		return os.WriteFile(filepath.Join(home, path), []byte(body), 0o600)
 	}
 	tests := map[string]func(home, root string) error{
-		"git credentials":          func(home, _ string) error { return write(home, ".git-credentials", "https://x:y@github.com\n") },
-		"gh hosts":                 func(home, _ string) error { return write(home, ".config/gh/hosts.yml", "github.com:\n") },
-		"claude login":             func(home, _ string) error { return write(home, ".claude/.credentials.json", "{}") },
-		"codex login":              func(home, _ string) error { return write(home, ".codex/auth.json", "{}") },
-		"authorized key":           func(home, _ string) error { return write(home, ".ssh/authorized_keys", "ssh-ed25519 AAAA\n") },
-		"private key":              func(home, _ string) error { return write(home, ".ssh/id_ed25519", "key") },
-		"userspace tailnet state":  func(home, _ string) error { return write(home, ".cc-remote/tailscaled.state", "{}") },
-		"credential helper":        func(_, root string) error { return exec.Command("git", "-C", root, "config", "credential.helper", "store").Run() },
-		"token in the remote":      func(_, root string) error { return exec.Command("git", "-C", root, "remote", "set-url", "origin", "https://x-access-token:"+token+"@github.com/example/app").Run() },
-		"another origin":           func(_, root string) error { return exec.Command("git", "-C", root, "remote", "set-url", "origin", "https://github.com/other/app").Run() },
+		"git credentials":         func(home, _ string) error { return write(home, ".git-credentials", "https://x:y@github.com\n") },
+		"gh hosts":                func(home, _ string) error { return write(home, ".config/gh/hosts.yml", "github.com:\n") },
+		"claude login":            func(home, _ string) error { return write(home, ".claude/.credentials.json", "{}") },
+		"codex login":             func(home, _ string) error { return write(home, ".codex/auth.json", "{}") },
+		"authorized key":          func(home, _ string) error { return write(home, ".ssh/authorized_keys", "ssh-ed25519 AAAA\n") },
+		"private key":             func(home, _ string) error { return write(home, ".ssh/id_ed25519", "key") },
+		"userspace tailnet state": func(home, _ string) error { return write(home, ".cc-remote/tailscaled.state", "{}") },
+		"credential helper": func(_, root string) error {
+			return exec.Command("git", "-C", root, "config", "credential.helper", "store").Run()
+		},
+		"token in the remote": func(_, root string) error {
+			return exec.Command("git", "-C", root, "remote", "set-url", "origin", "https://x-access-token:"+token+"@github.com/example/app").Run()
+		},
+		"another origin": func(_, root string) error {
+			return exec.Command("git", "-C", root, "remote", "set-url", "origin", "https://github.com/other/app").Run()
+		},
 		"token in a config":        func(home, _ string) error { return write(home, ".config/tool/state", "token: "+token+"\n") },
 		"token in the state dir":   func(home, _ string) error { return write(home, ".cc-remote/log", token) },
 		"token in the share dir":   func(home, _ string) error { return write(home, ".local/share/cc-remote/x", token) },
@@ -97,7 +103,8 @@ func TestCleanScriptRefusesConfiguredForbiddenPaths(t *testing.T) {
 func checkout(t *testing.T, home string, helpers ...string) string {
 	t.Helper()
 	root := gitRepo(t, repository+".git")
-	args := [][]string{{"credential.https://github.com.usehttppath", "true"}}
+	args := make([][]string, 0, 1+len(helpers))
+	args = append(args, []string{"credential.https://github.com.usehttppath", "true"})
 	for _, helper := range helpers {
 		args = append(args, []string{"credential.https://github.com.helper", helper})
 	}
@@ -117,8 +124,8 @@ func appendGitConfig(t *testing.T, home, section string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer config.Close()
-	if _, err := config.WriteString(section); err != nil {
+	_, err = config.WriteString(section)
+	if err := errors.Join(err, config.Close()); err != nil {
 		t.Fatal(err)
 	}
 }

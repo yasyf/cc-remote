@@ -38,6 +38,7 @@ type Config struct {
 	Profile    string                    `yaml:"profile"`
 	StateDir   string                    `yaml:"state_dir"`
 	Providers  map[string]yaml.Node      `yaml:"providers"`
+	Roots      map[string]string         `yaml:"workspace_dirs"`
 	Profiles   map[string]Profile        `yaml:"profiles"`
 	Spares     map[string]map[string]int `yaml:"spares"`
 	Bootstrap  string                    `yaml:"bootstrap"`
@@ -91,8 +92,9 @@ type Identity struct {
 }
 
 var (
-	envName    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	ledgerName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	envName     = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	ledgerName  = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,19}$`)
 )
 
 func DefaultPath() string {
@@ -161,8 +163,8 @@ func (c *Config) applyDefaults() {
 }
 
 func (c *Config) validate() error {
-	if !strings.HasPrefix(c.Repository, "https://") {
-		return fmt.Errorf("repository %q must be an https clone URL", c.Repository)
+	if !strings.HasPrefix(c.Repository, "https://") && !strings.HasPrefix(c.Repository, "file://") {
+		return fmt.Errorf("repository %q must be an https or file clone URL", c.Repository)
 	}
 	if c.Ref == "" {
 		return errors.New("ref names the branch or tag a workspace checks out when none is requested")
@@ -179,7 +181,20 @@ func (c *Config) validate() error {
 	if _, ok := c.Profiles[c.Profile]; !ok {
 		return fmt.Errorf("profile %q is not under profiles", c.Profile)
 	}
+	for kind := range c.Providers {
+		if root := c.Roots[kind]; !strings.HasPrefix(root, "/") {
+			return fmt.Errorf("workspace_dirs.%s %q must be the absolute directory checkouts live under on that provider's machines", kind, root)
+		}
+	}
+	for kind := range c.Roots {
+		if _, ok := c.Providers[kind]; !ok {
+			return fmt.Errorf("workspace_dirs names provider %q, which is not under providers", kind)
+		}
+	}
 	for name, profile := range c.Profiles {
+		if !profileName.MatchString(name) {
+			return fmt.Errorf("profile %q: use up to 20 lowercase letters, digits and dashes; the name is part of every spare's machine name", name)
+		}
 		if profile.Checkout != Shallow && profile.Checkout != Full {
 			return fmt.Errorf("profile %s: checkout %q is neither shallow nor full", name, profile.Checkout)
 		}
@@ -223,12 +238,16 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func (c *Config) ProviderSection(kind string) (func(into any) error, error) {
+func (c *Config) RawProviderSection(kind string) ([]byte, error) {
 	node, ok := c.Providers[kind]
 	if !ok {
 		return nil, fmt.Errorf("provider %q is not under providers", kind)
 	}
-	raw, err := yaml.Marshal(&node)
+	return yaml.Marshal(&node)
+}
+
+func (c *Config) ProviderSection(kind string) (func(into any) error, error) {
+	raw, err := c.RawProviderSection(kind)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +271,10 @@ func (c *Config) ProfileNamed(name string) (Profile, error) {
 
 func (c *Config) SpareCount(provider, profile string) int {
 	return c.Spares[provider][profile]
+}
+
+func (c *Config) ProjectRoot(provider string) string {
+	return c.Roots[provider] + "/" + RepositoryName(c.Repository)
 }
 
 func (c *Config) ScriptPath(relative string) string {

@@ -16,7 +16,7 @@ import (
 const (
 	forgetAgent  = `rm -rf "$HOME"/.claude.json "$HOME"/.claude.json.* "$HOME/.claude/backups"`
 	ShareDir     = "$HOME/.local/share/" + remote.Prefix
-	tokenPattern = `gh[opsu]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}`
+	tokenPattern = `gh[opsu]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}` //nolint:gosec // the shape of a token, not one
 )
 
 var credentialFiles = []string{
