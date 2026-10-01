@@ -1,0 +1,62 @@
+repository: https://github.com/<org>/<repo>
+ref: main
+provider: sprites
+profile: lean
+
+providers:
+  sprites:
+    org: <sprites-org>
+    project_root: /home/sprite/<repo>
+  namespace:
+    workspace_dir: /workspaces
+    platform: linux/amd64
+    volume_size_gb: 125
+    idle_timeout: 30m
+
+profiles:
+  lean:
+    checkout: shallow
+    prepare:
+      - ./tools/install-agent-tools.sh
+    machine:
+      sprites: {}
+      namespace: { image: <image-name-or-digest>, size: l }
+  full:
+    checkout: full
+    prepare:
+      - ./tools/install-agent-tools.sh
+      - ./tools/bootstrap-project.sh
+    warm:
+      - ./tools/install-project-deps.sh
+    warm_inputs:
+      - package.json
+      - "*.lock"
+    machine:
+      namespace: { image: <image-name-or-digest>, size: xl }
+
+spares:
+  sprites: { lean: 1 }
+  namespace: { full: 0 }
+
+bootstrap: ./tools/install-plugins.sh
+
+forwards:
+  - { label: cc-present, env: CC_PRESENT_PORT }
+  - { label: cc-review, env: CC_REVIEW_PORT }
+
+budget:
+  ledger: default
+  cap_usd: 100
+  reserve_usd: 10
+  trial_hours: 3
+
+tailnet:
+  tag: tag:cc-remote
+  keychain_service: cc-remote-tailnet
+  api: https://api.tailscale.com/api/v2
+
+git:
+  token_command: [gh, auth, token]
+
+identity:
+  forbidden_paths: []
