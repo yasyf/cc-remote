@@ -21,6 +21,8 @@ const (
 	orcaYAMLFile    = "orca.yaml"
 )
 
+const sshSpace = " \t\r\n"
+
 var (
 	commandChecks    = []string{"recipe.create", "recipe.suspend", "recipe.resume", "recipe.destroy"}
 	ErrNotReady      = errors.New("the Orca desktop app is not running with a ready runtime and a window")
@@ -222,12 +224,33 @@ func (s SSHConfig) missing() error {
 }
 
 func sshDirective(line string) (string, []string) {
-	line = strings.TrimSpace(line)
-	i := strings.IndexAny(line, " \t=")
-	if i < 0 {
-		return strings.ToLower(line), nil
+	line, _, _ = strings.Cut(line, "\x00")
+	keyword, rest, ok := sshDelim(strings.TrimRight(line, sshSpace+"\f"))
+	if ok && keyword == "" {
+		keyword, rest, ok = sshDelim(rest)
 	}
-	return strings.ToLower(line[:i]), sshArgs(strings.TrimPrefix(strings.TrimLeft(line[i:], " \t"), "="))
+	if !ok || keyword == "" || keyword[0] == '#' {
+		return "", nil
+	}
+	return strings.ToLower(keyword), sshArgs(rest)
+}
+
+func sshDelim(s string) (string, string, bool) {
+	i := strings.IndexAny(s, sshSpace+`"=`)
+	if i < 0 {
+		return s, "", true
+	}
+	if s[i] == '"' {
+		token, rest, ok := strings.Cut(s[i+1:], `"`)
+		return s[:i] + token, strings.TrimLeft(rest, sshSpace), ok
+	}
+	rest := strings.TrimLeft(s[i+1:], sshSpace)
+	if s[i] != '=' {
+		if after, ok := strings.CutPrefix(rest, "="); ok {
+			rest = strings.TrimLeft(after, sshSpace)
+		}
+	}
+	return s[:i], rest, true
 }
 
 func sshArgs(s string) []string {

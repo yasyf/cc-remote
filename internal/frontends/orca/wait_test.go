@@ -290,6 +290,9 @@ func TestWaitAcceptsIncludeForms(t *testing.T) {
 		"Include " + fragments + " # cc-remote workspaces",
 		"Include '" + fragments + "'",
 		`Include "/Users/me/.local/state/cc-remote/ssh/"*.ssh`,
+		`"Include" ` + fragments,
+		"=Include " + fragments,
+		"Include = " + fragments,
 	} {
 		t.Run(line, func(t *testing.T) {
 			f := newWaitFixture(t)
@@ -329,6 +332,25 @@ func TestWaitKeepsHashInsideAnIncludePath(t *testing.T) {
 				on("worktree list --limit 10000 --json", worktreesJSON)
 			if _, err := orca.NewClient(fake).Wait(context.Background(), p, fastPoll); err != nil {
 				t.Errorf("Wait() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitRejectsIncludeAfterAnyHostSpelling(t *testing.T) {
+	for _, host := range []string{`"Host" other`, "=Host other", `Ho"st" other`, "MATCH all"} {
+		t.Run(host, func(t *testing.T) {
+			f := newWaitFixture(t)
+			if err := os.WriteFile(f.sshConfig, []byte(host+"\n"+include+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake := newFakeOrca(t).
+				on("status --json", statusReady).
+				on("repo list --json", f.reposJSON()).
+				on(f.doctorCall(), doctorPassed)
+			_, err := orca.NewClient(fake).Wait(context.Background(), f.preflight, fastPoll)
+			if want := strings.ReplaceAll(missing, "%SSHCONFIG%", f.sshConfig); err == nil || err.Error() != want {
+				t.Errorf("Wait() error = %v, want %q", err, want)
 			}
 		})
 	}
