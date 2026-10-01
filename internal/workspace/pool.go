@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/remote"
+	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
@@ -26,13 +26,10 @@ type Pool struct {
 	Profile     string
 	Fingerprint string
 	Spares      int
-	Rate        budget.Rate
-	Estimate    float64
-	Guard       budget.Guard
-	Ledger      budget.Store
+	Store       sparestate.Store
 }
 
-func NewPool(cfg *config.Config, provider, profile string, rate budget.Rate, stamp string) (Pool, error) {
+func NewPool(cfg *config.Config, provider, profile string, stamp string) (Pool, error) {
 	prepared, err := cfg.ProfileNamed(profile)
 	if err != nil {
 		return Pool{}, err
@@ -55,10 +52,7 @@ func NewPool(cfg *config.Config, provider, profile string, rate budget.Rate, sta
 		Profile:     profile,
 		Fingerprint: hex.EncodeToString(hash.Sum(nil)),
 		Spares:      cfg.SpareCount(provider, profile),
-		Rate:        rate,
-		Estimate:    rate.Estimate(cfg.Budget.TrialHours),
-		Guard:       budget.Guard{CapUSD: cfg.Budget.CapUSD, ReserveUSD: cfg.Budget.ReserveUSD},
-		Ledger:      budget.Store{Path: cfg.State().Ledger(cfg.Budget.Ledger)},
+		Store:       sparestate.Store{Path: cfg.State().Spares()},
 	}, nil
 }
 
@@ -83,104 +77,71 @@ const (
 func (p Pool) Assign(request string, now time.Time) (string, Assignment, error) {
 	var name string
 	var assignment Assignment
-	err := p.Ledger.UpdateSpares(func(ledger *budget.Ledger, spares budget.Spares) error {
+	err := p.Store.Update(func(spares sparestate.Spares) error {
 		if held, ok := spares.HeldBy(request); ok {
 			if spares[held].ActivatedAt == nil {
 				return fmt.Errorf("%s was claimed for %s by a create that never finished; it is left as it is, so destroy %s before creating again", held, request, request)
 			}
 			name, assignment = held, Reclaim
-		} else if err := ledger.Vacant(request); err != nil {
-			return err
+		} else if _, exists := spares[request]; exists {
+			return fmt.Errorf("%s already exists as a spare; it is left as it is, so use a different workspace name", request)
 		} else if claimed, ok := spares.Claim(p.Fingerprint, request, now); ok {
 			name, assignment = claimed, NewClaim
 		} else {
 			name, assignment = request, FreshCreate
 		}
-		if assignment == Reclaim && ledger.Running(name) {
-			return nil
-		}
-		if err := p.Guard.Admit(ledger, p.Estimate, now); err != nil {
-			return err
-		}
-		return ledger.Start(name, p.Provider, p.Profile, p.Rate, p.Estimate, now)
+		return nil
 	})
 	return name, assignment, err
 }
 
 func (p Pool) Claimed(request string) (string, error) {
-	machine, _, err := p.Ledger.ClaimedFor(request)
+	machine, _, err := p.Store.ClaimedFor(request)
 	return machine, err
 }
 
 func (p Pool) Activate(name string, now time.Time) error {
-	return p.Ledger.UpdateSpares(func(_ *budget.Ledger, spares budget.Spares) error {
-		return spares.Activate(name, now)
-	})
+	return p.Store.Update(func(spares sparestate.Spares) error { return spares.Activate(name, now) })
 }
 
-func (p Pool) Reserve(name string, preparer int, now time.Time) (bool, error) {
+func (p Pool) BeginPrepare(name string, preparer int) (bool, error) {
 	var reserved bool
-	err := p.Ledger.UpdateSpares(func(ledger *budget.Ledger, spares budget.Spares) error {
+	err := p.Store.Update(func(spares sparestate.Spares) error {
 		if spares.Pooled(p.Fingerprint) >= p.Spares {
 			return nil
 		}
-		if err := p.Guard.Admit(ledger, p.Estimate, now); err != nil {
-			return err
-		}
 		reserved = true
-		return spares.Prepare(ledger, name, p.Provider, p.Profile, p.Fingerprint, p.Rate, p.Estimate, preparer, now)
+		return spares.Prepare(name, p.Provider, p.Profile, p.Fingerprint, preparer)
 	})
 	return reserved, err
 }
 
 func (p Pool) MarkReady(name string, now time.Time) error {
-	return p.Ledger.UpdateSpares(func(ledger *budget.Ledger, spares budget.Spares) error {
-		return spares.MarkReady(ledger, name, now)
-	})
+	return p.Store.Update(func(spares sparestate.Spares) error { return spares.MarkReady(name, now) })
 }
 
 func (p Pool) Drain(all bool) ([]string, error) {
 	var drained []string
-	err := p.Ledger.UpdateSpares(func(ledger *budget.Ledger, spares budget.Spares) error {
-		drained = spares.Drain(func(id string, spare *budget.Spare) bool {
-			resource := ledger.Resources[id]
-			if resource.Provider != p.Provider || resource.Profile != p.Profile {
+	err := p.Store.Update(func(spares sparestate.Spares) error {
+		drained = spares.Drain(func(_ string, item *sparestate.Spare) bool {
+			if item.Provider != p.Provider || item.Profile != p.Profile {
 				return false
 			}
-			switch spare.State {
-			case budget.Draining:
+			switch item.State {
+			case sparestate.Draining:
 				return true
-			case budget.Preparing:
-				return !alive(spare.Preparer)
+			case sparestate.Preparing:
+				return !alive(item.Preparer)
 			}
-			return all || spare.Fingerprint != p.Fingerprint
+			return all || item.Fingerprint != p.Fingerprint
 		})
 		return nil
 	})
 	return drained, err
 }
 
-func (p Pool) Start(name string, now time.Time) error {
-	return p.Ledger.Update(func(ledger *budget.Ledger) error {
-		if err := p.Guard.Admit(ledger, p.Estimate, now); err != nil {
-			return err
-		}
-		return ledger.Start(name, p.Provider, p.Profile, p.Rate, p.Estimate, now)
-	})
+func (p Pool) Remove(name string) error {
+	return p.Store.Update(func(spares sparestate.Spares) error { delete(spares, name); return nil })
 }
 
-func (p Pool) Stop(name string, now time.Time) error {
-	return p.Ledger.Update(func(ledger *budget.Ledger) error {
-		return ledger.Stop(name, now)
-	})
-}
-
-func (p Pool) Retire(name string, now time.Time) error {
-	return p.Ledger.Update(func(ledger *budget.Ledger) error {
-		return ledger.Retire(name, now)
-	})
-}
-
-func alive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
-}
+func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }

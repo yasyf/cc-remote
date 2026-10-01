@@ -13,7 +13,7 @@ import (
 type Provider interface {
 	Traits() Traits
 	Check(ctx context.Context) error
-	Rate(spec Spec) (Rate, error)
+	ValidateSpec(spec Spec) error
 	Create(ctx context.Context, spec Spec) (Machine, error)
 	Get(ctx context.Context, id string) (Machine, error)
 	Wake(ctx context.Context, id string) error
@@ -89,12 +89,6 @@ type Result struct {
 	Stdout   []byte
 	Stderr   []byte
 	ExitCode int
-}
-
-type Rate struct {
-	HourlyUSD         float64 `yaml:"hourlyUSD"`
-	StorageGB         float64 `yaml:"storageGB"`
-	StorageGBMonthUSD float64 `yaml:"storageGBMonthUSD"`
 }
 
 type HostKeyMode string

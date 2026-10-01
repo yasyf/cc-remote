@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
+	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/tailnet"
 )
@@ -263,7 +263,7 @@ func newImagedHarness(t *testing.T) *harness {
 func build(t *testing.T, spares int, withTailnet bool, tools, image string) *harness {
 	t.Helper()
 	machine := &scripted{status: noState, minted: "nNEW"}
-	fake := &providertest.Fake{Rates: providers.Rate{HourlyUSD: 1}, Handle: machine.Handle}
+	fake := &providertest.Fake{Handle: machine.Handle}
 	provider := &flaky{Provider: fake}
 	inventoryPath := filepath.Join(t.TempDir(), "inventory.yaml")
 	if err := os.WriteFile(inventoryPath, []byte(tools), 0o600); err != nil {
@@ -291,10 +291,6 @@ spares:
 inventory: %s
 forwards:
   - { label: web, env: WEB_PORT }
-budget:
-  cap_usd: 100
-  reserve_usd: 10
-  trial_hours: 1
 `, t.TempDir(), image, spares, inventoryPath)
 	if withTailnet {
 		text += "tailnet:\n  tag: " + tag + "\n"
@@ -306,9 +302,6 @@ budget:
 	cfg.Path = filepath.Join(t.TempDir(), "config.yaml")
 	h := &harness{t: t, fake: fake, provider: provider, machine: machine, cfg: cfg, inventory: inventoryPath}
 	h.session = h.open()
-	if err := h.session.Pool.Ledger.Init(time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	h.api = &fakeTailnet{devices: []tailnet.Device{owned("nNEW")}}
 	if withTailnet {
 		client := h.api.serve(t)
@@ -377,22 +370,12 @@ func (h *harness) bind(to tailnet.Binding) {
 	}
 }
 
-func (h *harness) ledger() *budget.Ledger {
+func (h *harness) spares() sparestate.Spares {
 	h.t.Helper()
-	ledger, err := h.session.Pool.Ledger.Read()
+	spares, err := h.session.Pool.Store.Read()
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	return ledger
-}
-
-func (h *harness) spares() budget.Spares {
-	h.t.Helper()
-	spares, err := h.session.Pool.Ledger.ReadSpares()
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	spares.DropRetired(h.ledger())
 	return spares
 }
 
@@ -465,8 +448,8 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || record.Claimed {
 		t.Errorf("record = %+v, %v", record, found)
 	}
-	if !h.ledger().Running("ws-1") || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) {
-		t.Errorf("ledger running %v, bound %v", h.ledger().Running("ws-1"), h.bound())
+	if h.bound() != (tailnet.Binding{NodeID: "nNEW"}) {
+		t.Errorf("bound %v", h.bound())
 	}
 	machine, _ := h.fake.Get(context.Background(), "ws-1")
 	if machine.Labels[LabelWorkspace] != "ws-1" || machine.Labels[LabelProfile] != "lean" {
@@ -508,7 +491,7 @@ func TestAClaimRenewsIdentityBeforeInstallingThenWarmsAndEnrolls(t *testing.T) {
 	if refills != 1 || result.Machine != spare || !strings.Contains(h.calls(), "wake "+spare) {
 		t.Errorf("refills %d, machine %s, calls %s", refills, result.Machine, h.calls())
 	}
-	if spare := h.spares()[spare]; spare.State != budget.Claimed || spare.ActivatedAt == nil || spare.Request != "ws-1" {
+	if spare := h.spares()[spare]; spare.State != sparestate.Claimed || spare.ActivatedAt == nil || spare.Request != "ws-1" {
 		t.Errorf("spare = %+v", spare)
 	}
 	if record, found := h.record("ws-1"); !found || !record.Claimed || record.Machine != spare || record.Tailnet == nil {
@@ -533,14 +516,14 @@ func TestARetriedCreateReattachesItsClaimWithoutRenewingIdentity(t *testing.T) {
 	if got := verbs(h.fake.Calls()[calls:]); strings.Contains(got, "create") || strings.Contains(got, "destroy") || !strings.HasPrefix(got, "wake exec") {
 		t.Errorf("the retry ran %q; want a wake, a refresh and a reconnect only", got)
 	}
-	if h.spares()[spare].State != budget.Claimed {
+	if h.spares()[spare].State != sparestate.Claimed {
 		t.Errorf("the reattached spare is %s", h.spares()[spare].State)
 	}
 }
 
 func TestAFailedReattachLeavesTheWorkspace(t *testing.T) {
 	h := newHarness(t, 1, true)
-	spare := h.prepared()
+	h.prepared()
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
@@ -550,9 +533,6 @@ func TestAFailedReattachLeavesTheWorkspace(t *testing.T) {
 	}
 	if strings.Contains(h.calls(), "destroy") {
 		t.Error("a failed reattach destroyed the workspace it was handed")
-	}
-	if h.ledger().Resources[spare].Destroyed != nil {
-		t.Error("a failed reattach retired the workspace")
 	}
 	if _, found := h.record("ws-1"); !found {
 		t.Error("a failed reattach forgot the workspace")
@@ -572,7 +552,7 @@ func TestARetryOfAnUnfinishedCreateTouchesNothing(t *testing.T) {
 	if len(h.fake.Calls()) != calls {
 		t.Errorf("the refused retry ran %v on the machine", h.fake.Calls()[calls:])
 	}
-	if h.spares()[spare].State != budget.Claimed {
+	if h.spares()[spare].State != sparestate.Claimed {
 		t.Error("the refused retry changed the claim")
 	}
 }
@@ -581,7 +561,7 @@ func TestARetriedFreshCreateLeavesTheWorkspaceItMade(t *testing.T) {
 	for name, spares := range map[string]int{"pooled": 1, "unpooled": 0} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, spares, false)
-			if err := h.session.Pool.Start("ws-1", time.Now()); err != nil {
+			if err := h.session.save(&Record{Name: "ws-1", Provider: h.session.Kind, Profile: h.session.Profile, Machine: "ws-1"}); err != nil {
 				t.Fatal(err)
 			}
 			h.machine.failAll = true
@@ -590,9 +570,6 @@ func TestARetriedFreshCreateLeavesTheWorkspaceItMade(t *testing.T) {
 			}
 			if len(h.fake.Calls()) != 0 {
 				t.Errorf("the refused retry ran %v on the machine", h.fake.Calls())
-			}
-			if resource := h.ledger().Resources["ws-1"]; resource.Destroyed != nil || len(resource.Running) != 1 {
-				t.Errorf("the refused retry changed the workspace's ledger entry: %+v", resource)
 			}
 		})
 	}
@@ -610,9 +587,6 @@ func TestAFailedCreateLeavesTheTailnetThenDiscardsWhatItMade(t *testing.T) {
 	}
 	if _, err := h.fake.Get(context.Background(), "ws-1"); !errors.Is(err, providers.ErrNotFound) {
 		t.Errorf("the machine survived the failed create: %v", err)
-	}
-	if resource := h.ledger().Resources["ws-1"]; resource == nil || resource.Destroyed == nil {
-		t.Errorf("the ledger did not retire the failed create: %+v", resource)
 	}
 	if _, found := h.record("ws-1"); found {
 		t.Error("the failed create left a record")
@@ -743,7 +717,7 @@ func TestAWorkspaceWithNoTailnetNeverTouchesTheTailnet(t *testing.T) {
 	}
 }
 
-func TestDestroyLeavesTheTailnetBeforeTheMachineAndRetiresTheLedger(t *testing.T) {
+func TestDestroyLeavesTheTailnetBeforeTheMachine(t *testing.T) {
 	h := newHarness(t, 0, true)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
@@ -769,9 +743,6 @@ func TestDestroyLeavesTheTailnetBeforeTheMachineAndRetiresTheLedger(t *testing.T
 	if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.bound() != (tailnet.Binding{}) {
 		t.Errorf("deleted %v, bound %v", deleted, h.bound())
 	}
-	if resource := h.ledger().Resources["ws-1"]; resource.Destroyed == nil {
-		t.Error("the ledger still holds the destroyed workspace")
-	}
 	if _, found := h.record("ws-1"); found {
 		t.Error("the record survived destroy")
 	}
@@ -780,7 +751,7 @@ func TestDestroyLeavesTheTailnetBeforeTheMachineAndRetiresTheLedger(t *testing.T
 	}
 }
 
-func TestSuspendStopsTheLedgerAndResumeRestartsIt(t *testing.T) {
+func TestSuspendAndResumeRetainTheWorkspace(t *testing.T) {
 	h := newHarness(t, 0, false)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
@@ -789,7 +760,7 @@ func TestSuspendStopsTheLedgerAndResumeRestartsIt(t *testing.T) {
 	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	if h.ledger().Running("ws-1") || !strings.Contains(h.calls(), "suspend ws-1") {
+	if !strings.Contains(h.calls(), "suspend ws-1") {
 		t.Error("suspend left the workspace running")
 	}
 	checkouts := h.machine.ran("ws-1", checkout)
@@ -798,8 +769,8 @@ func TestSuspendStopsTheLedgerAndResumeRestartsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !h.ledger().Running("ws-1") || h.machine.ran("ws-1", checkout) != checkouts || h.machine.ran("ws-1", prepares) < 2 {
-		t.Error("resume did not restart the ledger, or re-cloned, or skipped the prepare steps")
+	if h.machine.ran("ws-1", checkout) != checkouts || h.machine.ran("ws-1", prepares) < 2 {
+		t.Error("resume re-cloned or skipped the prepare steps")
 	}
 	if resumed := strings.Join(h.machine.scripts["ws-1"][before:], "\n"); !strings.Contains(resumed, readies) || strings.Contains(resumed, installs) || !strings.Contains(resumed, configures) {
 		t.Errorf("resume did not check the ready stamp, or reinstalled, or skipped configure: %q", resumed)
@@ -830,27 +801,13 @@ func TestAClaimFromAPoolKeptAtZeroStartsNoRefill(t *testing.T) {
 	}
 }
 
-func TestPrepareRefusesASpareTheBudgetCannotAdmit(t *testing.T) {
-	h := newHarness(t, 5, false)
-	h.session.Pool.Guard.CapUSD = 10.5
-	err := h.session.Prepare(context.Background())
-	var over *budget.OverBudgetError
-	if !errors.As(err, &over) {
-		t.Fatalf("err = %v", err)
-	}
-	if len(h.spares()) != 0 || len(h.fake.Calls()) != 0 {
-		t.Errorf("the pool holds %d spares and the provider ran %v against a $0.50 remainder", len(h.spares()), h.fake.Calls())
-	}
-}
-
-func TestAReadySpareReleasesItsReservation(t *testing.T) {
+func TestPrepareFillsMultipleSpares(t *testing.T) {
 	h := newHarness(t, 2, false)
-	h.session.Pool.Guard.CapUSD = 11.5
 	if err := h.session.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.spares()) != 2 {
-		t.Errorf("the pool holds %d spares; a ready spare accrues storage only, so the second fits once the first is ready", len(h.spares()))
+		t.Errorf("the pool holds %d spares; preparation fills its configured capacity", len(h.spares()))
 	}
 }
 
@@ -865,7 +822,7 @@ func TestAFailedPrepareDiscardsTheSpare(t *testing.T) {
 	}
 }
 
-func TestStatusReportsWorkspacesPoolAndBudget(t *testing.T) {
+func TestStatusReportsWorkspacesAndPool(t *testing.T) {
 	h := newHarness(t, 1, false)
 	spare := h.prepared()
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
@@ -880,9 +837,6 @@ func TestStatusReportsWorkspacesPoolAndBudget(t *testing.T) {
 	}
 	if status.Pool.Target != 1 || status.Pool.Pooled != 0 || status.Pool.Spares[spare] == nil || status.Pool.Fingerprint != h.session.Pool.Fingerprint {
 		t.Errorf("pool = %+v", status.Pool)
-	}
-	if status.Budget.CapUSD != 100 || status.Budget.RemainingUSD >= 90 || len(status.Resources) != 1 || !status.Resources[0].Running {
-		t.Errorf("budget = %+v, resources = %+v", status.Budget, status.Resources)
 	}
 }
 
@@ -904,22 +858,47 @@ func TestAFreshCreateNeverDestroysAMachineItDidNotMake(t *testing.T) {
 	if _, found := h.record("ws-1"); found {
 		t.Error("the refused create left a record")
 	}
-	if resource := h.ledger().Resources["ws-1"]; resource == nil || resource.Destroyed == nil {
-		t.Errorf("the ledger still runs the machine that was never made: %+v", resource)
+}
+
+func TestCreateWithAClaimedMachineNamePreservesTheOriginalWorkspace(t *testing.T) {
+	h := newHarness(t, 1, false)
+	ctx := t.Context()
+	spare := h.prepared()
+	result, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Machine != spare {
+		t.Fatalf("created %s, want claimed spare %s", result.Machine, spare)
+	}
+	calls := len(h.fake.Calls())
+	if _, err := h.session.Create(ctx, spare, Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already exists as a spare") {
+		t.Fatalf("colliding create error = %v", err)
+	}
+	if len(h.fake.Calls()) != calls {
+		t.Errorf("colliding create touched the provider: %v", h.fake.Calls()[calls:])
+	}
+	if item := h.spares()[spare]; item == nil || item.Request != "ws-1" || item.State != sparestate.Claimed {
+		t.Fatalf("original claim = %+v", item)
+	}
+	if _, found := h.record(spare); found {
+		t.Error("colliding create left a workspace record")
+	}
+	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
+		t.Fatalf("destroy original workspace: %v", err)
+	}
+	if _, err := h.fake.Get(ctx, spare); !errors.Is(err, providers.ErrNotFound) {
+		t.Fatalf("original machine survived destroy: %v", err)
 	}
 }
 
-func TestCreateRefusesANameAnotherLedgerRecorded(t *testing.T) {
+func TestCreateRefusesANameAnotherPoolRecorded(t *testing.T) {
 	h := newHarness(t, 0, true)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	other := budget.Store{Path: filepath.Join(t.TempDir(), "other.json")}
-	if err := other.Init(time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	h.session.Pool.Ledger = other
+	h.session.Pool.Store = sparestate.Store{Path: filepath.Join(t.TempDir(), "spares.json")}
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already recorded") {
 		t.Fatalf("err = %v", err)
 	}
@@ -1018,11 +997,6 @@ func TestPrepareNeverDestroysAMachineItDidNotMake(t *testing.T) {
 	if len(h.spares()) != 0 {
 		t.Errorf("the refused prepare left %v", h.spares())
 	}
-	for id, resource := range h.ledger().Resources {
-		if resource.Destroyed == nil {
-			t.Errorf("the ledger still runs %s", id)
-		}
-	}
 }
 
 type collidingCreate struct {
@@ -1092,7 +1066,7 @@ func TestDestroyRefusesAClaimAnotherProviderOrProfileHolds(t *testing.T) {
 	}
 }
 
-func TestARefusedCreateConsumesNoSpareOrBudget(t *testing.T) {
+func TestARefusedCreateConsumesNoSpare(t *testing.T) {
 	h := newHarness(t, 1, false)
 	ctx := context.Background()
 	spare := h.prepared()
@@ -1101,11 +1075,11 @@ func TestARefusedCreateConsumesNoSpareOrBudget(t *testing.T) {
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "already recorded") {
 		t.Fatalf("err = %v", err)
 	}
-	if got := h.spares()[spare]; got == nil || got.State != budget.Ready {
+	if got := h.spares()[spare]; got == nil || got.State != sparestate.Ready {
 		t.Errorf("the refused create changed the spare: %+v", got)
 	}
-	if h.ledger().Running("ws-1") || len(h.fake.Calls()) != calls {
-		t.Errorf("the refused create reserved budget or touched a machine: %v", h.fake.Calls()[calls:])
+	if len(h.fake.Calls()) != calls {
+		t.Errorf("the refused create took a spare or touched a machine: %v", h.fake.Calls()[calls:])
 	}
 }
 
@@ -1117,7 +1091,7 @@ func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testin
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "still bound") {
 		t.Fatalf("err = %v", err)
 	}
-	if len(h.fake.Calls()) != 0 || len(h.api.deletedNodes()) != 0 || h.ledger().Running("ws-1") {
+	if len(h.fake.Calls()) != 0 || len(h.api.deletedNodes()) != 0 {
 		t.Errorf("the refused create ran %v, deleted %v", h.fake.Calls(), h.api.deletedNodes())
 	}
 	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
@@ -1331,7 +1305,7 @@ func TestResumeInstallsPluginsWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T)
 	}
 }
 
-func TestDestroyKeepsAnUnlabelledMachineAndItsAccounting(t *testing.T) {
+func TestDestroyKeepsAnUnlabelledMachineAndItsRecord(t *testing.T) {
 	for name, created := range map[string]func() time.Time{
 		"made an hour earlier":    func() time.Time { return time.Now().Add(-time.Hour) },
 		"made during the attempt": time.Now,
@@ -1349,14 +1323,14 @@ func TestDestroyKeepsAnUnlabelledMachineAndItsAccounting(t *testing.T) {
 			if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
 				t.Fatalf("err = %v", err)
 			}
-			if record, found := h.record("ws-1"); !found || !record.Unverified || !h.ledger().Running("ws-1") {
+			if record, found := h.record("ws-1"); !found || !record.Unverified {
 				t.Fatalf("an ambiguous create dropped its accounting or left the record verified: %+v, %v", record, found)
 			}
 			h.session.Provider = h.provider
 			if _, err := h.session.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "never confirmed") {
 				t.Fatalf("Resume of an unverified record = %v", err)
 			}
-			if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "without a label proving this ledger made it") {
+			if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "without a label proving this workspace state made it") {
 				t.Fatalf("Destroy = %v", err)
 			}
 			if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
@@ -1365,7 +1339,7 @@ func TestDestroyKeepsAnUnlabelledMachineAndItsAccounting(t *testing.T) {
 			if strings.Contains(h.calls(), "destroy") {
 				t.Errorf("destroy called the provider: %s", h.calls())
 			}
-			if record, found := h.record("ws-1"); !found || !record.Unverified || !h.ledger().Running("ws-1") {
+			if record, found := h.record("ws-1"); !found || !record.Unverified {
 				t.Errorf("destroy released a name of unknown ownership: %+v, %v", record, found)
 			}
 		})
@@ -1394,14 +1368,14 @@ func TestDrainKeepsAnUnlabelledSpareAndStillRemovesTheRest(t *testing.T) {
 		t.Fatalf("spares = %v, unlabelled %q", h.spares(), unlabelled)
 	}
 	err := h.session.Drain(ctx, true)
-	if err == nil || !strings.Contains(err.Error(), unlabelled) || !strings.Contains(err.Error(), "without a label proving this ledger made it") {
+	if err == nil || !strings.Contains(err.Error(), unlabelled) || !strings.Contains(err.Error(), "without a label proving this workspace state made it") {
 		t.Fatalf("Drain = %v", err)
 	}
 	if _, err := h.fake.Get(ctx, unlabelled); err != nil {
 		t.Error("drain removed a spare of unknown ownership")
 	}
 	left := h.spares()
-	if len(left) != 1 || left[unlabelled] == nil || h.ledger().Resources[unlabelled].Destroyed != nil {
+	if len(left) != 1 || left[unlabelled] == nil {
 		t.Errorf("drain left %v; want only the unlabelled spare, still accounted", left)
 	}
 	for id := range h.spares() {
@@ -1437,7 +1411,7 @@ func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {
 	if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "still at the provider") {
 		t.Fatalf("Destroy = %v", err)
 	}
-	if _, found := h.record("ws-1"); !found || !h.ledger().Running("ws-1") {
+	if _, found := h.record("ws-1"); !found {
 		t.Error("a destroy that could not prove absence released the name")
 	}
 }
@@ -1449,13 +1423,13 @@ func TestDrainKeepsASpareWhoseReceiptNamesAnotherFingerprint(t *testing.T) {
 	spare := h.prepared()
 	h.session.Provider = h.provider
 	err := h.session.Drain(ctx, true)
-	if err == nil || !strings.Contains(err.Error(), "without a label proving this ledger made it") || !strings.Contains(err.Error(), h.session.Pool.Fingerprint) {
+	if err == nil || !strings.Contains(err.Error(), "without a label proving this workspace state made it") || !strings.Contains(err.Error(), h.session.Pool.Fingerprint) {
 		t.Fatalf("Drain = %v", err)
 	}
 	if _, err := h.fake.Get(ctx, spare); err != nil {
 		t.Error("drain removed a spare whose receipt names another fingerprint")
 	}
-	if left := h.spares(); left[spare] == nil || h.ledger().Resources[spare].Destroyed != nil {
+	if left := h.spares(); left[spare] == nil {
 		t.Errorf("drain left %v; want the spare still accounted", left)
 	}
 }
@@ -1484,7 +1458,7 @@ func TestDestroyOfAMachineAlreadyGoneRetiresWithoutAProviderDestroy(t *testing.T
 	if after := verbs(h.fake.Calls()[calls:]); strings.Contains(after, "destroy") {
 		t.Errorf("destroy of an absent machine ran %q at the provider", after)
 	}
-	if _, found := h.record("ws-1"); found || h.ledger().Running("ws-1") {
+	if _, found := h.record("ws-1"); found {
 		t.Error("the absent machine kept its record or accounting")
 	}
 }
@@ -1525,9 +1499,6 @@ func TestAPartialCreateKeepsItsRecordUntilDestroyVerifiesTheMachine(t *testing.T
 	if _, found := h.record("ws-1"); !found {
 		t.Fatal("the record of a machine that may exist was forgotten")
 	}
-	if resource := h.ledger().Resources["ws-1"]; resource == nil || resource.Destroyed != nil {
-		t.Fatalf("the ledger retired a machine that may be billing: %+v", resource)
-	}
 	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
 		t.Fatal("the created machine was destroyed on an unverified failure")
 	}
@@ -1539,9 +1510,6 @@ func TestAPartialCreateKeepsItsRecordUntilDestroyVerifiesTheMachine(t *testing.T
 	}
 	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
 		t.Error("destroy left the machine")
-	}
-	if resource := h.ledger().Resources["ws-1"]; resource.Destroyed == nil {
-		t.Error("destroy did not retire the ledger entry")
 	}
 	if _, found := h.record("ws-1"); found {
 		t.Error("destroy kept the record")
@@ -1559,11 +1527,11 @@ func (c *createdThenFailed) Create(ctx context.Context, spec providers.Spec) (pr
 	return providers.Machine{}, errors.New("configure-ssh: the provider api timed out")
 }
 
-func TestPrepareKeepsAReservationWhoseCreateOutcomeIsUnknownUntilDrainSettlesIt(t *testing.T) {
+func TestPrepareKeepsUnknownCreateUntilDrainSettlesIt(t *testing.T) {
 	h := newHarness(t, 1, false)
 	ctx := context.Background()
 	h.session.Provider = &createdThenFailed{Provider: h.provider}
-	if err := h.session.Prepare(ctx); err == nil || !strings.Contains(err.Error(), "reservation is kept") {
+	if err := h.session.Prepare(ctx); err == nil || !strings.Contains(err.Error(), "preparation record is kept") {
 		t.Fatalf("err = %v", err)
 	}
 	spares := h.spares()
@@ -1573,14 +1541,14 @@ func TestPrepareKeepsAReservationWhoseCreateOutcomeIsUnknownUntilDrainSettlesIt(
 	var name string
 	for id, spare := range spares {
 		name = id
-		if spare.State != budget.Preparing {
+		if spare.State != sparestate.Preparing {
 			t.Errorf("spare = %+v", spare)
 		}
 	}
 	if _, err := h.fake.Get(ctx, name); err != nil {
 		t.Fatal("the machine that may exist was destroyed on an unverified failure")
 	}
-	if err := h.session.Pool.Ledger.UpdateSpares(func(_ *budget.Ledger, spares budget.Spares) error {
+	if err := h.session.Pool.Store.Update(func(spares sparestate.Spares) error {
 		spares[name].Preparer = 1 << 30
 		return nil
 	}); err != nil {
@@ -1593,8 +1561,8 @@ func TestPrepareKeepsAReservationWhoseCreateOutcomeIsUnknownUntilDrainSettlesIt(
 	if _, err := h.fake.Get(ctx, name); !errors.Is(err, providers.ErrNotFound) {
 		t.Error("drain left the machine")
 	}
-	if len(h.spares()) != 0 || h.ledger().Resources[name].Destroyed == nil {
-		t.Error("drain did not retire the reservation")
+	if len(h.spares()) != 0 {
+		t.Error("drain did not remove the preparation record")
 	}
 }
 

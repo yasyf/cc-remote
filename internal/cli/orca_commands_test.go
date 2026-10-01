@@ -44,20 +44,17 @@ inventory: ./inventory.yaml
 providers:
   sprites:
     org: example
-    rate: { hourlyUSD: 1 }
   namespace:
     platform: linux/amd64
     volumeSizeGB: 125
     idleTimeout: 30m
     callTimeout: 60s
     readyTimeout: 10m
-    hourlyUSD: { l: 0.96 }
 workspace_dirs:
   sprites: /home/sprite
   namespace: /workspaces
 profiles:
 %s
-budget: { ledger: default, cap_usd: 10, trial_hours: 1 }
 `
 
 func writeConfig(t *testing.T, profiles string) string {

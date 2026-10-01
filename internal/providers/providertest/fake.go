@@ -14,7 +14,6 @@ import (
 
 type Fake struct {
 	Facts  providers.Traits
-	Rates  providers.Rate
 	Handle func(id string, cmd []string, stdin []byte) providers.Result
 	Now    func() time.Time
 
@@ -39,7 +38,7 @@ func (f *Fake) Traits() providers.Traits { return f.Facts }
 
 func (f *Fake) Check(context.Context) error { return nil }
 
-func (f *Fake) Rate(providers.Spec) (providers.Rate, error) { return f.Rates, nil }
+func (f *Fake) ValidateSpec(providers.Spec) error { return nil }
 
 func (f *Fake) Create(_ context.Context, spec providers.Spec) (providers.Machine, error) {
 	f.mu.Lock()

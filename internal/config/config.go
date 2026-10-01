@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,7 +19,6 @@ const (
 	EnvPath                = "CC_REMOTE_CONFIG"
 	DefaultTailnetAPI      = "https://api.tailscale.com/api/v2"
 	DefaultKeychainService = "cc-remote-tailnet"
-	defaultLedger          = "default"
 	dirName                = "cc-remote"
 	fileName               = "config.yaml"
 )
@@ -44,7 +42,6 @@ type Config struct {
 	Spares     map[string]map[string]int `yaml:"spares"`
 	Inventory  string                    `yaml:"inventory"`
 	Forwards   []Forward                 `yaml:"forwards"`
-	Budget     Budget                    `yaml:"budget"`
 	Tailnet    *Tailnet                  `yaml:"tailnet"`
 	Git        Git                       `yaml:"git"`
 	Identity   Identity                  `yaml:"identity"`
@@ -71,13 +68,6 @@ type Forward struct {
 	Env   string `yaml:"env"`
 }
 
-type Budget struct {
-	Ledger     string  `yaml:"ledger"`
-	CapUSD     float64 `yaml:"cap_usd"`
-	ReserveUSD float64 `yaml:"reserve_usd"`
-	TrialHours float64 `yaml:"trial_hours"`
-}
-
 type Tailnet struct {
 	Tag             string `yaml:"tag"`
 	KeychainService string `yaml:"keychain_service"`
@@ -94,7 +84,6 @@ type Identity struct {
 
 var (
 	envName    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
-	ledgerName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	Identifier = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,19}$`)
 )
 
@@ -144,9 +133,6 @@ func Parse(raw []byte) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	if c.Budget.Ledger == "" {
-		c.Budget.Ledger = defaultLedger
-	}
 	if c.Tailnet != nil {
 		if c.Tailnet.API == "" {
 			c.Tailnet.API = DefaultTailnetAPI
@@ -227,9 +213,6 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	if !ledgerName.MatchString(c.Budget.Ledger) || !positive(c.Budget.CapUSD) || !positive(c.Budget.TrialHours) || (c.Budget.ReserveUSD != 0 && !positive(c.Budget.ReserveUSD)) {
-		return errors.New("budget needs a lowercase ledger name, a finite positive cap_usd, a finite positive trial_hours and a finite non-negative reserve_usd")
-	}
 	if c.Tailnet != nil && !strings.HasPrefix(c.Tailnet.Tag, "tag:") {
 		return fmt.Errorf("tailnet.tag %q must name the tag workspace nodes join under, like tag:cc-remote", c.Tailnet.Tag)
 	}
@@ -246,10 +229,6 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
-}
-
-func positive(value float64) bool {
-	return value > 0 && !math.IsInf(value, 1)
 }
 
 func (c *Config) RawProviderSection(kind string) ([]byte, error) {

@@ -86,23 +86,6 @@ into the repo instead, pass `--binary` with a `./`-prefixed path, such as
 `--binary ./tools/cc-remote/bin/cc-remote`. The recipes carry that path
 unchanged, and `wait` needs the same `--binary`.
 
-cc-remote refuses every create until the config's budget ledger exists, and it
-never starts one on its own. Give it the ledger once on the Mac, with the same
-`--config` the recipes use:
-
-- For a budget that continues earlier spend, import the prior ledger, which
-  must be in cc-remote's ledger format. The import keeps its history and
-  records where it came from:
-
-  ```sh
-  cc-remote ledger import <prior-ledger.json>
-  ```
-
-- Run `cc-remote ledger init` only for a new budget with no earlier spend.
-
-If the earlier spend is recorded in any other form, stop and ask the owner.
-Never start an empty ledger in its place.
-
 cc-remote writes each workspace's SSH settings as a `Host` block in
 `<state>/ssh/<workspace>.ssh`. `<state>` is the config's `state_dir`, or
 `$XDG_STATE_HOME/cc-remote` when it is unset, where `$XDG_STATE_HOME` defaults

@@ -11,11 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/providers"
+	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
@@ -42,7 +41,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		{"DrainDestroysUnclaimedSpares", drainDestroysUnclaimedSpares},
 		{"TokenNeverReachesAScriptOrDisk", tokenNeverReachesAScriptOrDisk},
 		{"VerifyReportsEveryCheck", verifyReportsEveryCheck},
-		{"CreateRefusesWithoutALedger", createRefusesWithoutALedger},
+		{"CreateWorksFromEmptyState", createWorksFromEmptyState},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -103,10 +102,6 @@ spares:
 inventory: ./inventory.yaml
 forwards:
   - { label: web, env: WEB_PORT }
-budget:
-  cap_usd: 1000
-  reserve_usd: 10
-  trial_hours: 1
 `, GitRepository(t), h.Kind, t.TempDir(), h.Kind, h.Kind, h.Root, h.Kind, h.Machine.Image, h.Machine.Size, h.Machine.Region, h.Kind, h.Spares)))
 	if err != nil {
 		t.Fatal(err)
@@ -124,9 +119,6 @@ func Open(t *testing.T, h Harness) *workspace.Session {
 	s.Token = func(context.Context) (string, error) { return Token, nil }
 	s.Stderr = &testWriter{t: t}
 	s.Log = slog.New(slog.DiscardHandler)
-	if err := s.Pool.Ledger.Init(time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	return s
 }
 
@@ -139,22 +131,12 @@ func (w *testWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func ledger(t *testing.T, s *workspace.Session) *budget.Ledger {
+func spares(t *testing.T, s *workspace.Session) sparestate.Spares {
 	t.Helper()
-	ledger, err := s.Pool.Ledger.Read()
+	spares, err := s.Pool.Store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ledger
-}
-
-func spares(t *testing.T, s *workspace.Session) budget.Spares {
-	t.Helper()
-	spares, err := s.Pool.Ledger.ReadSpares()
-	if err != nil {
-		t.Fatal(err)
-	}
-	spares.DropRetired(ledger(t, s))
 	return spares
 }
 
@@ -187,21 +169,15 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != "ws-1" || rec.Source.Ref != "main" || rec.Claimed || len(rec.Forwards) != 1 {
 		t.Errorf("record = %+v, found %v", rec, found)
 	}
-	if !ledger(t, s).Running("ws-1") {
-		t.Error("the ledger does not run the created workspace")
-	}
 	if err := s.Suspend(ctx, "ws-1"); err != nil {
 		t.Fatalf("Suspend = %v", err)
-	}
-	if ledger(t, s).Running("ws-1") {
-		t.Error("the ledger still runs the suspended workspace")
 	}
 	resumed, err := s.Resume(ctx, "ws-1")
 	if err != nil {
 		t.Fatalf("Resume = %v", err)
 	}
-	if resumed.Forwards[0].Port != result.Forwards[0].Port || !ledger(t, s).Running("ws-1") {
-		t.Errorf("resume allocated %+v over %+v, running %v", resumed.Forwards, result.Forwards, ledger(t, s).Running("ws-1"))
+	if resumed.Forwards[0].Port != result.Forwards[0].Port {
+		t.Errorf("resume allocated %+v over %+v", resumed.Forwards, result.Forwards)
 	}
 	if err := s.Destroy(ctx, "ws-1"); err != nil {
 		t.Fatalf("Destroy = %v", err)
@@ -215,9 +191,6 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if _, err := os.Stat(result.SSH.Config); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the destroyed workspace still has an ssh fragment")
 	}
-	if resource := ledger(t, s).Resources["ws-1"]; resource == nil || resource.Destroyed == nil {
-		t.Errorf("the ledger did not retire the workspace: %+v", resource)
-	}
 	if _, err := s.Resume(ctx, "ws-1"); err == nil {
 		t.Error("a destroyed workspace resumed")
 	}
@@ -226,20 +199,24 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	}
 }
 
-func createRefusesWithoutALedger(t *testing.T, h Harness, _ *workspace.Session) {
+func createWorksFromEmptyState(t *testing.T, h Harness, _ *workspace.Session) {
 	s, err := workspace.Open(Config(t, h), h.Provider, h.Kind, "lean", h.Platform)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Log = slog.New(slog.DiscardHandler)
-	if _, err := s.Create(t.Context(), "ws-5", workspace.Source{Ref: "main"}); !errors.Is(err, budget.ErrNoLedger) {
-		t.Errorf("a create with no ledger: %v", err)
+	s.Token = func(context.Context) (string, error) { return Token, nil }
+	if _, err := s.Create(t.Context(), "ws-5", workspace.Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
 	}
-	if err := s.Prepare(t.Context()); !errors.Is(err, budget.ErrNoLedger) {
-		t.Errorf("a prepare with no ledger: %v", err)
+	if err := s.Prepare(t.Context()); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := h.Provider.Get(t.Context(), "ws-5"); !errors.Is(err, providers.ErrNotFound) {
-		t.Error("a machine was created without a ledger")
+	if _, err := h.Provider.Get(t.Context(), "ws-5"); err != nil {
+		t.Fatal(err)
+	}
+	if len(spares(t, s)) != h.Spares {
+		t.Fatalf("spares = %v", spares(t, s))
 	}
 }
 
@@ -272,14 +249,11 @@ func prepareFillsThePoolAndCreateClaims(t *testing.T, h Harness, s *workspace.Se
 		t.Fatalf("the pool holds %d spares, want %d", len(pooled), h.Spares)
 	}
 	for id, spare := range pooled {
-		if spare.State != budget.Ready || spare.Fingerprint != s.Pool.Fingerprint || !strings.HasPrefix(id, "cc-remote-spare-lean-") {
+		if spare.State != sparestate.Ready || spare.Fingerprint != s.Pool.Fingerprint || !strings.HasPrefix(id, "cc-remote-spare-lean-") {
 			t.Errorf("spare %s = %+v", id, spare)
 		}
 		if machine, err := h.Provider.Get(ctx, id); err != nil || machine.State != providers.StateSuspended || machine.Labels[workspace.LabelSpare] != s.Pool.Fingerprint {
 			t.Errorf("spare machine %s = %+v, %v", id, machine, err)
-		}
-		if ledger(t, s).Running(id) {
-			t.Errorf("a ready spare %s still accrues compute", id)
 		}
 	}
 	refills := 0
@@ -294,7 +268,7 @@ func prepareFillsThePoolAndCreateClaims(t *testing.T, h Harness, s *workspace.Se
 	if refills != 1 {
 		t.Errorf("a claim started %d refills", refills)
 	}
-	if spare := spares(t, s)[result.Machine]; spare == nil || spare.State != budget.Claimed || spare.Request != "ws-3" || spare.ActivatedAt == nil {
+	if spare := spares(t, s)[result.Machine]; spare == nil || spare.State != sparestate.Claimed || spare.Request != "ws-3" || spare.ActivatedAt == nil {
 		t.Errorf("the claimed spare is %+v", spare)
 	}
 	if rec, found := record(t, s, "ws-3"); !found || !rec.Claimed || rec.Machine != result.Machine {
@@ -343,11 +317,7 @@ func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Sessio
 	if !seen.stdin {
 		t.Error("no command read stdin, so the token reached the machine some other way")
 	}
-	status, err := s.Status()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{s.State.Workspace("ws-4"), status.Budget.Ledger} {
+	for _, path := range []string{s.State.Workspace("ws-4"), s.State.Spares()} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -360,7 +330,7 @@ func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Sessio
 
 func verifyReportsEveryCheck(t *testing.T, _ Harness, s *workspace.Session) {
 	checks := s.Verify(t.Context())
-	for _, name := range []string{"config", "state", "ledger", "provider", "ssh"} {
+	for _, name := range []string{"config", "state", "provider", "ssh"} {
 		if checks[name] != "ok" {
 			t.Errorf("check %s = %q", name, checks[name])
 		}

@@ -237,7 +237,7 @@ func newDestroyCmd() *cobra.Command {
 	var connection string
 	cmd := &cobra.Command{
 		Use:   "destroy [name]",
-		Short: "Leave the tailnet, destroy the machine, and retire the ledger entry",
+		Short: "Leave the tailnet, destroy the machine, and remove its workspace record",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := orcaTarget(cmd, args, connection)
@@ -261,7 +261,7 @@ func newPrepareCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "prepare",
 		Aliases: []string{"warm"},
-		Short:   "Prepare spares until the pool is full or the budget refuses one",
+		Short:   "Prepare suspended spares until the pool is full",
 		Long: `prepare creates machines with the profile's tools, a shallow checkout of the
 config ref and its warm steps, checks that each holds no credential, suspends
 it, and marks it ready. A spare never joins the tailnet; create enrolls it at
@@ -303,7 +303,7 @@ func newStatusCmd() *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Print workspaces, the spare pool and the budget as JSON",
+		Short: "Print workspaces and the spare pool as JSON",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			session, err := flags.open()

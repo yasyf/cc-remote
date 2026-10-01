@@ -33,7 +33,7 @@ change the provider lifecycle.
 
 | Layer | Responsibility |
 | --- | --- |
-| Core | Lifecycle, checkout, tool readiness, prepared capacity, identity, ownership, and spending admission |
+| Core | Lifecycle, checkout, tool readiness, prepared capacity, identity, and ownership |
 | Backend | Provider creation, execution, transport, wake, suspension or idle behavior, and deletion |
 | Frontend | Client request mapping, result rendering, workspace registration, and client lifecycle events |
 | Configuration | Repository settings, tool inventory, provider choices, and optional setup commands |
@@ -79,10 +79,10 @@ distinguishes a node it enrolled from one it reattached. A failed retry preserve
 the existing node, and the resource lock covers reattachment, result delivery,
 and any enrollment cleanup.
 
-State belongs to `cc-remote`. Explicit state and spending imports preserve
-existing ownership and accounting during a cutover; starting with an empty
-ledger does not erase previous spending. Agent environments use their own images
-and pools, independent of build infrastructure.
+State belongs to `cc-remote` and records machine ownership and exclusive claims.
+A repeated request reattaches its successfully activated spare; another request
+cannot claim it. Agent environments use their own images and pools, independent
+of build infrastructure.
 
 ## Measure the complete startup path
 

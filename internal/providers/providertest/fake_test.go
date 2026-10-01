@@ -13,7 +13,6 @@ func TestFakeSatisfiesTheContract(t *testing.T) {
 		return Harness{
 			Provider: &Fake{
 				Facts: providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv},
-				Rates: providers.Rate{HourlyUSD: 1},
 				Handle: func(_ string, cmd []string, stdin []byte) providers.Result {
 					result, err := providers.OSRunner{}.Run(t.Context(), providers.Command{Name: cmd[0], Args: cmd[1:], Stdin: bytes.NewReader(stdin)})
 					if err != nil {
