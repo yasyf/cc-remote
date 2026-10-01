@@ -304,12 +304,12 @@ func TestDestroyKeepsTheReceiptUntilTheDevboxIsGone(t *testing.T) {
 	}
 }
 
-func TestCreateLosingARaceReportsErrExists(t *testing.T) {
+func TestCreateLosingARaceIsAmbiguous(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true
 	_, err := p.Create(t.Context(), spec("alpha", nil))
-	if !errors.Is(err, providers.ErrExists) {
-		t.Errorf("Create = %v, want ErrExists", err)
+	if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "code = AlreadyExists") {
+		t.Errorf("Create = %v, want ErrAmbiguous carrying the CLI conflict, never ErrExists", err)
 	}
 }
 
@@ -318,8 +318,14 @@ func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
 		"create": func(f *fakeNamespace) {
 			f.createFails = "rpc error: code = DeadlineExceeded desc = waiting for the devbox to boot"
 		},
+		"create naming the requested devbox": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = AlreadyExists desc = devbox alpha already exists"
+		},
 		"create naming another devbox": func(f *fakeNamespace) {
 			f.createFails = "rpc error: code = AlreadyExists desc = devbox alpha-2 already exists"
+		},
+		"create naming another resource of the requested devbox": func(f *fakeNamespace) {
+			f.createFails = "rpc error: code = AlreadyExists desc = volume already exists while creating devbox alpha"
 		},
 		"create with existence text": func(f *fakeNamespace) {
 			f.createFails = "rpc error: code = DeadlineExceeded desc = devbox alpha: file already exists"

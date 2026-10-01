@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -125,9 +124,6 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		return providers.Machine{}, err
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "create", "-o", p.Org, "--skip-console", spec.Name)); err != nil {
-		if providers.Reports(err, regexp.MustCompile(`(^|`+providers.Boundary+`)sprite `+providers.Named(spec.Name)+` already exists`)) {
-			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrExists, err)
-		}
 		if _, found := p.Get(ctx, spec.Name); found == nil {
 			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
 		}

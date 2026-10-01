@@ -10,7 +10,6 @@ import (
 	"maps"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -145,9 +144,6 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		args = append(args, "--site", spec.Region)
 	}
 	if _, err := p.devboxUnbounded(ctx, args...); err != nil {
-		if providers.Reports(err, regexp.MustCompile(`code = AlreadyExists desc = .*(^|`+providers.Boundary+`)`+providers.Named(spec.Name)+`($|`+providers.Boundary+`)`)) {
-			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrExists, err)
-		}
 		if _, found := p.Get(ctx, spec.Name); found == nil {
 			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
 		}

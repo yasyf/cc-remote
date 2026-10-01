@@ -298,17 +298,19 @@ func TestDestroyKeepsTheReceiptUntilTheSpriteIsGone(t *testing.T) {
 	}
 }
 
-func TestCreateLosingARaceReportsErrExists(t *testing.T) {
+func TestCreateLosingARaceIsAmbiguous(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true
-	if _, err := p.Create(t.Context(), spec("alpha", nil)); !errors.Is(err, providers.ErrExists) {
-		t.Errorf("Create = %v, want ErrExists", err)
+	_, err := p.Create(t.Context(), spec("alpha", nil))
+	if !errors.Is(err, providers.ErrAmbiguous) || errors.Is(err, providers.ErrExists) || !strings.Contains(err.Error(), "sprite alpha already exists") {
+		t.Errorf("Create = %v, want ErrAmbiguous carrying the CLI conflict, never ErrExists", err)
 	}
 }
 
 func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
 	for name, stderr := range map[string]string{
 		"a timeout":             "error: waiting for the sprite console timed out",
+		"the requested sprite":  "error: sprite alpha already exists",
 		"another sprite":        "error: sprite alpha-2 already exists",
 		"an unrelated resource": "error: creating the console socket: file already exists",
 		"the name elsewhere":    "creating sprite alpha\nerror: volume already exists",
