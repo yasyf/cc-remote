@@ -62,8 +62,8 @@ func New(config Config) (*Provider, error) {
 
 func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
-		TailnetMode:      providers.TailnetUserspace,
-		Supervisor:       providers.SupervisorSetsid,
+		TailnetMode: providers.TailnetUserspace,
+		Supervisor:  providers.SupervisorSetsid,
 	}
 }
 

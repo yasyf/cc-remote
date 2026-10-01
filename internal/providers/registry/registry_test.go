@@ -83,8 +83,8 @@ func TestNewNamespace(t *testing.T) {
 		t.Errorf("config = %+v, want the default CLI, ssh dir under home, and the host state dir", got)
 	}
 	wantTraits := providers.Traits{
-		TailnetMode:      providers.TailnetUserspace,
-		Supervisor:       providers.SupervisorSetsid,
+		TailnetMode: providers.TailnetUserspace,
+		Supervisor:  providers.SupervisorSetsid,
 	}
 	if traits := provider.Traits(); traits != wantTraits {
 		t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)

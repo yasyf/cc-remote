@@ -31,26 +31,26 @@ const (
 )
 
 type Config struct {
-	Repository string                    `yaml:"repository"`
-	Ref        string                    `yaml:"ref"`
-	Provider   string                    `yaml:"provider"`
-	Profile    string                    `yaml:"profile"`
-	StateDir   string                    `yaml:"state_dir"`
-	Providers  map[string]yaml.Node      `yaml:"providers"`
-	Roots      map[string]string         `yaml:"workspace_dirs"`
-	Profiles   map[string]Profile        `yaml:"profiles"`
-	Inventory  string                    `yaml:"inventory"`
-	Forwards   []Forward                 `yaml:"forwards"`
-	Tailnet    *Tailnet                  `yaml:"tailnet"`
-	Git        Git                       `yaml:"git"`
+	Repository string               `yaml:"repository"`
+	Ref        string               `yaml:"ref"`
+	Provider   string               `yaml:"provider"`
+	Profile    string               `yaml:"profile"`
+	StateDir   string               `yaml:"state_dir"`
+	Providers  map[string]yaml.Node `yaml:"providers"`
+	Roots      map[string]string    `yaml:"workspace_dirs"`
+	Profiles   map[string]Profile   `yaml:"profiles"`
+	Inventory  string               `yaml:"inventory"`
+	Forwards   []Forward            `yaml:"forwards"`
+	Tailnet    *Tailnet             `yaml:"tailnet"`
+	Git        Git                  `yaml:"git"`
 
 	Path string `yaml:"-"`
 }
 
 type Profile struct {
-	Checkout   Checkout           `yaml:"checkout"`
-	Prepare    []string           `yaml:"prepare"`
-	Machine    map[string]Machine `yaml:"machine"`
+	Checkout Checkout           `yaml:"checkout"`
+	Prepare  []string           `yaml:"prepare"`
+	Machine  map[string]Machine `yaml:"machine"`
 }
 
 type Machine struct {

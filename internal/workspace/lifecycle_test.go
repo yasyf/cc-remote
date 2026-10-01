@@ -122,12 +122,6 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 	return providers.Result{}
 }
 
-func (m *scripted) lose(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.ready, id)
-}
-
 func (m *scripted) ran(id, fragment string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

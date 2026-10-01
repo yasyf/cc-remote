@@ -22,7 +22,7 @@ type LabelledEnv struct {
 }
 
 type Platform struct {
-	Daemon           tailnet.Daemon
+	Daemon tailnet.Daemon
 }
 
 type Record struct {

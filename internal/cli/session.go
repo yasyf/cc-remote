@@ -75,7 +75,7 @@ func openProvider(cfg *config.Config, kind string) (providers.Provider, error) {
 
 func platform(traits providers.Traits) workspace.Platform {
 	return workspace.Platform{
-		Daemon:           tailnet.Daemon{Mode: tailnet.Mode(traits.TailnetMode), Supervisor: tailnet.Supervisor(traits.Supervisor)},
+		Daemon: tailnet.Daemon{Mode: tailnet.Mode(traits.TailnetMode), Supervisor: tailnet.Supervisor(traits.Supervisor)},
 	}
 }
 
