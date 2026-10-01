@@ -17,16 +17,14 @@ func newProvider(t *testing.T) (*Provider, *fakeNamespace) {
 	t.Helper()
 	dir := t.TempDir()
 	p, err := New(Config{
-		CLI:               DefaultCLI,
-		SSHDir:            DefaultSSHDir(dir),
-		StateDir:          filepath.Join(dir, "state"),
-		Platform:          "linux/amd64",
-		VolumeSizeGB:      125,
-		IdleTimeout:       30 * time.Minute,
-		HourlyUSD:         map[string]float64{"l": 0.96, "xl": 1.92},
-		StorageGBMonthUSD: 0.2,
-		CallTimeout:       time.Minute,
-		ReadyTimeout:      time.Minute,
+		CLI:          DefaultCLI,
+		SSHDir:       DefaultSSHDir(dir),
+		StateDir:     filepath.Join(dir, "state"),
+		Platform:     "linux/amd64",
+		VolumeSizeGB: 125,
+		IdleTimeout:  30 * time.Minute,
+		CallTimeout:  time.Minute,
+		ReadyTimeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,31 +93,29 @@ func TestCreateNeedsAnImage(t *testing.T) {
 	}
 }
 
-func TestRate(t *testing.T) {
+func TestValidateSpec(t *testing.T) {
 	p, _ := newProvider(t)
 	tests := []struct {
-		name    string
-		spec    providers.Spec
-		want    providers.Rate
-		wantErr string
+		name string
+		spec providers.Spec
+		want string
 	}{
-		{"lean size", spec("a", nil), providers.Rate{HourlyUSD: 0.96, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
-		{"full stack size", providers.Spec{Profile: "stack", Size: "xl", Image: "cc-remote-linux"}, providers.Rate{HourlyUSD: 1.92, StorageGB: 125, StorageGBMonthUSD: 0.2}, ""},
-		{"no size", providers.Spec{Profile: "agents"}, providers.Rate{}, "a namespace spec needs a size"},
-		{"no image", providers.Spec{Profile: "agents", Size: "l"}, providers.Rate{}, "a namespace spec needs an image"},
-		{"unpriced size", providers.Spec{Profile: "agents", Size: "s"}, providers.Rate{}, `namespace has no hourly rate for size "s"`},
+		{"lean", spec("a", nil), ""},
+		{"full", providers.Spec{Profile: "stack", Size: "xl", Image: "cc-remote-linux"}, ""},
+		{"no size", providers.Spec{Profile: "agents"}, "a namespace spec needs a size"},
+		{"no image", providers.Spec{Profile: "agents", Size: "l"}, "a namespace spec needs an image"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := p.Rate(tt.spec)
-			if tt.wantErr != "" {
-				if err == nil || err.Error() != tt.wantErr {
-					t.Errorf("Rate error = %v, want %q", err, tt.wantErr)
+			err := p.ValidateSpec(tt.spec)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatal(err)
 				}
 				return
 			}
-			if err != nil || got != tt.want {
-				t.Errorf("Rate = %+v, %v; want %+v", got, err, tt.want)
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("ValidateSpec = %v, want %q", err, tt.want)
 			}
 		})
 	}

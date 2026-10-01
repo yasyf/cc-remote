@@ -44,7 +44,6 @@ func newProvider(t *testing.T) (*Provider, *fakeSprites) {
 	p, err := New(Config{
 		Org:      "acme",
 		CLI:      cli,
-		Rate:     providers.Rate{HourlyUSD: 1.26, StorageGB: 50, StorageGBMonthUSD: 0.5},
 		StateDir: filepath.Join(dir, "state"),
 		Helper:   helper,
 	})
@@ -81,15 +80,15 @@ func TestSpecAdmission(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rate, err := p.Rate(tt.spec)
+			err := p.ValidateSpec(tt.spec)
 			if tt.want == "" {
-				if err != nil || rate != p.Config.Rate {
-					t.Errorf("Rate = %+v, %v; want %+v", rate, err, p.Config.Rate)
+				if err != nil {
+					t.Errorf("ValidateSpec = %v", err)
 				}
 				return
 			}
 			if err == nil || err.Error() != tt.want {
-				t.Errorf("Rate error = %v, want %q", err, tt.want)
+				t.Errorf("ValidateSpec error = %v, want %q", err, tt.want)
 			}
 			if _, err := p.Create(t.Context(), tt.spec); err == nil || err.Error() != tt.want {
 				t.Errorf("Create error = %v, want %q", err, tt.want)

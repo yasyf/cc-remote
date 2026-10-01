@@ -21,7 +21,6 @@ func spritesSection(cli string) func(any) error {
 	return func(into any) error {
 		config := into.(*sprites.Config)
 		config.Org = "acme"
-		config.Rate = providers.Rate{HourlyUSD: 1.26, StorageGB: 50, StorageGBMonthUSD: 0.5}
 		if cli != "" {
 			config.CLI = cli
 		}
@@ -34,7 +33,6 @@ func namespaceSection(into any) error {
 	config.Platform = "linux/amd64"
 	config.VolumeSizeGB = 125
 	config.IdleTimeout = 30 * time.Minute
-	config.HourlyUSD = map[string]float64{"l": 0.96}
 	config.CallTimeout = time.Minute
 	config.ReadyTimeout = 10 * time.Minute
 	return nil
@@ -60,7 +58,6 @@ func TestNewSprites(t *testing.T) {
 			want := sprites.Config{
 				Org:      "acme",
 				CLI:      tt.wantCLI,
-				Rate:     providers.Rate{HourlyUSD: 1.26, StorageGB: 50, StorageGBMonthUSD: 0.5},
 				StateDir: h.StateDir,
 				Helper:   h.Helper,
 			}
@@ -107,13 +104,6 @@ func TestNewRejects(t *testing.T) {
 		{"unknown kind", "fly", spritesSection(""), `unknown provider kind "fly"; want sprites or namespace`},
 		{"malformed section", sprites.Name, func(any) error { return malformed }, "providers.sprites: field orgg not found"},
 		{"sprites without an org", sprites.Name, func(any) error { return nil }, "providers.sprites: sprites needs an org; set it in the sprites config"},
-		{"namespace with a free size", namespace.Name, func(into any) error {
-			if err := namespaceSection(into); err != nil {
-				return err
-			}
-			into.(*namespace.Config).HourlyUSD["m"] = 0
-			return nil
-		}, "providers.namespace: namespace needs a positive hourlyUSD for each size and a non-negative storageGBMonthUSD"},
 		{"namespace without timeouts", namespace.Name, func(into any) error {
 			if err := namespaceSection(into); err != nil {
 				return err

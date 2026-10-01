@@ -1,4 +1,4 @@
-package budget
+package spare
 
 import (
 	"fmt"
@@ -9,18 +9,20 @@ import (
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
-type SpareState string
+type State string
 
 const (
-	Preparing SpareState = "preparing"
-	Ready     SpareState = "ready"
-	Claimed   SpareState = "claimed"
-	Draining  SpareState = "draining"
+	Preparing State = "preparing"
+	Ready     State = "ready"
+	Claimed   State = "claimed"
+	Draining  State = "draining"
 )
 
 type Spare struct {
+	Provider    string     `json:"provider"`
+	Profile     string     `json:"profile"`
 	Fingerprint string     `json:"fingerprint"`
-	State       SpareState `json:"state"`
+	State       State      `json:"state"`
 	Preparer    int        `json:"preparerPid,omitempty"`
 	Request     string     `json:"request,omitempty"`
 	ReadyAt     *time.Time `json:"readyAt,omitempty"`
@@ -30,53 +32,30 @@ type Spare struct {
 
 type Spares map[string]*Spare
 
-func (s Store) SparesPath() string {
-	return strings.TrimSuffix(s.Path, ".json") + ".spares.json"
-}
+type Store struct{ Path string }
 
-func (s Store) ReadSpares() (Spares, error) {
+func (s Store) Read() (Spares, error) {
 	spares := Spares{}
-	if _, err := state.Load(s.SparesPath(), &spares); err != nil {
+	if _, err := state.Load(s.Path, &spares); err != nil {
 		return nil, err
 	}
 	return spares, nil
 }
 
-func (s Store) UpdateSpares(change func(*Ledger, Spares) error) error {
-	unlockSpares, err := state.Lock(s.SparesPath() + ".lock")
+func (s Store) Update(change func(Spares) error) error {
+	unlock, err := state.Lock(s.Path + ".lock")
 	if err != nil {
 		return err
 	}
-	defer unlockSpares()
-	unlockLedger, err := state.Lock(s.Path + ".lock")
+	defer unlock()
+	spares, err := s.Read()
 	if err != nil {
 		return err
 	}
-	defer unlockLedger()
-	spares, err := s.ReadSpares()
-	if err != nil {
+	if err := change(spares); err != nil {
 		return err
 	}
-	ledger, err := s.Read()
-	if err != nil {
-		return err
-	}
-	spares.DropRetired(ledger)
-	if err := change(ledger, spares); err != nil {
-		return err
-	}
-	if err := state.Save(s.SparesPath(), spares); err != nil {
-		return err
-	}
-	return state.Save(s.Path, ledger)
-}
-
-func (sp Spares) DropRetired(l *Ledger) {
-	for id := range sp {
-		if resource, ok := l.Resources[id]; !ok || resource.Destroyed != nil {
-			delete(sp, id)
-		}
-	}
+	return state.Save(s.Path, spares)
 }
 
 func (sp Spares) Pooled(fingerprint string) int {
@@ -89,41 +68,33 @@ func (sp Spares) Pooled(fingerprint string) int {
 	return count
 }
 
-func (sp Spares) Prepare(l *Ledger, id, provider, profile, fingerprint string, rate Rate, reserved float64, preparer int, now time.Time) error {
-	if _, ok := l.Resources[id]; ok {
-		return fmt.Errorf("the ledger already has %s", id)
+func (sp Spares) Prepare(id, provider, profile, fingerprint string, preparer int) error {
+	if _, ok := sp[id]; ok {
+		return fmt.Errorf("%s is already recorded as a spare", id)
 	}
-	if err := l.Start(id, provider, profile, rate, reserved, now); err != nil {
-		return err
-	}
-	sp[id] = &Spare{Fingerprint: fingerprint, State: Preparing, Preparer: preparer}
+	sp[id] = &Spare{Provider: provider, Profile: profile, Fingerprint: fingerprint, State: Preparing, Preparer: preparer}
 	return nil
 }
 
-func (sp Spares) MarkReady(l *Ledger, id string, now time.Time) error {
+func (sp Spares) MarkReady(id string, now time.Time) error {
 	spare, ok := sp[id]
 	if !ok || spare.State != Preparing {
 		return fmt.Errorf("%s is not a spare being prepared", id)
 	}
 	spare.State, spare.ReadyAt = Ready, &now
-	return l.Stop(id, now)
+	return nil
 }
 
-func (s Store) ClaimedFor(request string) (string, *Resource, error) {
-	ledger, err := s.Read()
+func (s Store) ClaimedFor(request string) (string, *Spare, error) {
+	spares, err := s.Read()
 	if err != nil {
 		return "", nil, err
 	}
-	spares, err := s.ReadSpares()
-	if err != nil {
-		return "", nil, err
-	}
-	spares.DropRetired(ledger)
 	id, ok := spares.HeldBy(request)
 	if !ok {
 		return "", nil, nil
 	}
-	return id, ledger.Resources[id], nil
+	return id, spares[id], nil
 }
 
 func (sp Spares) HeldBy(request string) (string, bool) {

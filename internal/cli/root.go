@@ -27,7 +27,6 @@ func NewRootCmd() *cobra.Command {
 		newDrainCmd(),
 		newStatusCmd(),
 		newVerifyCmd(),
-		newLedgerCmd(),
 		newProxyCmd(),
 		newImagesCmd(),
 		newOrcaCmd(orca.ExecRunner{Command: orca.CLICommand(os.Getenv, runtime.GOOS)}),

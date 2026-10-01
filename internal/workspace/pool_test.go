@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,35 +10,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
+	sparestate "github.com/yasyf/cc-remote/internal/spare"
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
 var poolEpoch = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
-func testPool(t *testing.T, spares int, capUSD float64) Pool {
+func testPool(t *testing.T, spares int) Pool {
 	t.Helper()
-	store := budget.Store{Path: filepath.Join(t.TempDir(), "ledger.json")}
-	if err := store.Init(poolEpoch); err != nil {
-		t.Fatal(err)
-	}
-	return Pool{
-		Provider:    "fake",
-		Profile:     "lean",
-		Fingerprint: "f00d",
-		Spares:      spares,
-		Rate:        budget.Rate{HourlyUSD: 1},
-		Estimate:    3,
-		Guard:       budget.Guard{CapUSD: capUSD, ReserveUSD: 10},
-		Ledger:      store,
-	}
+	return Pool{Provider: "fake", Profile: "lean", Fingerprint: "f00d", Spares: spares, Store: sparestate.Store{Path: filepath.Join(t.TempDir(), "spares.json")}}
 }
 
 func prepared(t *testing.T, pool Pool, names ...string) {
 	t.Helper()
 	for _, name := range names {
-		reserved, err := pool.Reserve(name, os.Getpid(), poolEpoch)
+		reserved, err := pool.BeginPrepare(name, os.Getpid())
 		if err != nil || !reserved {
 			t.Fatalf("reserving %s: %v, %v", name, reserved, err)
 		}
@@ -49,29 +35,20 @@ func prepared(t *testing.T, pool Pool, names ...string) {
 	}
 }
 
-func readLedger(t *testing.T, pool Pool) *budget.Ledger {
+func readSpares(t *testing.T, pool Pool) sparestate.Spares {
 	t.Helper()
-	ledger, err := pool.Ledger.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ledger
-}
-
-func readSpares(t *testing.T, pool Pool) budget.Spares {
-	t.Helper()
-	spares, err := pool.Ledger.ReadSpares()
+	spares, err := pool.Store.Read()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return spares
 }
 
-func TestReserveFillsThePoolToItsTarget(t *testing.T) {
-	pool := testPool(t, 2, 100)
+func TestPreparationFillsThePoolToItsTarget(t *testing.T) {
+	pool := testPool(t, 2)
 	reserved := make([]bool, 0, 3)
 	for _, name := range []string{"a", "b", "c"} {
-		ok, err := pool.Reserve(name, os.Getpid(), poolEpoch)
+		ok, err := pool.BeginPrepare(name, os.Getpid())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,96 +57,58 @@ func TestReserveFillsThePoolToItsTarget(t *testing.T) {
 	if fmt.Sprint(reserved) != "[true true false]" {
 		t.Errorf("reserved %v against a target of 2", reserved)
 	}
-	ledger := readLedger(t, pool)
-	if spares := readSpares(t, pool); len(spares) != 2 || ledger.Resources["c"] != nil {
-		t.Errorf("the pool holds %d spares and c = %+v", len(spares), ledger.Resources["c"])
-	}
-	if near := ledger.Committed(poolEpoch); near != 6 {
-		t.Errorf("two preparing spares commit $%.2f, want their $6 reservations", near)
+	if spares := readSpares(t, pool); len(spares) != 2 || spares["c"] != nil {
+		t.Errorf("spares = %v", spares)
 	}
 }
 
-func TestReserveKeepsTheCleanupReserve(t *testing.T) {
-	pool := testPool(t, 5, 15)
-	prepared(t, pool, "a")
-	if _, err := pool.Reserve("b", os.Getpid(), poolEpoch); err != nil {
-		t.Fatal(err)
-	}
-	reserved, err := pool.Reserve("c", os.Getpid(), poolEpoch)
-	var over *budget.OverBudgetError
-	if reserved || !errors.As(err, &over) {
-		t.Fatalf("a spare past the $5 left above the reserve was reserved: %v, %v", reserved, err)
-	}
-	if readLedger(t, pool).Resources["c"] != nil {
-		t.Error("the refused spare reached the ledger")
-	}
-}
-
-func TestAssignClaimsAReadySpareAndReservesItsTrial(t *testing.T) {
-	pool := testPool(t, 1, 100)
+func TestAssignClaimsAReadySpare(t *testing.T) {
+	pool := testPool(t, 1)
 	prepared(t, pool, "spare-a")
 	name, assignment, err := pool.Assign("ws-req", poolEpoch.Add(time.Hour))
 	if err != nil || assignment != NewClaim || name != "spare-a" {
 		t.Fatalf("assign = %q, %v, %v", name, assignment, err)
 	}
-	ledger := readLedger(t, pool)
-	running := ledger.Resources[name].Running
-	if len(running) != 2 || running[1].End != nil || running[1].ReservedUSD != 3 {
-		t.Errorf("the claimed spare's intervals are %+v", running)
-	}
-	if ledger.Resources["ws-req"] != nil {
-		t.Error("a claim also started a fresh resource")
+	if item := readSpares(t, pool)[name]; item.State != sparestate.Claimed || item.Request != "ws-req" {
+		t.Errorf("claim = %+v", item)
 	}
 }
 
 func TestAssignFallsThroughToAFreshCreate(t *testing.T) {
-	pool := testPool(t, 1, 100)
+	pool := testPool(t, 1)
 	name, assignment, err := pool.Assign("ws-req", poolEpoch)
 	if err != nil || assignment != FreshCreate || name != "ws-req" {
 		t.Fatalf("assign on an empty pool = %q, %v, %v", name, assignment, err)
 	}
-	if resource := readLedger(t, pool).Resources[name]; resource == nil || len(resource.Running) != 1 {
-		t.Errorf("the fresh create's ledger entry is %+v", resource)
-	}
 }
 
-func TestAssignRefusesARequestThatAlreadyHasAWorkspace(t *testing.T) {
-	pool := testPool(t, 1, 100)
-	if _, _, err := pool.Assign("ws-req", poolEpoch); err != nil {
-		t.Fatal(err)
-	}
-	prepared(t, pool, "spare-a")
-	for _, at := range []time.Duration{0, time.Hour} {
-		if at > 0 {
-			if err := pool.Stop("ws-req", poolEpoch.Add(at)); err != nil {
+func TestAssignPreservesExistingSpareMachineNames(t *testing.T) {
+	for _, existing := range []sparestate.State{sparestate.Preparing, sparestate.Ready, sparestate.Claimed, sparestate.Draining} {
+		t.Run(string(existing), func(t *testing.T) {
+			pool := testPool(t, 1)
+			prepared(t, pool, "existing")
+			if err := pool.Store.Update(func(spares sparestate.Spares) error {
+				spares["existing"].State = existing
+				spares["existing"].Fingerprint = "another-pool"
+				spares["existing"].Request = "another-workspace"
+				return nil
+			}); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if name, assignment, err := pool.Assign("ws-req", poolEpoch.Add(at+time.Minute)); err == nil {
-			t.Fatalf("a retry over an existing workspace got %q, %v", name, assignment)
-		}
-	}
-	if spare := readSpares(t, pool)["spare-a"]; spare.State != budget.Ready {
-		t.Errorf("the refused retry took a spare: %+v", spare)
-	}
-}
-
-func TestAssignRefusesOverBudgetWithoutClaiming(t *testing.T) {
-	pool := testPool(t, 2, 15)
-	prepared(t, pool, "spare-a")
-	if reserved, err := pool.Reserve("spare-b", os.Getpid(), poolEpoch); err != nil || !reserved {
-		t.Fatal(reserved, err)
-	}
-	if _, _, err := pool.Assign("ws-req", poolEpoch); err == nil {
-		t.Fatal("a $3 trial fit in the $2 above the reserve")
-	}
-	if spare := readSpares(t, pool)["spare-a"]; spare.State != budget.Ready {
-		t.Errorf("the refused claim left the spare %s", spare.State)
+			before := *readSpares(t, pool)["existing"]
+			if _, _, err := pool.Assign("existing", poolEpoch); err == nil || !strings.Contains(err.Error(), "already exists as a spare") {
+				t.Fatalf("Assign error = %v", err)
+			}
+			after := *readSpares(t, pool)["existing"]
+			if before.State != after.State || before.Fingerprint != after.Fingerprint || before.Request != after.Request {
+				t.Fatalf("Assign changed spare from %+v to %+v", before, after)
+			}
+		})
 	}
 }
 
 func TestConcurrentCreatesClaimDistinctSpares(t *testing.T) {
-	pool := testPool(t, 3, 100)
+	pool := testPool(t, 3)
 	prepared(t, pool, "a", "b", "c")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -202,8 +141,8 @@ func TestConcurrentCreatesClaimDistinctSpares(t *testing.T) {
 	}
 }
 
-func TestARetriedClaimReattachesWithoutFreshBudget(t *testing.T) {
-	pool := testPool(t, 2, 16)
+func TestARetriedClaimReattaches(t *testing.T) {
+	pool := testPool(t, 2)
 	prepared(t, pool, "spare-a")
 	if _, assignment, err := pool.Assign("ws-req", poolEpoch); err != nil || assignment != NewClaim {
 		t.Fatal(assignment, err)
@@ -211,7 +150,7 @@ func TestARetriedClaimReattachesWithoutFreshBudget(t *testing.T) {
 	if err := pool.Activate("spare-a", poolEpoch); err != nil {
 		t.Fatal(err)
 	}
-	if reserved, err := pool.Reserve("spare-b", os.Getpid(), poolEpoch); err != nil || !reserved {
+	if reserved, err := pool.BeginPrepare("spare-b", os.Getpid()); err != nil || !reserved {
 		t.Fatal(reserved, err)
 	}
 	name, assignment, err := pool.Assign("ws-req", poolEpoch.Add(time.Minute))
@@ -221,19 +160,19 @@ func TestARetriedClaimReattachesWithoutFreshBudget(t *testing.T) {
 }
 
 func TestDrainRemovesStaleSparesAndCrashedPreparations(t *testing.T) {
-	pool := testPool(t, 4, 100)
+	pool := testPool(t, 4)
 	prepared(t, pool, "current")
 	stale := pool
 	stale.Fingerprint = "0ld"
 	prepared(t, stale, "stale")
-	if reserved, err := pool.Reserve("preparing", os.Getpid(), poolEpoch); err != nil || !reserved {
+	if reserved, err := pool.BeginPrepare("preparing", os.Getpid()); err != nil || !reserved {
 		t.Fatal(reserved, err)
 	}
 	crashed := exec.Command("true")
 	if err := crashed.Run(); err != nil {
 		t.Fatal(err)
 	}
-	if reserved, err := pool.Reserve("crashed", crashed.Process.Pid, poolEpoch); err != nil || !reserved {
+	if reserved, err := pool.BeginPrepare("crashed", crashed.Process.Pid); err != nil || !reserved {
 		t.Fatal(reserved, err)
 	}
 	drained, err := pool.Drain(false)
@@ -272,10 +211,6 @@ profiles:
 spares:
   fake: { lean: 1 }
 inventory: inventory.yaml
-budget:
-  cap_usd: 100
-  reserve_usd: 10
-  trial_hours: 3
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -287,18 +222,17 @@ budget:
 
 func TestTheFingerprintFollowsWhatASpareHolds(t *testing.T) {
 	cfg := poolConfig(t)
-	rate := budget.Rate{HourlyUSD: 1}
 	stamp := strings.Repeat("a", 64)
-	base, err := NewPool(cfg, "fake", "lean", rate, stamp)
+	base, err := NewPool(cfg, "fake", "lean", stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if base.Spares != 1 || base.Estimate != 3 || base.Guard.CapUSD != 100 || base.Ledger.Path != cfg.State().Ledger("default") {
+	if base.Spares != 1 || base.Store.Path != cfg.State().Spares() {
 		t.Errorf("pool = %+v", base)
 	}
 	fingerprint := func() string {
 		t.Helper()
-		pool, err := NewPool(cfg, "fake", "lean", rate, stamp)
+		pool, err := NewPool(cfg, "fake", "lean", stamp)
 		if err != nil {
 			t.Fatal(err)
 		}

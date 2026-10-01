@@ -25,18 +25,11 @@ use the inventory's base tools; a matching inventory profile adds its optional
 tools and preparation. The config's forwarding variables must match the
 inventory's `configure.env` exactly.
 
-## Carry the budget forward
+## Check the configuration
 
-Every create and spare preparation uses a budget ledger. Creating a new config
-file does not start a ledger. If an earlier environment tool has spent against
-the same budget, carry that history and existing resource ownership forward
-before creating machines. `cc-remote ledger import` accepts an existing ledger
-of the same format; it does not convert another tool's workspace records.
-
-For a new budget with no earlier spend, initialize it explicitly:
+Verify the configuration and provider access before creating a workspace:
 
 ```sh
-cc-remote ledger init --config .cc-remote/config.yaml
 cc-remote verify --config .cc-remote/config.yaml
 ```
 

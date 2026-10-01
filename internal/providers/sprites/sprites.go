@@ -27,11 +27,10 @@ const (
 )
 
 type Config struct {
-	Org      string         `yaml:"org"`
-	CLI      string         `yaml:"cli"`
-	Rate     providers.Rate `yaml:"rate"`
-	StateDir string         `yaml:"-"`
-	Helper   string         `yaml:"-"`
+	Org      string `yaml:"org"`
+	CLI      string `yaml:"cli"`
+	StateDir string `yaml:"-"`
+	Helper   string `yaml:"-"`
 }
 
 func (c Config) validate() error {
@@ -40,8 +39,6 @@ func (c Config) validate() error {
 		return errors.New("sprites needs an org; set it in the sprites config")
 	case c.CLI == "" || c.Helper == "" || !filepath.IsAbs(c.StateDir):
 		return errors.New("sprites needs a cli, a helper binary, and an absolute state directory")
-	case c.Rate.HourlyUSD <= 0 || c.Rate.StorageGB < 0 || c.Rate.StorageGBMonthUSD < 0:
-		return errors.New("sprites needs a positive rate.hourlyUSD and non-negative storage rates")
 	}
 	return nil
 }
@@ -91,14 +88,7 @@ func (p *Provider) Check(ctx context.Context) error {
 	return nil
 }
 
-func (p *Provider) Rate(spec providers.Spec) (providers.Rate, error) {
-	if err := p.admits(spec); err != nil {
-		return providers.Rate{}, err
-	}
-	return p.Config.Rate, nil
-}
-
-func (p *Provider) admits(spec providers.Spec) error {
+func (p *Provider) ValidateSpec(spec providers.Spec) error {
 	switch {
 	case spec.Image != "":
 		return fmt.Errorf("a sprite boots no image; provision %s after create instead of naming %q", spec.Name, spec.Image)
@@ -114,7 +104,7 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 	if err := providers.CheckName(spec.Name, nameLimit); err != nil {
 		return providers.Machine{}, err
 	}
-	if err := p.admits(spec); err != nil {
+	if err := p.ValidateSpec(spec); err != nil {
 		return providers.Machine{}, err
 	}
 	switch _, err := p.Get(ctx, spec.Name); {

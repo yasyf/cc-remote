@@ -22,10 +22,6 @@ profiles:
     machine:
       fake: { size: s }
 inventory: inventory.yaml
-budget:
-  cap_usd: 100
-  reserve_usd: 10
-  trial_hours: 3
 `
 
 func TestExampleConfigLoadsWithDefaults(t *testing.T) {
@@ -64,7 +60,7 @@ func TestParseFillsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Budget.Ledger != "default" || cfg.Profiles["lean"].Checkout != Shallow || strings.Join(cfg.Git.TokenCommand, " ") != "gh auth token" || cfg.Tailnet != nil {
+	if cfg.Profiles["lean"].Checkout != Shallow || strings.Join(cfg.Git.TokenCommand, " ") != "gh auth token" || cfg.Tailnet != nil {
 		t.Errorf("cfg = %+v", cfg)
 	}
 	profile, err := cfg.ProfileNamed("lean")
@@ -135,16 +131,10 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		}, "machine names provider"},
 		{"spares for unknown profile", func(s string) string { return s + "spares:\n  fake: { full: 1 }\n" }, "spares.fake names profile"},
 		{"negative spares", func(s string) string { return s + "spares:\n  fake: { lean: -1 }\n" }, "negative"},
-		{"zero cap", func(s string) string { return strings.Replace(s, "cap_usd: 100", "cap_usd: 0", 1) }, "budget"},
-		{"nan cap", func(s string) string { return strings.Replace(s, "cap_usd: 100", "cap_usd: .nan", 1) }, "budget"},
-		{"infinite cap", func(s string) string { return strings.Replace(s, "cap_usd: 100", "cap_usd: .inf", 1) }, "budget"},
-		{"nan reserve", func(s string) string { return strings.Replace(s, "reserve_usd: 10", "reserve_usd: .nan", 1) }, "budget"},
-		{"nan trial hours", func(s string) string { return strings.Replace(s, "trial_hours: 3", "trial_hours: .NaN", 1) }, "budget"},
 		{"second document", func(s string) string { return s + "---\nrepository: https://github.com/x/y\n" }, "one YAML document"},
 		{"provider name with a slash", func(s string) string { return strings.ReplaceAll(s, "fake", "fa/ke") }, "provider \"fa/ke\""},
 		{"provider name with a dot", func(s string) string { return strings.ReplaceAll(s, "fake", "fa.ke") }, "provider \"fa.ke\""},
 		{"profile name with a dot", func(s string) string { return strings.ReplaceAll(s, "lean", "le.an") }, "profile \"le.an\""},
-		{"bad ledger name", func(s string) string { return strings.Replace(s, "budget:\n", "budget:\n  ledger: Forge Pilot\n", 1) }, "ledger"},
 		{"tailnet without tag prefix", func(s string) string { return s + "tailnet:\n  tag: cc-remote\n" }, "tailnet.tag"},
 		{"forward without env name", func(s string) string { return s + "forwards:\n  - { label: a, env: lower }\n" }, "forward"},
 		{"duplicate forward label", func(s string) string {

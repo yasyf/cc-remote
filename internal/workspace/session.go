@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yasyf/cc-remote/internal/budget"
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/identity"
 	"github.com/yasyf/cc-remote/internal/images"
@@ -64,7 +63,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		return nil, err
 	}
 	machine := spec.Machine[kind]
-	rate, err := provider.Rate(providers.Spec{Name: "rate", Profile: profile, Image: machine.Image, Size: machine.Size, Region: machine.Region})
+	err = provider.ValidateSpec(providers.Spec{Name: "workspace", Profile: profile, Image: machine.Image, Size: machine.Size, Region: machine.Region})
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +74,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if err := coverEnv(cfg.Forwards, rendered.scripts.Env); err != nil {
 		return nil, err
 	}
-	pool, err := NewPool(cfg, kind, profile, budget.Rate(rate), rendered.stamp)
+	pool, err := NewPool(cfg, kind, profile, rendered.stamp)
 	if err != nil {
 		return nil, err
 	}
@@ -322,16 +321,12 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 
 func (s *Session) unmade(record *Record, cause error) error {
 	if errors.Is(cause, providers.ErrExists) {
-		return errors.Join(cause, s.Pool.Retire(record.Machine, s.Now()), s.forget(record.Name))
+		return errors.Join(cause, s.Pool.Remove(record.Machine), s.forget(record.Name))
 	}
-	return fmt.Errorf("%w; whether %s came to exist at the provider is unverified, so its record and ledger entry are kept: run destroy %s once the provider answers", cause, record.Machine, record.Name)
+	return fmt.Errorf("%w; whether %s came to exist at the provider is unverified, so its record is kept: run destroy %s once the provider answers", cause, record.Machine, record.Name)
 }
 
 func (s *Session) reconcile(name string, recorded *Record) error {
-	ledger, err := s.Pool.Ledger.Read()
-	if err != nil {
-		return err
-	}
 	claimed, err := s.Pool.Claimed(name)
 	if err != nil {
 		return err
@@ -343,10 +338,8 @@ func (s *Session) reconcile(name string, recorded *Record) error {
 		return nil
 	case recorded.Claimed && claimed == recorded.Machine:
 		return nil
-	case !recorded.Claimed && ledger.Vacant(name) != nil:
-		return ledger.Vacant(name)
 	}
-	return fmt.Errorf("%s is already recorded under %s as machine %s, which ledger %s does not know; resolve the two before creating again", name, s.State, recorded.Machine, s.Pool.Ledger.Path)
+	return fmt.Errorf("%s already exists and is already recorded under %s as machine %s; resume it or destroy it before creating again", name, s.State, recorded.Machine)
 }
 
 func (s *Session) unbound(name string) error {
@@ -565,7 +558,7 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 			return err
 		}
 		if found.Labels[label] != value {
-			return fmt.Errorf("%s exists at the provider without a label proving this ledger made it (want %s=%s, labels %v, created %s), so it was left running and its record and ledger entry are kept: if it is yours, remove it at the provider, then run this again", machine, label, value, found.Labels, found.CreatedAt.Format(time.RFC3339))
+			return fmt.Errorf("%s exists at the provider without a label proving this workspace state made it (want %s=%s, labels %v, created %s), so it was left running and its record is kept: if it is yours, remove it at the provider, then run this again", machine, label, value, found.Labels, found.CreatedAt.Format(time.RFC3339))
 		}
 		if err := s.Provider.Destroy(ctx, machine); err != nil {
 			return fmt.Errorf("removing %s failed, so check the provider for it: %w", machine, err)
@@ -574,11 +567,11 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 			return fmt.Errorf("%s is still at the provider after its destroy, so check the provider for it: %w", machine, err)
 		}
 	}
-	return s.Pool.Retire(machine, s.Now())
+	return s.Pool.Remove(machine)
 }
 
 func (s *Session) receipt(machine, owner string) (string, string, error) {
-	spares, err := s.Pool.Ledger.ReadSpares()
+	spares, err := s.Pool.Store.Read()
 	if err != nil {
 		return "", "", err
 	}
@@ -603,9 +596,6 @@ func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
 	}
 	if record.Unverified {
 		return nil, fmt.Errorf("the create of %s never confirmed that %s came to exist, so it was not provisioned: run destroy %s, then create it again", record.Name, record.Machine, record.Name)
-	}
-	if err := s.Pool.Start(record.Machine, s.Now()); err != nil {
-		return nil, err
 	}
 	return s.restore(ctx, held, record)
 }
@@ -665,7 +655,7 @@ func (s *Session) Suspend(ctx context.Context, name string) error {
 	if err := s.Provider.Suspend(ctx, record.Machine); err != nil {
 		return err
 	}
-	return s.Pool.Stop(record.Machine, s.Now())
+	return nil
 }
 
 func (s *Session) Destroy(ctx context.Context, name string) error {
@@ -711,7 +701,7 @@ func (s *Session) forgetBinding(ctx context.Context, held *state.Held, missing e
 }
 
 func (s *Session) orphanedClaim(name string, missing error) (*Record, error) {
-	machine, resource, err := s.Pool.Ledger.ClaimedFor(name)
+	machine, resource, err := s.Pool.Store.ClaimedFor(name)
 	if err != nil {
 		return nil, err
 	}
@@ -731,16 +721,16 @@ func (s *Session) Prepare(ctx context.Context) error {
 	}
 	for {
 		name := s.Pool.SpareName()
-		reserved, err := s.Pool.Reserve(name, os.Getpid(), s.Now())
+		reserved, err := s.Pool.BeginPrepare(name, os.Getpid())
 		if err != nil || !reserved {
 			return err
 		}
 		s.Log.Info("preparing a spare", "machine", name, "provider", s.Kind, "profile", s.Profile)
 		if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelSpare: s.Pool.Fingerprint})); err != nil {
 			if errors.Is(err, providers.ErrExists) {
-				return errors.Join(err, s.Pool.Retire(name, s.Now()))
+				return errors.Join(err, s.Pool.Remove(name))
 			}
-			return fmt.Errorf("%w; whether spare %s came to exist at the provider is unknown, so its reservation is kept for the next drain to settle", err, name)
+			return fmt.Errorf("%w; whether spare %s came to exist at the provider is unknown, so its preparation record is kept for the next drain to settle", err, name)
 		}
 		s.Log.Info("created", "machine", name)
 		if err := s.prepareSpare(ctx, name); err != nil {

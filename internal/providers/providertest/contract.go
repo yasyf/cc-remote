@@ -34,7 +34,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		{"WakeAndSuspend", wakeAndSuspend},
 		{"SSHTarget", sshTarget},
 		{"Destroy", destroy},
-		{"Rate", rate},
+		{"ValidateSpec", validateSpec},
 		{"Traits", traits},
 	}
 	for _, tt := range tests {
@@ -260,12 +260,8 @@ func traits(t *testing.T, h Harness) {
 	}
 }
 
-func rate(t *testing.T, h Harness) {
-	rate, err := h.Provider.Rate(h.Spec("alpha", nil))
-	if err != nil {
-		t.Fatalf("Rate = %v", err)
-	}
-	if rate.HourlyUSD <= 0 || rate.StorageGB < 0 || rate.StorageGBMonthUSD < 0 {
-		t.Errorf("Rate = %+v, want a positive hourly rate", rate)
+func validateSpec(t *testing.T, h Harness) {
+	if err := h.Provider.ValidateSpec(h.Spec("alpha", nil)); err != nil {
+		t.Fatal(err)
 	}
 }

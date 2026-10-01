@@ -30,8 +30,8 @@ func TestTheExampleConfigOpensEveryShippedProvider(t *testing.T) {
 			t.Errorf("%s traits = %+v", kind, provider.Traits())
 		}
 		profile := cfg.Profiles[cfg.Profile].Machine[kind]
-		if _, err := provider.Rate(providers.Spec{Name: "rate", Profile: cfg.Profile, Image: profile.Image, Size: profile.Size}); err != nil && kind == "sprites" {
-			t.Errorf("%s rate: %v", kind, err)
+		if err := provider.ValidateSpec(providers.Spec{Name: "workspace", Profile: cfg.Profile, Image: profile.Image, Size: profile.Size}); err != nil && kind == "sprites" {
+			t.Errorf("%s spec: %v", kind, err)
 		}
 	}
 	if _, err := openProvider(cfg, "other"); err == nil {
@@ -65,12 +65,6 @@ func TestEveryLifecycleCommandTakesTheSelectionFlags(t *testing.T) {
 			t.Errorf("%s lacks --connection, which Orca's recipes pass", name)
 		}
 	}
-	for _, name := range []string{"init", "import"} {
-		cmd, _, err := root.Find([]string{"ledger", name})
-		if err != nil || cmd.Name() != name || cmd.Flags().Lookup("config") == nil {
-			t.Errorf("no ledger %s command taking --config: %v", name, err)
-		}
-	}
 	if cmd, _, _ := root.Find([]string{"warm"}); cmd.Name() != "prepare" {
 		t.Error("warm is not an alias of prepare")
 	}
@@ -100,34 +94,24 @@ func TestEmitWritesIndentedJSON(t *testing.T) {
 	}
 }
 
-func TestLedgerInitThenImportRefuseToReplaceALedger(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	config := filepath.Join("..", "..", "examples", "config.yaml")
-	run := func(args ...string) (string, error) {
-		root := NewRootCmd()
-		var out bytes.Buffer
-		root.SetOut(&out)
-		root.SetArgs(append(args, "--config", config))
-		err := root.Execute()
-		return out.String(), err
+func TestLifecycleCommandsRejectIncompleteRequests(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unsupported connection", []string{"create", "ws-1", "--connection", "server"}, "not implemented"},
+		{"destroy without name or payload", []string{"destroy", "--connection", "ssh"}, "stdin"},
+		{"create without name", []string{"create"}, "name the workspace"},
 	}
-	out, err := run("ledger", "init")
-	if err != nil || !strings.Contains(out, `"origin": "created"`) {
-		t.Fatalf("init: %v: %s", err, out)
-	}
-	if _, err := run("ledger", "init"); err == nil || !strings.Contains(err.Error(), "never replaces") {
-		t.Errorf("a second init: %v", err)
-	}
-	if _, err := run("ledger", "import", config); err == nil {
-		t.Error("import replaced the ledger")
-	}
-	if _, err := run("create", "ws-1", "--connection", "server"); err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("create --connection server: %v", err)
-	}
-	if _, err := run("destroy", "--connection", "ssh"); err == nil || !strings.Contains(err.Error(), "stdin") {
-		t.Errorf("destroy with no name and no payload: %v", err)
-	}
-	if _, err := run("create"); err == nil || !strings.Contains(err.Error(), "name the workspace") {
-		t.Errorf("create with no name: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := NewRootCmd()
+			root.SetIn(strings.NewReader(""))
+			root.SetArgs(tt.args)
+			if err := root.Execute(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }

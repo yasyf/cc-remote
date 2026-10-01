@@ -10,7 +10,6 @@ import (
 	"maps"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -25,16 +24,14 @@ const (
 )
 
 type Config struct {
-	CLI               string             `yaml:"cli"`
-	SSHDir            string             `yaml:"sshDir"`
-	StateDir          string             `yaml:"-"`
-	Platform          string             `yaml:"platform"`
-	VolumeSizeGB      int                `yaml:"volumeSizeGB"`
-	IdleTimeout       time.Duration      `yaml:"idleTimeout"`
-	HourlyUSD         map[string]float64 `yaml:"hourlyUSD"`
-	StorageGBMonthUSD float64            `yaml:"storageGBMonthUSD"`
-	CallTimeout       time.Duration      `yaml:"callTimeout"`
-	ReadyTimeout      time.Duration      `yaml:"readyTimeout"`
+	CLI          string        `yaml:"cli"`
+	SSHDir       string        `yaml:"sshDir"`
+	StateDir     string        `yaml:"-"`
+	Platform     string        `yaml:"platform"`
+	VolumeSizeGB int           `yaml:"volumeSizeGB"`
+	IdleTimeout  time.Duration `yaml:"idleTimeout"`
+	CallTimeout  time.Duration `yaml:"callTimeout"`
+	ReadyTimeout time.Duration `yaml:"readyTimeout"`
 }
 
 func (c Config) validate() error {
@@ -43,15 +40,11 @@ func (c Config) validate() error {
 		return errors.New("namespace needs a cli, an sshDir, and an absolute state directory")
 	case c.Platform == "" || c.VolumeSizeGB <= 0 || c.IdleTimeout <= 0:
 		return errors.New("namespace needs a platform, a positive volumeSizeGB, and a positive idleTimeout")
-	case len(c.HourlyUSD) == 0 || slices.ContainsFunc(slices.Collect(maps.Values(c.HourlyUSD)), free) || c.StorageGBMonthUSD < 0:
-		return errors.New("namespace needs a positive hourlyUSD for each size and a non-negative storageGBMonthUSD")
 	case c.CallTimeout <= 0 || c.ReadyTimeout <= 0:
 		return errors.New("namespace needs a positive callTimeout and readyTimeout")
 	}
 	return nil
 }
-
-func free(usd float64) bool { return usd <= 0 }
 
 type Provider struct {
 	Config
@@ -102,25 +95,21 @@ func (p *Provider) Check(ctx context.Context) error {
 	return err
 }
 
-func (p *Provider) Rate(spec providers.Spec) (providers.Rate, error) {
+func (p *Provider) ValidateSpec(spec providers.Spec) error {
 	if spec.Size == "" {
-		return providers.Rate{}, errors.New("a namespace spec needs a size")
-	}
-	hourly, ok := p.HourlyUSD[spec.Size]
-	if !ok {
-		return providers.Rate{}, fmt.Errorf("namespace has no hourly rate for size %q", spec.Size)
+		return errors.New("a namespace spec needs a size")
 	}
 	if spec.Image == "" {
-		return providers.Rate{}, errors.New("a namespace spec needs an image")
+		return errors.New("a namespace spec needs an image")
 	}
-	return providers.Rate{HourlyUSD: hourly, StorageGB: float64(p.VolumeSizeGB), StorageGBMonthUSD: p.StorageGBMonthUSD}, nil
+	return nil
 }
 
 func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
 	if err := providers.CheckName(spec.Name, nameLimit); err != nil {
 		return providers.Machine{}, err
 	}
-	if _, err := p.Rate(spec); err != nil {
+	if err := p.ValidateSpec(spec); err != nil {
 		return providers.Machine{}, err
 	}
 	switch _, err := p.Get(ctx, spec.Name); {

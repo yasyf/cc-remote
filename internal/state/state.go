@@ -35,7 +35,7 @@ func ValidateName(name string) error {
 	return nil
 }
 
-func (d Dir) Ledger(name string) string { return filepath.Join(string(d), "ledgers", name+".json") }
+func (d Dir) Spares() string { return filepath.Join(string(d), "spares.json") }
 
 func (d Dir) Workspace(name string) string {
 	return filepath.Join(string(d), "workspaces", name+".json")

@@ -60,14 +60,14 @@ func (o *orcaConfig) load() (*config.Config, []orca.Recipe, orca.Lifecycle, erro
 	if err != nil {
 		return nil, nil, orca.Lifecycle{}, err
 	}
-	if err := rateRecipes(cfg, recipes); err != nil {
+	if err := validateRecipes(cfg, recipes); err != nil {
 		return nil, nil, orca.Lifecycle{}, err
 	}
 	lifecycle := orca.Lifecycle{Binary: o.binary, Config: cmp.Or(o.path, cfg.Path)}
 	return cfg, recipes, lifecycle, nil
 }
 
-func rateRecipes(cfg *config.Config, recipes []orca.Recipe) error {
+func validateRecipes(cfg *config.Config, recipes []orca.Recipe) error {
 	opened := map[string]providers.Provider{}
 	for _, recipe := range recipes {
 		provider, ok := opened[recipe.Provider]
@@ -79,8 +79,8 @@ func rateRecipes(cfg *config.Config, recipes []orca.Recipe) error {
 			opened[recipe.Provider] = provider
 		}
 		machine := cfg.Profiles[recipe.Profile].Machine[recipe.Provider]
-		spec := providers.Spec{Name: "rate", Profile: recipe.Profile, Image: machine.Image, Size: machine.Size, Region: machine.Region}
-		if _, err := provider.Rate(spec); err != nil {
+		spec := providers.Spec{Name: "recipe", Profile: recipe.Profile, Image: machine.Image, Size: machine.Size, Region: machine.Region}
+		if err := provider.ValidateSpec(spec); err != nil {
 			return fmt.Errorf("profile %s on %s: %w", recipe.Profile, recipe.Provider, err)
 		}
 	}
@@ -175,7 +175,7 @@ func newOrcaWaitCmd(runner orca.Runner) *cobra.Command {
 					Include: cfg.State().SSHInclude(),
 				},
 			}
-			workspace, err := orca.NewClient(runner).Wait(cmd.Context(), preflight, orca.Poll{Interval: 10 * time.Second, Timeout: timeout})
+			workspace, err := orca.NewClient(runner).Wait(cmd.Context(), preflight, orca.Poll{Interval: time.Second, Timeout: timeout})
 			if err != nil {
 				return err
 			}

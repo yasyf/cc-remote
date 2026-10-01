@@ -19,7 +19,7 @@ and offline test coverage; its UI test and live personal-tailnet enrollment are
 pending. Startup timings for this implementation have not been measured.
 
 Follow [the Orca workspace guide](docs/orca-workspaces.md) to configure a
-repository, preserve its budget history, and generate the environment recipes.
+repository and generate the environment recipes.
 The [architecture](docs/architecture.md) describes preparation, identity, and
 client ownership.
 
