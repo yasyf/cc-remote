@@ -89,42 +89,49 @@ checkout() {
   git -C "$dir" checkout -q FETCH_HEAD
 }
 
-register_marketplace() {
-  if jq -e --arg name "$1" 'any(.[]; .name == $name)' <<< "$2" > /dev/null; then
-    claude plugin marketplace update "$1"
-  else
-    claude plugin marketplace add "$marketplace_dir/$1"
+recorded_source() {
+  jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$(claude plugin marketplace list --json)"
+}
+
+pin_marketplace() {
+  local name="$1" want="$2" source="$3" recorded
+  recorded="$(recorded_source "$name")"
+  if [ "$recorded" != "$want" ]; then
+    if [ -n "$recorded" ]; then
+      claude plugin marketplace remove "$name"
+    fi
+    claude plugin marketplace add "$source"
   fi
 }
 
-branch_source() {
-  jq -r --arg name "$1" '.[] | select(.name == $name) | "\(.source) \(.repo // "") \(.ref // "")"' <<< "$2"
+verify_marketplace() {
+  if [ "$(recorded_source "$1")" != "$2" ]; then
+    echo "cc-remote: marketplace $1 is not registered from $2" >&2
+    exit 1
+  fi
 }
 
 held_declaration() {
   jq -cn --arg repo "$1" --arg branch "$2" '{source: {source: "github", repo: $repo, ref: $branch}, autoUpdate: false}'
 }
 
+pin_ref_marketplace() {
+  pin_marketplace "$1" "directory $marketplace_dir/$1" "$marketplace_dir/$1"
+}
+
+verify_ref_marketplace() {
+  verify_marketplace "$1" "directory $marketplace_dir/$1"
+}
+
 pin_branch_marketplace() {
-  local name="$1" repo="$2" branch="$3" known source
-  known="$(claude plugin marketplace list --json)"
-  source="$(branch_source "$name" "$known")"
-  if [ "$source" != "github $repo $branch" ]; then
-    if [ -n "$source" ]; then
-      claude plugin marketplace remove "$name"
-    fi
-    claude plugin marketplace add "$repo#$branch"
-  fi
+  local name="$1" repo="$2" branch="$3"
+  pin_marketplace "$name" "github $repo $branch" "$repo#$branch"
   edit_settings --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" ".extraKnownMarketplaces[\$name] = \$held"
 }
 
 verify_branch_marketplace() {
-  local name="$1" repo="$2" branch="$3" known
-  known="$(claude plugin marketplace list --json)"
-  if [ "$(branch_source "$name" "$known")" != "github $repo $branch" ]; then
-    echo "cc-remote: marketplace $name is not registered from github $repo at branch $branch" >&2
-    exit 1
-  fi
+  local name="$1" repo="$2" branch="$3"
+  verify_marketplace "$name" "github $repo $branch"
   if ! jq -e --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" '.extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
     echo "cc-remote: marketplace $name is not declared in Claude settings at branch $branch with auto-update off" >&2
     exit 1
@@ -142,14 +149,8 @@ install_plugin() {
 }
 
 install_plugins() {
-  local known
-  known="$(claude plugin marketplace list --json)"
 {{- range .Claude.Marketplaces}}
-{{- if .Ref}}
-  register_marketplace {{q .Name}} "$known"
-{{- else}}
   claude plugin marketplace update {{q .Name}}
-{{- end}}
 {{- end}}
 {{- range .Claude.Plugins}}
   install_plugin {{q .ID}} {{q .Version}}
@@ -239,14 +240,15 @@ verify_captain_hook() {
 }
 
 edit_settings() (
-  local settings="$HOME/.claude/settings.json"
+  local settings="$HOME/.claude/settings.json" edited
   umask 077
   mkdir -p "$HOME/.claude"
   if [ ! -f "$settings" ]; then
     echo '{}' > "$settings"
   fi
-  jq "$@" "$settings" > "$settings.tmp"
-  mv "$settings.tmp" "$settings"
+  edited="$(mktemp "$settings.XXXXXX")"
+  jq "$@" "$settings" > "$edited"
+  mv "$edited" "$settings"
 )
 
 claude_env() {
@@ -313,6 +315,7 @@ run_install() {
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
   checkout {{q .Name}} {{q .GitHub}} {{q .Ref}} {{if .Private}}private{{else}}public{{end}}
+  pin_ref_marketplace {{q .Name}}
 {{- else}}
   pin_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}
 {{- end}}
@@ -401,7 +404,9 @@ run_verify() {
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
 {{- end}}
 {{- range .Claude.Marketplaces}}
-{{- if .Branch}}
+{{- if .Ref}}
+  verify_ref_marketplace {{q .Name}}
+{{- else}}
   verify_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}
 {{- end}}
 {{- end}}
