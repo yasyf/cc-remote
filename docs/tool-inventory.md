@@ -22,7 +22,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 ```json
 {
-  "tools": "3aa1b902fa6e6aa4d5d15ae8b336ade346f1593d782090238f3e8b5cb3ca292a",
+  "tools": "d3f2ccf176b59d571a9d5ed6012c03a7969fcf8e1762c2ed60d2a347e9c2d2cb",
   "image": "a377d3eccaf38e09d1e85443838af36aa20136ba24760fb04e58c3188dde8553"
 }
 ```
@@ -40,7 +40,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | `claude` | `managedSettings`, `env`, `marketplaces`, `plugins` | Claude settings and pinned marketplace/plugin inventory. |
 | `codexRuntime` | `version`, `url`, `sha256`, `plugins` | Pinned Codex runtime archive and selected runtime plugin names. Requires the `codex` executable in the artifact inventory. |
 | `captainHook` | `version`, `url`, `sha256` | Pinned Captain Hook host archive, installed through `capt-hookd package-install`. Requires `uv`. |
-| `cookiesync` | `schemaFingerprint` | Expected CookieSync schema fingerprint. Requires the `cookiesync` executable. Before starting services, configuration writes `synckit/state.json` at this fingerprint if missing. An existing state with another fingerprint fails configuration. |
+| `cookiesync` | `schemaFingerprint` | Expected schema fingerprint; requires the `cookiesync` executable. Configuration writes `synckit/state.json` at this fingerprint if missing, before running `configure.run` commands or starting services. Configuration fails unless the file contains exactly one `synckit-state-v1` document at this fingerprint. |
 | `services` | Service list | User services started during configuration; fields are below. |
 | `prepare` | Shell command list | Runs as the user from `$HOME` after installation, before verification. Empty by default. |
 | `configure` | `env`, `run` | Declared runtime environment names and shell commands run during configuration. |

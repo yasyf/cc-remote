@@ -684,7 +684,9 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 		Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
 		Cookiesync: &Cookiesync{SchemaFingerprint: digest},
 		Services:   []Service{{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}}},
+		Configure:  Configure{Run: []string{"cookiesync check"}},
 	}
+	pinned := `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + digest + `"}}`
 	tests := []struct {
 		name     string
 		existing string
@@ -693,6 +695,9 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 		{name: "fresh host"},
 		{name: "existing state at the pinned fingerprint", existing: `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + digest + `"},"synckit":{"kept":true}}`},
 		{name: "stale state", existing: `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + strings.Repeat("3", 64) + `"}}`, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+		{name: "wrong identity", existing: `{"schema":{"identity":"broken-state","version":1,"fingerprint":"` + digest + `"}}`, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+		{name: "missing identity", existing: `{"schema":{"version":1,"fingerprint":"` + digest + `"}}`, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
+		{name: "two documents", existing: `{"schema":{"identity":"broken-state"}}` + "\n" + pinned, wantErr: "is not synckit-state-v1 at schema fingerprint " + digest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -712,8 +717,10 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 				if err == nil || !strings.Contains(out, tt.wantErr) {
 					t.Fatalf("configure = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 				}
-				if slices.ContainsFunc(calls, func(call string) bool { return strings.HasPrefix(call, "sprite-env services create") }) {
-					t.Errorf("configure started a service on a stale state:\n%s", strings.Join(calls, "\n"))
+				if slices.ContainsFunc(calls, func(call string) bool {
+					return strings.HasPrefix(call, "sprite-env services create") || strings.HasPrefix(call, "cookiesync check")
+				}) {
+					t.Errorf("configure ran a command or started a service on an invalid state:\n%s", strings.Join(calls, "\n"))
 				}
 				return
 			}
@@ -723,9 +730,10 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 			start := slices.IndexFunc(calls, func(call string) bool {
 				return strings.HasPrefix(call, "sprite-env services create cc-remote-cookiesync ")
 			})
+			check := slices.Index(calls, "cookiesync check state=present")
 			install := slices.Index(calls, "cookiesync install state=present")
-			if start < 0 || !strings.HasSuffix(calls[start], " state=present") || install < start {
-				t.Errorf("want the service started with state.json present, then cookiesync install:\n%s", strings.Join(calls, "\n"))
+			if check < 0 || start < check || !strings.HasSuffix(calls[start], " state=present") || install < start {
+				t.Errorf("want configure.run and the service to see state.json, then cookiesync install:\n%s", strings.Join(calls, "\n"))
 			}
 			raw, err := os.ReadFile(state)
 			if err != nil {
@@ -733,10 +741,11 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 			}
 			var written struct {
 				Schema struct {
+					Identity    string `json:"identity"`
 					Fingerprint string `json:"fingerprint"`
 				} `json:"schema"`
 			}
-			if err := json.Unmarshal(raw, &written); err != nil || written.Schema.Fingerprint != digest {
+			if err := json.Unmarshal(raw, &written); err != nil || written.Schema.Identity != "synckit-state-v1" || written.Schema.Fingerprint != digest {
 				t.Errorf("state.json = %s, %v", raw, err)
 			}
 			if tt.existing != "" && string(raw) != tt.existing {
