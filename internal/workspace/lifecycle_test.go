@@ -46,6 +46,8 @@ const (
 	inventory  = "version: 1\nsystem:\n  - { name: jq, version: 1.8.2, url: https://example.com/jq-1.8.2, sha256: " + sha + ", format: binary }\nconfigure:\n  env: [WEB_PORT]\n"
 	imaged     = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
 	sha        = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
+	commit     = "008173c23f95b170204355c12626cb5a965d779a"
+	private    = "version: 1\nsystem:\n  - { name: claude, version: 2.0.0, url: https://example.com/claude, sha256: " + sha + ", format: binary }\nclaude:\n  marketplaces:\n    - { name: market, github: owner/market, ref: " + commit + ", private: true }\nconfigure:\n  env: [WEB_PORT]\n"
 )
 
 func running(nodeID string) string {
@@ -426,8 +428,8 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", warms) != 0 || h.machine.ran("ws-1", readies) != 0 {
 		t.Error("a fresh create renewed identity, warmed, or checked a ready stamp it could not have")
 	}
-	if got := h.machine.stdins["ws-1"][order[1]]; got != token {
-		t.Errorf("the tool install read %q on stdin", got)
+	if got := h.machine.stdins["ws-1"][order[1]]; got != "" {
+		t.Errorf("the tool install read %q on stdin although no private marketplace needs a token", got)
 	}
 	order = order[2:]
 	for i, script := range h.machine.scripts["ws-1"] {
@@ -1129,6 +1131,42 @@ func TestAClaimProvisionsASpareThatLostItsReadyStamp(t *testing.T) {
 	}
 }
 
+func TestTheInstallReadsTheTokenOnlyForPrivateMarketplaces(t *testing.T) {
+	h := build(t, 0, false, private, "")
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	order := h.machine.order("ws-1", 0, installs)
+	if order[0] < 0 || h.machine.stdins["ws-1"][order[0]] != token {
+		t.Errorf("the install read %q on stdin; want the token for the private marketplace", h.machine.stdins["ws-1"][order[0]])
+	}
+	for i, script := range h.machine.scripts["ws-1"] {
+		if strings.Contains(script, token) {
+			t.Errorf("script %d carries the token", i)
+		}
+	}
+}
+
+func TestResumeRefusesToReprovisionAHostEnrolledInKernelMode(t *testing.T) {
+	h := newHarness(t, 0, true)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	drifted := h.drift(strings.NewReplacer("1.8.2", "1.8.3", sha, strings.Repeat("ab", 32)).Replace(inventory))
+	drifted.Enroller.Connect = h.session.Enroller.Connect
+	before := len(h.machine.scripts["ws-1"])
+	if _, err := drifted.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "already joined the tailnet") {
+		t.Fatalf("Resume = %v", err)
+	}
+	if after := strings.Join(h.machine.scripts["ws-1"][before:], "\n"); !strings.Contains(after, readies) || strings.Contains(after, provisions) || strings.Contains(after, installs) {
+		t.Errorf("the refused resume ran %q", after)
+	}
+}
+
 func TestResumeProvisionsInPlaceWhenTheInventoryDrifted(t *testing.T) {
 	h := newHarness(t, 0, false)
 	ctx := context.Background()
@@ -1209,36 +1247,44 @@ func TestResumeInstallsPluginsWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T)
 	}
 }
 
-func TestDestroyLeavesAMachineMadeBeforeTheAttemptAndReleasesItsName(t *testing.T) {
-	h := newHarness(t, 0, false)
-	ctx := context.Background()
-	h.fake.Now = func() time.Time { return time.Now().Add(-time.Hour) }
-	if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1"}); err != nil {
-		t.Fatal(err)
-	}
-	h.fake.Now = nil
-	h.session.Provider = &createFailed{Provider: h.provider}
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
-		t.Fatalf("err = %v", err)
-	}
-	if record, found := h.record("ws-1"); !found || !record.Unverified || !h.ledger().Running("ws-1") {
-		t.Fatalf("an ambiguous create dropped its accounting or left the record verified: %+v, %v", record, found)
-	}
-	h.session.Provider = h.provider
-	if _, err := h.session.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "made before the create") {
-		t.Fatalf("Resume of a name whose machine predates it = %v", err)
-	}
-	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
-		t.Fatalf("Destroy = %v", err)
-	}
-	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
-		t.Error("destroy removed a machine that predates the attempt")
-	}
-	if strings.Contains(h.calls(), "destroy") {
-		t.Errorf("destroy called the provider: %s", h.calls())
-	}
-	if _, found := h.record("ws-1"); found || h.ledger().Resources["ws-1"].Destroyed == nil {
-		t.Error("destroy did not release the name")
+func TestDestroyKeepsAnUnlabelledMachineAndItsAccounting(t *testing.T) {
+	for name, created := range map[string]func() time.Time{
+		"made an hour earlier":    func() time.Time { return time.Now().Add(-time.Hour) },
+		"made during the attempt": time.Now,
+		"with no creation time":   func() time.Time { return time.Time{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, 0, false)
+			ctx := context.Background()
+			h.fake.Now = created
+			if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1"}); err != nil {
+				t.Fatal(err)
+			}
+			h.fake.Now = nil
+			h.session.Provider = &createFailed{Provider: h.provider}
+			if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
+				t.Fatalf("err = %v", err)
+			}
+			if record, found := h.record("ws-1"); !found || !record.Unverified || !h.ledger().Running("ws-1") {
+				t.Fatalf("an ambiguous create dropped its accounting or left the record verified: %+v, %v", record, found)
+			}
+			h.session.Provider = h.provider
+			if _, err := h.session.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "never confirmed") {
+				t.Fatalf("Resume of an unverified record = %v", err)
+			}
+			if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "without a label proving this ledger made it") {
+				t.Fatalf("Destroy = %v", err)
+			}
+			if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
+				t.Error("destroy removed a machine of unknown ownership")
+			}
+			if strings.Contains(h.calls(), "destroy") {
+				t.Errorf("destroy called the provider: %s", h.calls())
+			}
+			if record, found := h.record("ws-1"); !found || !record.Unverified || !h.ledger().Running("ws-1") {
+				t.Errorf("destroy released a name of unknown ownership: %+v, %v", record, found)
+			}
+		})
 	}
 }
 
@@ -1250,40 +1296,51 @@ func (c *createFailed) Create(context.Context, providers.Spec) (providers.Machin
 	return providers.Machine{}, errors.New("the provider api timed out before answering")
 }
 
-func TestDestroyRemovesAnUnlabelledMachineMadeDuringTheAttempt(t *testing.T) {
-	h := newHarness(t, 0, false)
+func TestDrainKeepsAnUnlabelledSpareAndStillRemovesTheRest(t *testing.T) {
+	h := newHarness(t, 2, false)
 	ctx := context.Background()
-	h.session.Provider = &createdUnlabelledThenFailed{Provider: h.provider}
-	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); !errors.Is(err, providers.ErrAmbiguous) || !strings.Contains(err.Error(), "run destroy ws-1") {
-		t.Fatalf("err = %v", err)
+	stripping := &labelsDroppedOnce{Provider: h.provider}
+	h.session.Provider = stripping
+	if err := h.session.Prepare(ctx); err != nil {
+		t.Fatal(err)
 	}
 	h.session.Provider = h.provider
-	if _, err := h.session.Resume(ctx, "ws-1"); err != nil {
-		t.Fatalf("Resume of the machine the attempt allocated = %v", err)
+	unlabelled := stripping.name
+	if len(h.spares()) != 2 || unlabelled == "" {
+		t.Fatalf("spares = %v, unlabelled %q", h.spares(), unlabelled)
 	}
-	if record, _ := h.record("ws-1"); record.Unverified {
-		t.Error("a resume that verified the machine left the record unverified")
+	err := h.session.Drain(ctx, true)
+	if err == nil || !strings.Contains(err.Error(), unlabelled) || !strings.Contains(err.Error(), "without a label proving this ledger made it") {
+		t.Fatalf("Drain = %v", err)
 	}
-	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
-		t.Fatalf("Destroy = %v", err)
+	if _, err := h.fake.Get(ctx, unlabelled); err != nil {
+		t.Error("drain removed a spare of unknown ownership")
 	}
-	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
-		t.Error("destroy left the machine the attempt allocated")
+	left := h.spares()
+	if len(left) != 1 || left[unlabelled] == nil || h.ledger().Resources[unlabelled].Destroyed != nil {
+		t.Errorf("drain left %v; want only the unlabelled spare, still accounted", left)
 	}
-	if _, found := h.record("ws-1"); found || h.ledger().Resources["ws-1"].Destroyed == nil {
-		t.Error("destroy did not release the name")
+	for id := range h.spares() {
+		if id != unlabelled {
+			t.Errorf("drain kept the labelled spare %s", id)
+		}
+	}
+	if machines, _ := h.fake.List(ctx, map[string]string{LabelSpare: h.session.Pool.Fingerprint}); len(machines) != 0 {
+		t.Errorf("drain left labelled spares %v", machines)
 	}
 }
 
-type createdUnlabelledThenFailed struct {
+type labelsDroppedOnce struct {
 	providers.Provider
+	name string
 }
 
-func (c *createdUnlabelledThenFailed) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
-	if _, err := c.Provider.Create(ctx, providers.Spec{Name: spec.Name}); err != nil {
-		return providers.Machine{}, err
+func (l *labelsDroppedOnce) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	if l.name != "" {
+		return l.Provider.Create(ctx, spec)
 	}
-	return providers.Machine{}, fmt.Errorf("%w: the provider api timed out after allocating", providers.ErrAmbiguous)
+	l.name = spec.Name
+	return l.Provider.Create(ctx, providers.Spec{Name: spec.Name})
 }
 
 func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {

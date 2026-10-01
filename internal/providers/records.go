@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type Records struct {
@@ -16,12 +17,13 @@ type Records struct {
 }
 
 type record struct {
-	Labels map[string]string `json:"labels"`
+	Labels  map[string]string `json:"labels"`
+	Created time.Time         `json:"created"`
 }
 
 func (r Records) path(id string) string { return filepath.Join(r.Dir, id+".json") }
 
-func (r Records) Labels(id string) (map[string]string, error) {
+func (r Records) Labels(id string, created time.Time) (map[string]string, error) {
 	raw, err := os.ReadFile(r.path(id))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -33,14 +35,17 @@ func (r Records) Labels(id string) (map[string]string, error) {
 	if err := json.Unmarshal(raw, &saved); err != nil {
 		return nil, fmt.Errorf("%s: %w", r.path(id), err)
 	}
+	if !saved.Created.Equal(created) {
+		return nil, nil
+	}
 	return saved.Labels, nil
 }
 
-func (r Records) Save(id string, labels map[string]string) error {
+func (r Records) Save(id string, labels map[string]string, created time.Time) error {
 	if err := os.MkdirAll(r.Dir, 0o700); err != nil {
 		return err
 	}
-	raw, err := json.Marshal(record{Labels: labels})
+	raw, err := json.Marshal(record{Labels: labels, Created: created})
 	if err != nil {
 		return err
 	}

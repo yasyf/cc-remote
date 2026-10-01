@@ -144,7 +144,7 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		args = append(args, "--site", spec.Region)
 	}
 	if _, err := p.devboxUnbounded(ctx, args...); err != nil {
-		if providers.IsConflict(err) {
+		if providers.Says(err, "code = AlreadyExists") {
 			return providers.Machine{}, fmt.Errorf("devbox %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
 		if _, found := p.Get(ctx, spec.Name); found == nil {
@@ -155,10 +155,15 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 	if _, err := p.devbox(ctx, "configure-ssh", spec.Name); err != nil {
 		return providers.Machine{}, fmt.Errorf("devbox %s: %w: ssh access was not configured: %w", spec.Name, providers.ErrAmbiguous, err)
 	}
-	if err := p.records().Save(spec.Name, spec.Labels); err != nil {
-		return providers.Machine{}, err
+	created, err := p.Get(ctx, spec.Name)
+	if err != nil {
+		return providers.Machine{}, fmt.Errorf("devbox %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)
 	}
-	return p.Get(ctx, spec.Name)
+	if err := p.records().Save(spec.Name, spec.Labels, created.CreatedAt); err != nil {
+		return providers.Machine{}, fmt.Errorf("devbox %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)
+	}
+	created.Labels = maps.Clone(spec.Labels)
+	return created, nil
 }
 
 func imageFlag(image string) string {
@@ -206,7 +211,7 @@ func (p *Provider) find(ctx context.Context, id string) (devbox, error) {
 }
 
 func (p *Provider) machine(box devbox) (providers.Machine, error) {
-	labels, err := p.records().Labels(box.Name)
+	labels, err := p.records().Labels(box.Name, box.CreatedAt)
 	if err != nil {
 		return providers.Machine{}, err
 	}
@@ -287,6 +292,9 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 
 func (p *Provider) Destroy(ctx context.Context, id string) error {
 	if _, err := p.find(ctx, id); err != nil {
+		if errors.Is(err, providers.ErrNotFound) {
+			return errors.Join(err, p.records().Remove(id))
+		}
 		return err
 	}
 	if _, err := p.devbox(ctx, "expire", id, "--force"); err != nil {

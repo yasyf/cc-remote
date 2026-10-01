@@ -28,7 +28,6 @@ const (
 	LabelSpare     = "cc-remote/spare"
 	LabelProfile   = "cc-remote/profile"
 	tailnetTimeout = 60 * time.Second
-	clockSkew      = 5 * time.Minute
 )
 
 type Session struct {
@@ -48,10 +47,11 @@ type Session struct {
 	Scripts  images.Scripts
 	Stamp    string
 
-	profile   config.Profile
-	labels    []LabelledEnv
-	image     string
-	imageSpec string
+	profile        config.Profile
+	labels         []LabelledEnv
+	image          string
+	imageSpec      string
+	privatePlugins bool
 }
 
 func (s *Session) inPlace() bool {
@@ -80,21 +80,22 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		return nil, err
 	}
 	s := &Session{
-		Config:    cfg,
-		Provider:  provider,
-		Kind:      kind,
-		Profile:   profile,
-		Platform:  platform,
-		Pool:      pool,
-		State:     cfg.State(),
-		Log:       slog.Default(),
-		Stderr:    os.Stderr,
-		Now:       time.Now,
-		Scripts:   rendered.scripts,
-		Stamp:     rendered.stamp,
-		profile:   spec,
-		image:     machine.Image,
-		imageSpec: rendered.imageSpec,
+		Config:         cfg,
+		Provider:       provider,
+		Kind:           kind,
+		Profile:        profile,
+		Platform:       platform,
+		Pool:           pool,
+		State:          cfg.State(),
+		Log:            slog.Default(),
+		Stderr:         os.Stderr,
+		Now:            time.Now,
+		Scripts:        rendered.scripts,
+		Stamp:          rendered.stamp,
+		profile:        spec,
+		image:          machine.Image,
+		imageSpec:      rendered.imageSpec,
+		privatePlugins: rendered.private,
 	}
 	s.Token = s.gitToken
 	for _, forward := range cfg.Forwards {
@@ -115,6 +116,7 @@ type rendered struct {
 	scripts   images.Scripts
 	stamp     string
 	imageSpec string
+	private   bool
 }
 
 func render(cfg *config.Config, profile string, imaged bool) (rendered, error) {
@@ -126,14 +128,15 @@ func render(cfg *config.Config, profile string, imaged bool) (rendered, error) {
 	if err != nil {
 		return rendered{}, err
 	}
+	private := slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private })
 	if !imaged {
-		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil)}, nil
+		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil), private: private}, nil
 	}
 	image, err := images.RenderImage(inventory)
 	if err != nil {
 		return rendered{}, err
 	}
-	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image), imageSpec: image.Fingerprint()}, nil
+	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image), imageSpec: image.Fingerprint(), private: private}, nil
 }
 
 func coverEnv(forwards []config.Forward, declared []string) error {
@@ -289,7 +292,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 		s.Log.Info("reattaching the spare this workspace already claimed", "workspace", name, "machine", machine)
 		return s.restore(ctx, held, recorded)
 	}
-	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: machine, Image: s.image, ImageSpec: s.imageSpec, Claimed: assignment == NewClaim, CreatedAt: now}
+	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: machine, Image: s.image, ImageSpec: s.imageSpec, Claimed: assignment == NewClaim, Unverified: assignment != NewClaim, CreatedAt: now}
 	if err := s.save(record); err != nil {
 		return nil, err
 	}
@@ -297,6 +300,10 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 		s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
 		if _, err := s.Provider.Create(ctx, s.spec(machine, map[string]string{LabelWorkspace: name})); err != nil {
 			return nil, s.unmade(record, err)
+		}
+		record.Unverified = false
+		if err := s.save(record); err != nil {
+			return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 		}
 		s.Log.Info("created", "machine", machine)
 	}
@@ -316,10 +323,6 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 func (s *Session) unmade(record *Record, cause error) error {
 	if errors.Is(cause, providers.ErrExists) {
 		return errors.Join(cause, s.Pool.Retire(record.Machine, s.Now()), s.forget(record.Name))
-	}
-	record.Unverified = true
-	if err := s.save(record); err != nil {
-		return errors.Join(cause, err)
 	}
 	return fmt.Errorf("%w; whether %s came to exist at the provider is unverified, so its record and ledger entry are kept: run destroy %s once the provider answers", cause, record.Machine, record.Name)
 }
@@ -406,9 +409,12 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 }
 
 func (s *Session) installPlugins(ctx context.Context, machine string) error {
-	token, err := s.checkoutToken(ctx)
-	if err != nil {
-		return err
+	var token string
+	if s.privatePlugins {
+		var err error
+		if token, err = s.Token(ctx); err != nil {
+			return err
+		}
 	}
 	run := s.exec(machine)
 	if err := s.Scripts.StagePlugins(ctx, run); err != nil {
@@ -430,6 +436,9 @@ func (s *Session) readyTools(ctx context.Context, record *Record) error {
 	}
 	if record.Image != s.image || record.ImageSpec != s.imageSpec {
 		return fmt.Errorf("the tools on %s are not at the current stamp and the image of profile %s changed since %s was created (image %q with declaration %.12s, now %q with %.12s); a machine cannot change its image in place, so destroy %s and create it again: %w", machine, s.Profile, record.Name, record.Image, record.ImageSpec, s.image, s.imageSpec, record.Name, err)
+	}
+	if s.inPlace() && record.Tailnet != nil && s.Platform.Daemon.Mode == tailnet.Kernel {
+		return fmt.Errorf("the tools on %s are not at the current stamp and provision.sh cannot run again on a host that already joined the tailnet in kernel mode, so destroy %s and create it again: %w", machine, record.Name, err)
 	}
 	s.Log.Info("the tools are not at the current stamp; provisioning them again", "machine", machine, "stamp", s.Stamp[:12], "err", err)
 	return s.installTools(ctx, machine)
@@ -551,17 +560,14 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 	found, err := s.Provider.Get(ctx, machine)
 	switch {
 	case errors.Is(err, providers.ErrNotFound):
-	case err != nil:
-		return fmt.Errorf("could not tell whether %s is still there, so check the provider for it: %w", machine, err)
-	default:
-		ours, err := s.made(found, owner)
-		if err != nil {
+		if err := s.Provider.Destroy(ctx, machine); err != nil && !errors.Is(err, providers.ErrNotFound) {
 			return err
 		}
-		if !ours {
-			s.Log.Warn("leaving a machine this ledger did not make; releasing its name", "machine", machine, "labels", found.Labels, "created", found.CreatedAt)
-			break
-		}
+	case err != nil:
+		return fmt.Errorf("could not tell whether %s is still there, so check the provider for it: %w", machine, err)
+	case !labelled(found, owner):
+		return fmt.Errorf("%s exists at the provider without a label proving this ledger made it (labels %v, created %s), so it was left running and its record and ledger entry are kept: if it is yours, remove it at the provider, then run this again", machine, found.Labels, found.CreatedAt.Format(time.RFC3339))
+	default:
 		if err := s.Provider.Destroy(ctx, machine); err != nil {
 			return fmt.Errorf("removing %s failed, so check the provider for it: %w", machine, err)
 		}
@@ -572,22 +578,12 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 	return s.Pool.Retire(machine, s.Now())
 }
 
-func (s *Session) made(found providers.Machine, owner string) (bool, error) {
-	if workspace, labelled := found.Labels[LabelWorkspace]; labelled {
-		return workspace == owner, nil
+func labelled(found providers.Machine, owner string) bool {
+	if workspace, ok := found.Labels[LabelWorkspace]; ok {
+		return workspace == owner
 	}
-	if _, spare := found.Labels[LabelSpare]; spare {
-		return true, nil
-	}
-	ledger, err := s.Pool.Ledger.Read()
-	if err != nil {
-		return false, err
-	}
-	resource := ledger.Resources[found.ID]
-	if resource == nil {
-		return false, nil
-	}
-	return found.CreatedAt.IsZero() || !found.CreatedAt.Before(resource.Created.Add(-clockSkew)), nil
+	_, spare := found.Labels[LabelSpare]
+	return spare
 }
 
 func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
@@ -604,30 +600,12 @@ func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
 		return nil, err
 	}
 	if record.Unverified {
-		if err := s.verifyMade(ctx, record); err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("the create of %s never confirmed that %s came to exist, so it was not provisioned: run destroy %s, then create it again", record.Name, record.Machine, record.Name)
 	}
 	if err := s.Pool.Start(record.Machine, s.Now()); err != nil {
 		return nil, err
 	}
 	return s.restore(ctx, held, record)
-}
-
-func (s *Session) verifyMade(ctx context.Context, record *Record) error {
-	found, err := s.Provider.Get(ctx, record.Machine)
-	if err != nil {
-		return fmt.Errorf("%s was recorded by a create whose outcome was unverified, and the provider does not answer for it now: %w", record.Name, err)
-	}
-	ours, err := s.made(found, record.Name)
-	if err != nil {
-		return err
-	}
-	if !ours {
-		return fmt.Errorf("%s exists at the provider but was made before the create that recorded %s (labels %v, created %s), so run destroy %s to release the name and leave that machine alone", record.Machine, record.Name, found.Labels, found.CreatedAt.Format(time.RFC3339), record.Name)
-	}
-	record.Unverified = false
-	return nil
 }
 
 func (s *Session) restore(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
@@ -809,11 +787,10 @@ func (s *Session) drainWhere(ctx context.Context, all bool) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, name := range drained {
 		s.Log.Info("destroying a spare", "machine", name)
-		if err := s.discard(ctx, name, name); err != nil {
-			return err
-		}
+		errs = append(errs, s.discard(ctx, name, name))
 	}
-	return nil
+	return errors.Join(errs...)
 }

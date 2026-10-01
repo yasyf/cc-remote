@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os/exec"
 	"path/filepath"
@@ -123,7 +124,7 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		return providers.Machine{}, err
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "create", "-o", p.Org, "--skip-console", spec.Name)); err != nil {
-		if providers.IsConflict(err) {
+		if providers.Says(err, "sprite already exists") {
 			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrExists, err)
 		}
 		if _, found := p.Get(ctx, spec.Name); found == nil {
@@ -131,10 +132,15 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		}
 		return providers.Machine{}, fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)
 	}
-	if err := p.records().Save(spec.Name, spec.Labels); err != nil {
-		return providers.Machine{}, err
+	created, err := p.Get(ctx, spec.Name)
+	if err != nil {
+		return providers.Machine{}, fmt.Errorf("sprite %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)
 	}
-	return p.Get(ctx, spec.Name)
+	if err := p.records().Save(spec.Name, spec.Labels, created.CreatedAt); err != nil {
+		return providers.Machine{}, fmt.Errorf("sprite %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)
+	}
+	created.Labels = maps.Clone(spec.Labels)
+	return created, nil
 }
 
 type sprite struct {
@@ -159,7 +165,7 @@ func (p *Provider) machine(s sprite) (providers.Machine, error) {
 	default:
 		return providers.Machine{}, fmt.Errorf("sprite %s has status %q", s.Name, s.Status)
 	}
-	labels, err := p.records().Labels(s.Name)
+	labels, err := p.records().Labels(s.Name, s.CreatedAt)
 	if err != nil {
 		return providers.Machine{}, err
 	}
@@ -242,6 +248,9 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 
 func (p *Provider) Destroy(ctx context.Context, id string) error {
 	if _, err := p.Get(ctx, id); err != nil {
+		if errors.Is(err, providers.ErrNotFound) {
+			return errors.Join(err, p.keys().remove(id), p.records().Remove(id))
+		}
 		return err
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "destroy", "-o", p.Org, "-s", id, "--force")); err != nil {

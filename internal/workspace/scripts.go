@@ -18,7 +18,7 @@ const (
 
 var (
 	refName    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
-	commitHash = regexp.MustCompile(`^[0-9a-f]{7,64}$`)
+	commitHash = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 )
 
 type Source struct {
@@ -35,7 +35,7 @@ func (s Source) Validate() error {
 		return nil
 	}
 	if !commitHash.MatchString(s.Head) {
-		return fmt.Errorf("head %q is not a commit hash", s.Head)
+		return fmt.Errorf("head %q is not a full commit hash", s.Head)
 	}
 	if !refName.MatchString(s.Branch) || strings.Contains(s.Branch, "..") {
 		return fmt.Errorf("branch %q is not a branch name", s.Branch)

@@ -73,11 +73,11 @@ func (e *CommandError) Error() string {
 	return fmt.Sprintf("%s: exit %d: %s", e.Command, e.Result.ExitCode, detail)
 }
 
-func IsConflict(err error) bool {
+func (e *CommandError) Says(phrase string) bool {
+	return strings.Contains(string(e.Result.Stderr), phrase) || strings.Contains(string(e.Result.Stdout), phrase)
+}
+
+func Says(err error, phrase string) bool {
 	var command *CommandError
-	if !errors.As(err, &command) {
-		return false
-	}
-	text := strings.ToLower(string(command.Result.Stderr) + string(command.Result.Stdout))
-	return strings.Contains(text, "already exists") || strings.Contains(text, "alreadyexists")
+	return errors.As(err, &command) && command.Says(phrase)
 }
