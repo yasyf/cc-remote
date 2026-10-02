@@ -66,6 +66,58 @@ func TestSpritesSatisfiesTheContract(t *testing.T) {
 	})
 }
 
+func TestExecChecksTheAPIOnlyAfterANonzeroCommandResult(t *testing.T) {
+	tests := []struct {
+		name, id, script, message string
+		status                    int
+		cancel                    bool
+		result                    providers.Result
+		is                        error
+		verbs                     []string
+	}{
+		{name: "success ignores a failing metadata API", id: "s1", script: "printf out; printf err >&2", status: 503, result: providers.Result{Stdout: []byte("out"), Stderr: []byte("err")}, verbs: []string{"exec"}},
+		{name: "remote failure keeps its streams and exit", id: "s1", script: "printf out; printf err >&2; exit 3", result: providers.Result{Stdout: []byte("out"), Stderr: []byte("err"), ExitCode: 3}, verbs: []string{"exec", "api"}},
+		{name: "missing machine retains the not-found contract", id: "gone", script: "true", result: providers.Result{Stderr: []byte("sprite not found"), ExitCode: 1}, is: providers.ErrNotFound, verbs: []string{"exec", "api"}},
+		{name: "metadata failure remains visible after a failed command", id: "s1", script: "printf out; exit 3", status: 503, result: providers.Result{Stdout: []byte("out"), ExitCode: 3}, message: `sprites api answered 503 for s1: {"error":"unauthorized"}`, verbs: []string{"exec", "api"}},
+		{name: "invalid name never reaches the CLI", id: "Invalid", script: "true", is: providers.ErrNotFound},
+		{name: "cancelled execution makes no metadata request", id: "s1", script: "true", cancel: true, is: context.Canceled, verbs: []string{"exec"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			if _, err := p.Create(t.Context(), spec("s1", nil)); err != nil {
+				t.Fatal(err)
+			}
+			before := len(fake.verbs())
+			fake.status = tt.status
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.cancel {
+				cancel()
+			}
+			result, err := p.Exec(ctx, tt.id, []string{"sh", "-c", tt.script}, nil)
+			switch {
+			case tt.is != nil:
+				if !errors.Is(err, tt.is) {
+					t.Errorf("Exec error = %v, want %v", err, tt.is)
+				}
+			case tt.message != "":
+				if err == nil || err.Error() != tt.message {
+					t.Errorf("Exec error = %v, want %q", err, tt.message)
+				}
+			case err != nil:
+				t.Errorf("Exec error = %v", err)
+			}
+			if string(result.Stdout) != string(tt.result.Stdout) || string(result.Stderr) != string(tt.result.Stderr) || result.ExitCode != tt.result.ExitCode {
+				t.Errorf("Exec result = %+v, want %+v", result, tt.result)
+			}
+			if got := fake.verbs()[before:]; !slices.Equal(got, tt.verbs) {
+				t.Errorf("CLI calls = %v, want %v", got, tt.verbs)
+			}
+		})
+	}
+}
+
 func TestSpecAdmission(t *testing.T) {
 	p, _ := newProvider(t)
 	tests := []struct {
