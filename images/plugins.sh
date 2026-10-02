@@ -394,9 +394,11 @@ start_services() {
   local name
   if command -v sprite-env > /dev/null; then
     for name in "$@"; do
-      sprite-env services get "cc-remote-$name" > /dev/null 2>&1 \
-        || sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" --no-stream
+      if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
+        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" --no-stream
+      fi
     done
+    drain_artifacts
   else
     "$state_dir/start.sh"
   fi
@@ -413,6 +415,9 @@ run_install() {
   drain_artifacts
 {{- range .Links}}
   ln -sfn "$system_bin_dir/"{{q .}} "$bin_dir/"{{q .}}
+{{- end}}
+{{- with .CodexRuntime}}
+  queue_artifact install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
 {{- end}}
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
@@ -434,9 +439,7 @@ run_install() {
   install_uv_launcher {{q .}} {{q $.Python.Version}} {{spec $tool}}{{range $tool.Args}} {{q .}}{{end}}
 {{- end}}
 {{- end}}
-{{- with .CodexRuntime}}
-  install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
-{{- end}}
+  drain_artifacts
 {{- with .CaptainHook}}
   install_captain_hook {{q .Version}} {{q .URL}} {{q .SHA256}}
 {{- end}}

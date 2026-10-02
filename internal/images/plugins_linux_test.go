@@ -3,12 +3,16 @@ package images
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -863,4 +867,184 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			names := []string{"first", "second", "existing", "third", "fourth", "cookiesync"}
+			inventory := Inventory{
+				Version:    SchemaVersion,
+				Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
+				Cookiesync: &Cookiesync{SchemaFingerprint: digest},
+			}
+			for _, name := range names {
+				inventory.Services = append(inventory.Services, Service{Name: name, Command: []string{"cookiesync", "supervise"}})
+			}
+			host := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			starts := make(chan string, len(names))
+			release := make(chan struct{})
+			cookieRelease := make(chan struct{})
+			var releaseOnce, cookieOnce sync.Once
+			unlatch := func() {
+				releaseOnce.Do(func() { close(release) })
+				cookieOnce.Do(func() { close(cookieRelease) })
+			}
+			defer unlatch()
+			var lock sync.Mutex
+			var gets, creates []string
+			finished := map[string]bool{}
+			active, peak := 0, 0
+			installed := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var call struct {
+					Program string   `json:"program"`
+					Args    []string `json:"args"`
+					Input   string   `json:"input"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&call); err != nil {
+					t.Errorf("decode service call: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if call.Program == "cookiesync" {
+					if !slices.Equal(call.Args, []string{"install"}) {
+						t.Errorf("unexpected cookiesync call: %v", call.Args)
+					}
+					lock.Lock()
+					defer lock.Unlock()
+					for _, name := range names {
+						if name != "existing" && !finished["cc-remote-"+name] {
+							t.Errorf("cookiesync install preceded service completion: %s", name)
+						}
+					}
+					installed = true
+					return
+				}
+				if call.Program != "sprite-env" || len(call.Args) < 3 || call.Args[0] != "services" {
+					t.Errorf("unexpected service call: %s %v", call.Program, call.Args)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				for _, name := range names {
+					recipe, err := os.ReadFile(filepath.Join(host.home, ".cc-remote", "services", name))
+					if err != nil || !strings.HasSuffix(string(recipe), " 'supervise'\n") {
+						t.Errorf("service %s recipe was not complete before registration: %q %v", name, recipe, err)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(host.home, ".config", "synckit", "state.json")); err != nil {
+					t.Errorf("service registration preceded synckit state: %v", err)
+				}
+				name := call.Args[2]
+				if call.Args[1] == "get" {
+					lock.Lock()
+					gets = append(gets, name)
+					lock.Unlock()
+					if name != "cc-remote-existing" {
+						w.WriteHeader(http.StatusNotFound)
+					}
+					return
+				}
+				want := []string{"services", "create", name, "--cmd", filepath.Join(host.home, ".cc-remote", "supervise.py"), "--args", strings.TrimPrefix(name, "cc-remote-"), "--no-stream"}
+				if !slices.Equal(call.Args, want) || call.Input != "" {
+					t.Errorf("service create = %v input=%q, want %v with empty stdin", call.Args, call.Input, want)
+				}
+				lock.Lock()
+				creates = append(creates, name)
+				active++
+				peak = max(peak, active)
+				lock.Unlock()
+				starts <- name
+				if fail && name == "cc-remote-first" {
+					w.WriteHeader(http.StatusInternalServerError)
+				} else if name == "cc-remote-cookiesync" {
+					<-cookieRelease
+				} else {
+					<-release
+				}
+				lock.Lock()
+				active--
+				finished[name] = true
+				lock.Unlock()
+			}))
+			defer server.Close()
+			fake := `#!/usr/bin/env python3
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+args = sys.argv[1:]
+request = {"program": os.path.basename(sys.argv[0]), "args": args, "input": sys.stdin.read() if args[:2] == ["services", "create"] else ""}
+try:
+    with urllib.request.urlopen(os.environ["TEST_SERVICE_API"], json.dumps(request).encode()) as response:
+        response.read()
+except urllib.error.HTTPError:
+    sys.exit(7)
+`
+			for _, name := range []string{"sprite-env", "cookiesync"} {
+				if err := os.WriteFile(filepath.Join(host.fakes, name), []byte(fake), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "configure")
+			cmd.Env = append(os.Environ(), "HOME="+host.home, "XDG_CONFIG_HOME="+filepath.Join(host.home, ".config"), "PATH="+host.fakes+":"+os.Getenv("PATH"), "TEST_SERVICE_API="+server.URL)
+			cmd.Stdin = strings.NewReader("retained-input\n")
+			done := startArtifactScript(cmd)
+			for range 4 {
+				awaitArtifactArrival(t, starts, unlatch, done)
+			}
+			if !fail {
+				lock.Lock()
+				if peak != 4 {
+					t.Errorf("peak concurrent creates = %d, want 4", peak)
+				}
+				lock.Unlock()
+			}
+			select {
+			case result := <-done:
+				unlatch()
+				t.Fatalf("Configure exited before outstanding creates finished: %v %s", result.err, result.out)
+			default:
+			}
+			releaseOnce.Do(func() { close(release) })
+			if !fail {
+				awaitArtifactArrival(t, starts, unlatch, done)
+				lock.Lock()
+				if installed {
+					t.Error("cookiesync install ran while its service create was outstanding")
+				}
+				lock.Unlock()
+			}
+			cookieOnce.Do(func() { close(cookieRelease) })
+			finishArtifactScript(t, done, fail)
+			lock.Lock()
+			defer lock.Unlock()
+			wantGets := make([]string, len(names))
+			for i, name := range names {
+				wantGets[i] = "cc-remote-" + name
+			}
+			if !slices.Equal(gets, wantGets) {
+				t.Errorf("get order = %v, want %v", gets, wantGets)
+			}
+			wantCreates := []string{"cc-remote-first", "cc-remote-second", "cc-remote-third", "cc-remote-fourth"}
+			if !fail {
+				wantCreates = append(wantCreates, "cc-remote-cookiesync")
+			}
+			slices.Sort(creates)
+			slices.Sort(wantCreates)
+			if !slices.Equal(creates, wantCreates) {
+				t.Errorf("created services = %v, want %v; existing service must stay untouched", creates, wantCreates)
+			}
+			if peak > 4 || active != 0 || installed == fail {
+				t.Errorf("after Configure: peak=%d active=%d cookiesync installed=%t, want peak<=4 active=0 installed=%t", peak, active, installed, !fail)
+			}
+			for _, name := range wantCreates {
+				if !finished[name] {
+					t.Errorf("Configure returned before create completed: %s", name)
+				}
+			}
+		})
+	}
 }
