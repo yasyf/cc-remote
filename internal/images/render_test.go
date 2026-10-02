@@ -184,6 +184,7 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
   pack_path required "$user_home/"'.codex/plugins/cache/openai-primary-runtime'
   pack_path required "$user_home/"'.daemonkit/tools/capt-hook/1.0.0'
   pack_path optional "$user_home/"'.local/share/uv/python'
+  pack_native "$user_home/"'.claude/plugins/cache/market/hooks/1.0.0' 'bin/hooks'
   jq -n `
 	for _, want := range []string{system, pack} {
 		if !bytes.Contains(scripts.ProvisionScript, []byte(want)) {
@@ -206,6 +207,8 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
     expose copy required "$HOME/"'.codex/plugins/cache/openai-primary-runtime'
     expose children required "$HOME/"'.daemonkit/tools/capt-hook/1.0.0'
     expose link optional "$HOME/"'.local/share/uv/python'
+    native_home
+    expose_native "$HOME/"'.claude/plugins/cache/market/hooks/1.0.0' 'bin/hooks'
   fi
 `
 	stale := `  if stale_marketplace "$working" 'hooks@market 1.0.0'; then
@@ -221,6 +224,34 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
 		if !bytes.Contains(scripts.Plugins, []byte(want)) {
 			t.Errorf("plugins.sh lacks\n%s", want)
 		}
+	}
+}
+
+func TestNativesSelectsPinnedLaunchers(t *testing.T) {
+	inventory := Inventory{
+		Version: SchemaVersion,
+		Claude: Claude{
+			Marketplaces: []Marketplace{{Name: "market", GitHub: "owner/market", Ref: commit}, {Name: "official", GitHub: "owner/official", Branch: "main"}},
+			Plugins: []Plugin{
+				{ID: "hooks@market", Version: "1.0.0", Bins: []string{"bin/hooks", "bin/hooks-ctl"}},
+				{ID: "captain-hook@market", Version: "2.0.0", Bins: []string{"bin/capt-hook"}},
+				{ID: "notes@market", Version: "3.0.0"},
+				{ID: "datadog@official", Version: "0.7.17", Bins: []string{"bin/dd"}},
+			},
+		},
+		Services: []Service{
+			{Name: "hooks", Plugin: "hooks@market", Command: []string{"bin/hooks", "serve"}},
+			{Name: "notes", Plugin: "notes@market", Command: []string{"bin/notesd"}},
+			{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}},
+		},
+	}
+	want := []native{
+		{".claude/plugins/cache/market/hooks/1.0.0", "bin/hooks"},
+		{".claude/plugins/cache/market/hooks/1.0.0", "bin/hooks-ctl"},
+		{".claude/plugins/cache/market/notes/3.0.0", "bin/notesd"},
+	}
+	if got := natives(inventory); !slices.Equal(got, want) {
+		t.Errorf("natives = %v, want %v", got, want)
 	}
 }
 

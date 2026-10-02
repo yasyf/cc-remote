@@ -91,6 +91,7 @@ func packPayload(ctx context.Context, run images.Exec, downloader Downloader, sc
 		func() error { return scripts.Provision(ctx, run, images.PhaseTools) },
 		func() error { return scripts.StagePlugins(ctx, run) },
 		func() error { return scripts.Install(ctx, run, githubToken, "") },
+		func() error { return scripts.Natives(ctx, run) },
 		func() error { return scripts.Verify(ctx, run) },
 		func() error { return scripts.Provision(ctx, run, images.PhasePack, tools) },
 	}

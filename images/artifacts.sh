@@ -140,3 +140,108 @@ expose() {
       ;;
   esac
 }
+
+binrun_launcher() {
+  if [ ! -f "$1" ]; then
+    echo "cc-remote: $1 is not a file" >&2
+    exit 1
+  fi
+  grep -qF "DESCRIPTOR=\"\$ROOT/$2.binrun\"" "$1" && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" "$1"
+}
+
+native_platform() {
+  case "$(uname -m)" in
+    x86_64) echo linux-x86_64 ;;
+    aarch64) echo linux-aarch64 ;;
+    *)
+      echo "cc-remote: binrun descriptors have no platform for $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+runner_arch() {
+  case "$(uname -m)" in
+    x86_64) echo amd64 ;;
+    aarch64) echo arm64 ;;
+    *)
+      echo "cc-remote: binrun has no release for $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+binrun_entry() {
+  local platform
+  platform="$(native_platform)" || exit
+  if ! sed '1{/^#!/d;}' "$1" | jq -er --arg platform "$platform" '
+    def word: type == "string" and test("^[A-Za-z0-9._-]+$");
+    if .schema == 1 and .kind == "release-binary"
+      and (.name | word)
+      and (.version.static | type == "string" and length > 0)
+      and (.platforms | length > 0)
+      and all(.platforms[]; .size > 0 and .hash == "sha256" and (.digest | test("^[0-9a-f]{64}$")))
+    then . else error("not a static release-binary descriptor") end
+    | .name as $name
+    | .platforms[$platform] // error("no \($platform) entry")
+    | if (.path | type == "string" and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$") and (split("/") | all(. != "." and . != "..")))
+      and ((.format // "") | IN("", "tar.gz", "zip"))
+      and (.providers | type == "array" and length > 0)
+      and (.providers[0] | .type == "github-release" and (.repo | type == "string" and test("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")) and (.tag | word) and (.name | word))
+    then (.format // ""), .digest, .path, $name, .providers[0].tag, "https://github.com/\(.providers[0].repo)/releases/download/\(.providers[0].tag)/\(.providers[0].name)"
+    else error("malformed \($platform) entry") end
+  '; then
+    echo "cc-remote: $1 is not a pinned release-binary descriptor for $platform" >&2
+    exit 1
+  fi
+}
+
+native_root() {
+  printf '%s/.daemonkit/cache/%s/%s\n' "$1" "${2:0:2}" "$2"
+}
+
+native_tree() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -z "$(find "$1" -mindepth 1 ! -type f ! -type d -print -quit)" ]
+}
+
+native_hit() {
+  local root="$1" path="$2" digest="$3" name="$4" tag="$5"
+  native_tree "$root" && [ -f "$root/$path" ] && [ -x "$root/$path" ] && [ -f "$root/meta.json" ] \
+    && jq -se --arg digest "$digest" --arg name "$name" --arg tag "$tag" \
+      'length == 1 and .[0].digest == $digest and .[0].name == $name and .[0].tag == $tag' "$root/meta.json" > /dev/null
+}
+
+launcher_var() {
+  local value
+  value="$(sed -n "s/^$2=\"\\([^\"]*\\)\"\$/\\1/p" "$1")"
+  case "$value" in
+    "" | *$'\n'*) ;;
+    *)
+      if grep -qxE "$3" <<< "$value"; then
+        printf '%s\n' "$value"
+        return
+      fi
+      ;;
+  esac
+  echo "cc-remote: $1 does not pin $2 once" >&2
+  exit 1
+}
+
+runner_pin() {
+  local arch
+  arch="$(runner_arch)" || exit
+  launcher_var "$1" RUNNER_REPO '[A-Za-z0-9._-]+/[A-Za-z0-9._-]+'
+  launcher_var "$1" RUNNER_TAG 'v[A-Za-z0-9._-]+'
+  launcher_var "$1" "RUNNER_SHA_linux_$arch" '[0-9a-f]{64}'
+}
+
+runner_dir() {
+  local tag
+  tag="$(launcher_var "$2" RUNNER_TAG 'v[A-Za-z0-9._-]+')" || exit
+  printf '%s/.daemonkit/binrun/%s\n' "$1" "$tag"
+}
+
+runner_tree() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -f "$1/binrun" ] && [ -x "$1/binrun" ] && [ ! -L "$1/binrun" ] \
+    && [ -z "$(find "$1" -mindepth 1 ! -path "$1/binrun" -print -quit)" ]
+}

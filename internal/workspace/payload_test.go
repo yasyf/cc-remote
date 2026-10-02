@@ -176,7 +176,7 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 				t.Errorf("wrote %q, want %q", out.String(), provider.payload)
 			}
 			pack := "provision pack " + scripts.Fingerprint()
-			steps := []string{"provision packages", "provision tools", "stage plugins", "plugins install", "plugins verify", pack}
+			steps := []string{"provision packages", "provision tools", "stage plugins", "plugins install", "plugins natives", "plugins verify", pack}
 			if !slices.Equal(machine.steps, steps) {
 				t.Errorf("steps = %q, want %q", machine.steps, steps)
 			}
@@ -185,6 +185,7 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 				"provision tools":    string(scripts.ProvisionScript),
 				"stage plugins":      string(scripts.Plugins),
 				"plugins install":    tt.install,
+				"plugins natives":    "",
 				"plugins verify":     "",
 				pack:                 string(scripts.ProvisionScript),
 			}
@@ -227,8 +228,9 @@ func TestBuildPayloadRemovesTheMachineWhenAStepFails(t *testing.T) {
 	}{
 		{name: "a phase fails", failing: "provision tools", steps: 2, message: "exited 1: boom"},
 		{name: "the install fails", failing: "plugins install", steps: 4, message: "exited 1: boom"},
-		{name: "the full verification fails before the pack", failing: "plugins verify", steps: 5, message: "exited 1: boom"},
-		{name: "the download fails", fail: failed, steps: 6, reads: 1, is: failed},
+		{name: "the natives phase fails", failing: "plugins natives", steps: 5, message: "exited 1: boom"},
+		{name: "the full verification fails before the pack", failing: "plugins verify", steps: 6, message: "exited 1: boom"},
+		{name: "the download fails", fail: failed, steps: 7, reads: 1, is: failed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -107,6 +107,7 @@ type lazyLayout struct {
 	link         string
 	untracked    []string
 	unexecutable []string
+	descriptor   []byte
 }
 
 var lazyLayouts = []struct {
@@ -298,7 +299,11 @@ func lazyPluginHost(t *testing.T, plugin, launcher string, layout lazyLayout) pl
 	manifest := map[string]any{"plugins": []map[string]string{{"name": plugin, "source": "./plugin"}}}
 	writePluginTestFile(t, filepath.Join(source, ".claude-plugin/marketplace.json"), mustJSON(t, manifest), 0o644)
 	bin := filepath.Join(source, "plugin/bin/tool")
-	writePluginTestFile(t, bin+".binrun", binrunDescriptor(t, digest), 0o644)
+	descriptor := layout.descriptor
+	if descriptor == nil {
+		descriptor = binrunDescriptor(t, digest)
+	}
+	writePluginTestFile(t, bin+".binrun", descriptor, 0o644)
 	if layout.link == "" {
 		writePluginTestFile(t, bin, []byte(launcher), 0o755)
 	} else {
@@ -350,8 +355,24 @@ func commitPin(t *testing.T, dir string, layout lazyLayout) string {
 
 func binrunDescriptor(t *testing.T, sha256 string) []byte {
 	t.Helper()
-	descriptor := map[string]any{"schema": 1, "kind": "release-binary", "version": map[string]string{"static": "1.0.0"}, "platforms": map[string]any{"linux-x86_64": map[string]any{"size": 123, "hash": "sha256", "digest": sha256}}}
-	return append([]byte("#!/usr/bin/env binrun\n"), mustJSON(t, descriptor)...)
+	return append([]byte("#!/usr/bin/env binrun\n"), mustJSON(t, releaseBinary(sha256))...)
+}
+
+func releaseBinary(sha256 string) map[string]any {
+	return map[string]any{
+		"schema":  1,
+		"kind":    "release-binary",
+		"name":    "tool",
+		"version": map[string]string{"static": "1.0.0"},
+		"platforms": map[string]any{"linux-x86_64": map[string]any{
+			"size":      123,
+			"hash":      "sha256",
+			"digest":    sha256,
+			"path":      "tool",
+			"format":    "tar.gz",
+			"providers": []map[string]string{{"type": "github-release", "repo": "owner/tool", "tag": "v1.0.0", "name": "tool_1.0.0_linux_amd64.tar.gz"}},
+		}},
+	}
 }
 
 func writePluginTestFile(t *testing.T, path string, data []byte, mode os.FileMode) {

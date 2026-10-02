@@ -249,6 +249,7 @@ func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, s
 		"git":            []byte(fakeGit),
 		"sprite-env":     []byte(fakeSynckitReader),
 		"cookiesync":     []byte(fakeSynckitReader),
+		"getent":         []byte(fakeGetent),
 		"plugins.sh":     scripts.Plugins,
 		"state.json":     mustJSON(t, state),
 		"service-status": []byte("running\n"),

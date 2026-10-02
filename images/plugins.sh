@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-phase="${1:?usage: plugins.sh install [PAYLOAD_DIR]|publish STAMP|ready STAMP|configure|verify}"
+phase="${1:?usage: plugins.sh install [PAYLOAD_DIR]|natives|publish STAMP|ready STAMP|configure|verify}"
 
 state_dir="$HOME/.cc-remote"
 share_dir="$HOME/.local/share/cc-remote"
@@ -72,24 +72,111 @@ verify_plugin_bin() {
       exit 1
     fi
     git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher"
-    if grep -qF "DESCRIPTOR=\"\$ROOT/$bin.binrun\"" "$tmp_dir/launcher" \
-      && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" "$tmp_dir/launcher"; then
+    if binrun_launcher "$tmp_dir/launcher" "$bin"; then
       if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
         || [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
         || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
         echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
         exit 1
       fi
-      sed '1{/^#!/d;}' "$root/$bin.binrun" | jq -e '
-        .schema == 1 and .kind == "release-binary"
-        and (.version.static | type == "string" and length > 0)
-        and (.platforms | length > 0)
-        and all(.platforms[]; .size > 0 and .hash == "sha256" and (.digest | test("^[0-9a-f]{64}$")))
-      ' > /dev/null
+      binrun_entry "$root/$bin.binrun" > /dev/null
       return
     fi
   fi
   "$root/$bin" --version > /dev/null
+}
+
+native_home() {
+  if [ -n "${DAEMONKIT_HOME:-}" ]; then
+    echo "cc-remote: natives need DAEMONKIT_HOME unset so daemonkit caches under $HOME" >&2
+    exit 1
+  fi
+  if [ "$(getent passwd "$(id -un)" | cut -d: -f6)" != "$HOME" ]; then
+    echo "cc-remote: natives need the passwd home of $(id -un) to be $HOME" >&2
+    exit 1
+  fi
+}
+
+prepare_runner() {
+  local launcher="$1" text dir asset stage
+  local -a pin
+  text="$(runner_pin "$launcher")" || exit
+  mapfile -t pin <<< "$text"
+  dir="$HOME/.daemonkit/binrun/${pin[1]}"
+  stage="$(mktemp -d "$tmp_dir/runner.XXXXXX")"
+  asset="binrun_${pin[1]#v}_linux_$(runner_arch).tar.gz"
+  fetch "https://github.com/${pin[0]}/releases/download/${pin[1]}/$asset" "$stage/$asset" sha256 "${pin[2]}"
+  tar -xzf "$stage/$asset" -C "$stage" binrun
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    if ! runner_tree "$dir" || ! cmp -s "$stage/binrun" "$dir/binrun"; then
+      echo "cc-remote: $dir is not the binrun ${pin[1]} release" >&2
+      exit 1
+    fi
+  else
+    mkdir -p "$dir"
+    install -m 0755 "$stage/binrun" "$dir/binrun"
+  fi
+  rm -rf "$stage"
+  printf '%s\n' "$dir/binrun"
+}
+
+prepare_native() {
+  local dir="$1" bin="$2" text root runner
+  local -a entry
+  binrun_launcher "$dir/$bin" "$bin" || return 0
+  text="$(binrun_entry "$dir/$bin.binrun")" || exit
+  mapfile -t entry <<< "$text"
+  runner="$(prepare_runner "$dir/$bin")" || exit
+  root="$(native_root "$HOME" "${entry[1]}")"
+  if ! native_hit "$root" "${entry[2]}" "${entry[1]}" "${entry[3]}" "${entry[4]}"; then
+    "$runner" -- fetch "$dir/$bin.binrun"
+  fi
+  verify_native "$root" "${entry[@]}"
+}
+
+verify_native() {
+  local root="$1" format="$2" digest="$3" path="$4" name="$5" tag="$6" url="$7" stage
+  if ! native_hit "$root" "$path" "$digest" "$name" "$tag"; then
+    echo "cc-remote: $root is not a daemonkit cache entry for $name $tag $digest" >&2
+    exit 1
+  fi
+  stage="$(mktemp -d "$tmp_dir/native.XXXXXX")"
+  fetch "$url" "$stage/asset" sha256 "$digest"
+  mkdir "$stage/tree"
+  case "$format" in
+    "")
+      mkdir -p "$(dirname "$stage/tree/$path")"
+      cp "$stage/asset" "$stage/tree/$path"
+      ;;
+    tar.gz) tar -xzf "$stage/asset" -C "$stage/tree" ;;
+    zip) unzip -q "$stage/asset" -d "$stage/tree" ;;
+  esac
+  if [ -e "$stage/tree/meta.json" ] || [ -L "$stage/tree/meta.json" ] || ! native_tree "$stage/tree"; then
+    echo "cc-remote: $url is not a plain tree of release members" >&2
+    exit 1
+  fi
+  cp "$root/meta.json" "$stage/tree/meta.json"
+  if ! diff -rq "$stage/tree" "$root" >&2; then
+    echo "cc-remote: $root differs from $url" >&2
+    exit 1
+  fi
+  rm -rf "$stage"
+}
+
+expose_native() {
+  local dir="$1" bin="$2" text root runner
+  local -a entry
+  binrun_launcher "$payload$dir/$bin" "$bin" || return 0
+  text="$(binrun_entry "$payload$dir/$bin.binrun")" || exit
+  mapfile -t entry <<< "$text"
+  root="$(native_root "$HOME" "${entry[1]}")"
+  runner="$(runner_dir "$HOME" "$payload$dir/$bin")" || exit
+  expose link required "$root"
+  expose link required "$runner"
+  if ! native_hit "$payload$root" "${entry[2]}" "${entry[1]}" "${entry[3]}" "${entry[4]}" || ! runner_tree "$payload$runner"; then
+    echo "cc-remote: payload $payload lacks a verified ${entry[3]} ${entry[4]} native at $root" >&2
+    exit 1
+  fi
 }
 
 pinned() {
@@ -468,6 +555,12 @@ run_install() {
 {{- range .HomeTrees}}
     expose {{.Kind}} {{.Requirement}} {{home .Path}}
 {{- end}}
+{{- if .Natives}}
+    native_home
+{{- end}}
+{{- range .Natives}}
+    expose_native {{home .Dir}} {{q .Bin}}
+{{- end}}
   fi
   IFS= read -r github_token
   mkdir -p "$bin_dir"
@@ -515,6 +608,16 @@ run_install() {
 {{- end}}
   local link_check=spelling
   verify_user
+}
+
+run_natives() {
+  :
+{{- if .Natives}}
+  native_home
+{{- end}}
+{{- range .Natives}}
+  prepare_native {{home .Dir}} {{q .Bin}}
+{{- end}}
 }
 
 run_publish() {
@@ -636,6 +739,7 @@ verify_user() {
 
 case "$phase" in
   install) run_install "${@:2}" ;;
+  natives) run_natives ;;
   publish) run_publish "${2:-}" ;;
   ready) run_ready "${2:-}" ;;
   configure) run_configure ;;
@@ -644,7 +748,7 @@ case "$phase" in
     verify_user
     ;;
   *)
-    echo "usage: plugins.sh install [PAYLOAD_DIR]|publish STAMP|ready STAMP|configure|verify" >&2
+    echo "usage: plugins.sh install [PAYLOAD_DIR]|natives|publish STAMP|ready STAMP|configure|verify" >&2
     exit 2
     ;;
 esac

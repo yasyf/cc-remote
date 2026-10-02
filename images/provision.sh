@@ -230,6 +230,32 @@ pack_path() {
   fi
 }
 
+pack_once() {
+  local path
+  for path in "${paths[@]}"; do
+    if [ "$path" = "${1#/}" ]; then
+      return
+    fi
+  done
+  pack_path required "$1"
+}
+
+pack_native() {
+  local dir="$1" bin="$2" text root runner
+  local -a entry
+  binrun_launcher "$dir/$bin" "$bin" || return 0
+  text="$(binrun_entry "$dir/$bin.binrun")" || exit
+  mapfile -t entry <<< "$text"
+  root="$(native_root "$user_home" "${entry[1]}")"
+  runner="$(runner_dir "$user_home" "$dir/$bin")" || exit
+  if ! native_hit "$root" "${entry[2]}" "${entry[1]}" "${entry[3]}" "${entry[4]}" || ! runner_tree "$runner"; then
+    echo "cc-remote: the build machine lacks a verified ${entry[3]} ${entry[4]} native at $root" >&2
+    exit 1
+  fi
+  pack_once "$root"
+  pack_once "$runner"
+}
+
 provision_pack() {
   local fingerprint="${1:?pack needs the tools fingerprint}" user_home version
   local -a paths=()
@@ -243,6 +269,9 @@ provision_pack() {
 {{- end}}
 {{- range .HomeTrees}}
   pack_path {{.Requirement}} {{under "user_home" .Path}}
+{{- end}}
+{{- range .Natives}}
+  pack_native {{under "user_home" .Dir}} {{q .Bin}}
 {{- end}}
   jq -n --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version" \
     '{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}' > "$tmp_dir/cc-remote-payload.json"

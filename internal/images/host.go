@@ -106,6 +106,10 @@ func (s Scripts) Install(ctx context.Context, exec Exec, githubToken, payload st
 	return runPlugins(ctx, exec, args, nil, strings.NewReader(githubToken+"\n"))
 }
 
+func (s Scripts) Natives(ctx context.Context, exec Exec) error {
+	return runPlugins(ctx, exec, []string{"natives"}, nil, nil)
+}
+
 func (s Scripts) Publish(ctx context.Context, exec Exec, stamp string) error {
 	if !sha256Pattern.MatchString(stamp) {
 		return fmt.Errorf("plugins publish: stamp %q is not a fingerprint", stamp)

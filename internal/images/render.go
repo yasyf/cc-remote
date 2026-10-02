@@ -64,6 +64,11 @@ type tree struct {
 
 var readyTimeout = 30 * time.Second
 
+type native struct {
+	Dir string
+	Bin string
+}
+
 type view struct {
 	Inventory
 	Tools        []Artifact
@@ -71,6 +76,7 @@ type view struct {
 	SystemTrees  []tree
 	HomeTrees    []tree
 	ReadyTimeout float64
+	Natives      []native
 }
 
 func newView(inv Inventory, profile string) view {
@@ -82,6 +88,7 @@ func newView(inv Inventory, profile string) view {
 		SystemTrees:  systemTrees(inv),
 		HomeTrees:    homeTrees(inv, tools),
 		ReadyTimeout: readyTimeout.Seconds(),
+		Natives:      natives(inv),
 	}
 }
 
@@ -127,8 +134,7 @@ func homeTrees(inv Inventory, tools []Artifact) []tree {
 		}
 	}
 	for _, plugin := range inv.Claude.Plugins {
-		name, marketplace, _ := strings.Cut(plugin.ID, "@")
-		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/cache/" + marketplace + "/" + name + "/" + plugin.Version})
+		trees = append(trees, tree{exposeCopy, required, pluginCacheDir(plugin)})
 	}
 	if len(inv.Claude.Plugins) > 0 {
 		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/installed_plugins.json"})
@@ -153,6 +159,38 @@ func homeTrees(inv Inventory, tools []Artifact) []tree {
 		trees = append(trees, tree{exposeLink, optional, ".local/share/uv/python"})
 	}
 	return trees
+}
+
+func pluginCacheDir(plugin Plugin) string {
+	name, marketplace, _ := strings.Cut(plugin.ID, "@")
+	return ".claude/plugins/cache/" + marketplace + "/" + name + "/" + plugin.Version
+}
+
+func natives(inv Inventory) []native {
+	pinned := map[string]bool{}
+	for _, marketplace := range inv.Claude.Marketplaces {
+		pinned[marketplace.Name] = marketplace.Ref != ""
+	}
+	var candidates []native
+	for _, plugin := range inv.Claude.Plugins {
+		name, marketplace, _ := strings.Cut(plugin.ID, "@")
+		if name == "captain-hook" || !pinned[marketplace] {
+			continue
+		}
+		bins := slices.Clone(plugin.Bins)
+		for _, service := range inv.Services {
+			if service.Plugin == plugin.ID {
+				bins = append(bins, service.Command[0])
+			}
+		}
+		for _, bin := range bins {
+			candidate := native{pluginCacheDir(plugin), bin}
+			if !slices.Contains(candidates, candidate) {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	return candidates
 }
 
 func uvToolDir(tool PythonTool) string {
