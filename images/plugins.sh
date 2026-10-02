@@ -60,7 +60,7 @@ pinned_blob() {
 }
 
 verify_plugin_bin() {
-  local id="$1" bin="$2" ref="$3" root dir source launcher descriptor text
+  local id="$1" bin="$2" ref="$3" root dir source launcher descriptor
   root="$(plugin_root "$id")"
   if [ ! -x "$root/$bin" ]; then
     echo "cc-remote: plugin $id has no executable $bin" >&2
@@ -69,12 +69,15 @@ verify_plugin_bin() {
   if [ -n "$ref" ] && [ "${id%@*}" != captain-hook ]; then
     dir="$marketplace_dir/${id#*@}"
     source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')"
-    if descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
-      && launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")" \
-      && text="$(git -C "$dir" cat-file blob "${launcher#* }")" \
-      && grep -qF "DESCRIPTOR=\"\$ROOT/$bin.binrun\"" <<< "$text" \
-      && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" <<< "$text"; then
-      if [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
+    if ! launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")"; then
+      echo "cc-remote: plugin $id $bin is not a committed file at $ref" >&2
+      exit 1
+    fi
+    git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher"
+    if grep -qF "DESCRIPTOR=\"\$ROOT/$bin.binrun\"" "$tmp_dir/launcher" \
+      && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" "$tmp_dir/launcher"; then
+      if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
+        || [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
         || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
         echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
         exit 1

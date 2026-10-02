@@ -32,6 +32,10 @@ printf '%s\n' "$*" >> "$FAKE_LOG.binrun"
 exit 29
 `
 
+const trapBinrun = `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_LOG.binrun"
+`
+
 func TestPluginsInstallLeavesPythonUserToolsForFirstUse(t *testing.T) {
 	for _, marketplace := range []bool{false, true} {
 		t.Run(map[bool]string{false: "version", true: "marketplace"}[marketplace], func(t *testing.T) {
@@ -240,34 +244,32 @@ func TestPluginsRejectLazyLaunchersExecutableOnlyOutsideTheirPin(t *testing.T) {
 	}
 }
 
-func TestPluginsProbeLazyLaunchersTheirPinDoesNotCommit(t *testing.T) {
+func TestPluginsRejectLazyLaunchersTheirPinDoesNotCommit(t *testing.T) {
 	tests := []struct {
 		name    string
 		layout  lazyLayout
 		outside string
+		wantErr string
 	}{
-		{name: "untracked-descriptor", layout: lazyLayout{untracked: []string{"plugin/bin/tool.binrun"}}},
-		{name: "untracked-target", layout: lazyLayout{link: "../scripts/launch.sh", untracked: []string{"plugin/scripts/launch.sh"}}},
-		{name: "escaping-target", layout: lazyLayout{link: "../../../launch.sh"}, outside: ".local/share/cc-remote/marketplaces/launch.sh"},
-		{name: "absolute-target", layout: lazyLayout{link: filepath.Join(t.TempDir(), "launch.sh")}},
+		{name: "untracked-descriptor", layout: lazyLayout{untracked: []string{"plugin/bin/tool.binrun"}}, wantErr: "differs from its pinned launcher or descriptor"},
+		{name: "untracked-target", layout: lazyLayout{link: "../scripts/launch.sh", untracked: []string{"plugin/scripts/launch.sh"}}, wantErr: "is not a committed file at"},
+		{name: "escaping-target", layout: lazyLayout{link: "../../../launch.sh"}, outside: ".local/share/cc-remote/marketplaces/launch.sh", wantErr: "is not a committed file at"},
+		{name: "absolute-target", layout: lazyLayout{link: filepath.Join(t.TempDir(), "launch.sh")}, wantErr: "is not a committed file at"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := lazyPluginHost(t, "tool", fakeLazyLauncher, tt.layout)
+			writePluginTestFile(t, filepath.Join(h.fakes, "binrun"), []byte(trapBinrun), 0o755)
 			if tt.outside != "" {
 				writePluginTestFile(t, filepath.Join(h.home, tt.outside), []byte(fakeLazyLauncher), 0o755)
 			}
 			out, err := h.plugins("install", "test-stamp")
-			if exitCode(err) != 29 {
-				t.Fatalf("install did not fall back to the runtime probe: %v\n%s", err, out)
+			if exitCode(err) != 1 || !strings.Contains(out, tt.wantErr) {
+				t.Fatalf("install = %v\n%s\nwant exit 1 containing %q", err, out, tt.wantErr)
 			}
 			h.unready()
-			raw, err := os.ReadFile(filepath.Join(h.fakes, "calls.log.binrun"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want := filepath.Join(h.fakes, "plugins/tool/bin/tool.binrun") + " --version\n"; string(raw) != want {
-				t.Fatalf("probe = %q, want %q", raw, want)
+			if _, err := os.Stat(filepath.Join(h.fakes, "calls.log.binrun")); !os.IsNotExist(err) {
+				t.Fatalf("install executed the installed launcher: %v", err)
 			}
 		})
 	}
