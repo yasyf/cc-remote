@@ -370,11 +370,11 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		if err := run.after(packages, tools); err != nil {
 			return err
 		}
-		if err := s.configure(ctx, record, env); err != nil {
+		return s.configure(ctx, record, env)
+	})
+	run.Go(func(ctx context.Context) error {
+		if err := run.after(tools); err != nil {
 			return err
-		}
-		if ctx.Err() != nil {
-			return context.Cause(ctx)
 		}
 		return s.enroll(context.WithoutCancel(ctx), held, record)
 	})

@@ -422,6 +422,17 @@ func (h *harness) bound() tailnet.Binding {
 	return binding
 }
 
+func (h *harness) awaitBound(want tailnet.Binding) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.bound() != want {
+		if time.Now().After(deadline) {
+			h.t.Fatalf("never bound to %v; bound %v", want, h.bound())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (h *harness) bind(to tailnet.Binding) {
 	h.t.Helper()
 	held, err := h.session.State.Hold("ws-1")
@@ -476,7 +487,9 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	h.ordered(0, prereqsPhase, packagesPhase, publishes)
 	h.ordered(0, prereqsPhase, checkout)
 	h.ordered(0, prereqsPhase, toolsPhase)
-	toolsLane := h.ordered(0, toolsPhase, stages, installs, configures, freshens, enrolls, publishes)
+	toolsLane := h.ordered(0, toolsPhase, stages, installs, configures, publishes)
+	h.ordered(0, installs, freshens, enrolls, publishes)
+	h.ordered(0, packagesPhase, configures)
 	source := h.ordered(0, checkout, prepares, publishes)
 	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", publishes) != 1 || h.machine.ran("ws-1", prereqsPhase) != 1 {
 		t.Errorf("a fresh create renewed identity, checked a ready stamp, mounted a payload, merged its plugins, or ran its prerequisites or publish other than once: %q", h.machine.scripts["ws-1"])
@@ -1120,7 +1133,7 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 			var creating sync.WaitGroup
 			t.Cleanup(creating.Wait)
 			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
-			checkingOut, preparing := h.machine.hold(t, checkout), h.machine.hold(t, prepares)
+			checkingOut, preparing, configuring := h.machine.hold(t, checkout), h.machine.hold(t, prepares), h.machine.hold(t, configures)
 			release := func(fragment string) {
 				result := providers.Result{}
 				if fragment == tt.fails {
@@ -1138,14 +1151,16 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 			checkingOut.awaitEntered(t)
 			checkingOut.release <- providers.Result{}
 			preparing.stillParked(t, "while the packages and the tool install were still running")
+			configuring.stillParked(t, "while the packages and the tool install were still running")
 			release(tt.release[0])
 			preparing.stillParked(t, "once only "+tt.release[0]+" had finished")
+			configuring.stillParked(t, "once only "+tt.release[0]+" had finished")
 			release(tt.release[1])
 			if tt.fails != "" {
 				if err := <-created; err == nil || !strings.Contains(err.Error(), tt.fails+" held back the create") {
 					t.Fatalf("Create = %v", err)
 				}
-				if preparing.ran() || h.machine.ran("ws-1", publishes) != 0 {
+				if preparing.ran() || configuring.ran() || h.machine.ran("ws-1", publishes) != 0 {
 					t.Errorf("a create whose %q failed ran %q", tt.fails, h.machine.scripts["ws-1"])
 				}
 				if _, ok := h.record("ws-1"); ok {
@@ -1153,6 +1168,8 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 				}
 				return
 			}
+			configuring.awaitEntered(t)
+			configuring.release <- providers.Result{}
 			if tt.empty {
 				if err := <-created; err != nil {
 					t.Fatal(err)
@@ -1174,6 +1191,152 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 			h.ordered(0, installs, configures, publishes)
 			if h.machine.ran("ws-1", prepares) != 1 || h.machine.ran("ws-1", publishes) != 1 {
 				t.Errorf("the create prepared %d times and published %d times: %q", h.machine.ran("ws-1", prepares), h.machine.ran("ws-1", publishes), h.machine.scripts["ws-1"])
+			}
+		})
+	}
+}
+
+func TestTheEnrollmentWaitsForTheToolInstallButNotForThePackages(t *testing.T) {
+	h := newHarness(t, true)
+	var creating sync.WaitGroup
+	t.Cleanup(creating.Wait)
+	packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
+	enrolling, configuring := h.machine.hold(t, freshens), h.machine.hold(t, configures)
+	created := make(chan error, 1)
+	creating.Go(func() {
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		created <- err
+	})
+	packaging.awaitEntered(t)
+	installing.awaitEntered(t)
+	enrolling.stillParked(t, "while the tool install was still running")
+	installing.release <- providers.Result{}
+	enrolling.awaitEntered(t)
+	configuring.stillParked(t, "once only the tool install had finished")
+	enrolling.release <- providers.Result{}
+	packaging.release <- providers.Result{}
+	configuring.awaitEntered(t)
+	configuring.release <- providers.Result{}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(0, installs, freshens, enrolls, publishes)
+	h.ordered(0, packagesPhase, configures, publishes)
+	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) || h.machine.ran("ws-1", publishes) != 1 {
+		t.Errorf("record %+v (found %v), bound %v, published %d times", record, found, h.bound(), h.machine.ran("ws-1", publishes))
+	}
+}
+
+func TestTheEnrollmentDoesNotWaitForConfigure(t *testing.T) {
+	h := newHarness(t, true)
+	var creating sync.WaitGroup
+	t.Cleanup(creating.Wait)
+	configuring := h.machine.hold(t, configures)
+	created := make(chan error, 1)
+	creating.Go(func() {
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		created <- err
+	})
+	configuring.awaitEntered(t)
+	h.awaitBound(tailnet.Binding{NodeID: "nNEW"})
+	if h.machine.ran("ws-1", enrolls) != 1 || h.machine.ran("ws-1", publishes) != 0 {
+		t.Errorf("with configure still running, the create enrolled %d times and published %d times", h.machine.ran("ws-1", enrolls), h.machine.ran("ws-1", publishes))
+	}
+	configuring.release <- providers.Result{}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(0, installs, freshens, enrolls, publishes)
+	h.ordered(0, configures, publishes)
+	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.machine.ran("ws-1", publishes) != 1 {
+		t.Errorf("record %+v (found %v), published %d times", record, found, h.machine.ran("ws-1", publishes))
+	}
+}
+
+func TestTheEnrollmentNeverStartsWhenTheToolInstallFails(t *testing.T) {
+	tests := []struct {
+		name  string
+		fails string
+	}{
+		{name: "the tools phase fails", fails: toolsPhase},
+		{name: "the plugin install fails", fails: installs},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, true)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			failing, enrolling := h.machine.hold(t, tt.fails), h.machine.hold(t, freshens)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			failing.awaitEntered(t)
+			enrolling.stillParked(t, "before the tool install had finished")
+			failing.release <- providers.Result{Stderr: []byte(tt.fails + " held back the create"), ExitCode: 1}
+			if err := <-created; err == nil || !strings.Contains(err.Error(), tt.fails+" held back the create") {
+				t.Fatalf("Create = %v", err)
+			}
+			if enrolling.ran() || h.machine.ran("ws-1", enrolls) != 0 || h.machine.ran("ws-1", logsOut) != 0 || h.machine.ran("ws-1", publishes) != 0 || h.api.mintedKeys() != 0 || len(h.api.deletedNodes()) != 0 || h.bound() != (tailnet.Binding{}) {
+				t.Errorf("a create whose %q failed ran %q, minted %d keys, deleted %v, bound %v", tt.fails, h.machine.scripts["ws-1"], h.api.mintedKeys(), h.api.deletedNodes(), h.bound())
+			}
+			if _, found := h.record("ws-1"); found {
+				t.Error("the failed create kept its record")
+			}
+		})
+	}
+}
+
+func TestAConfigureFailureAfterTheEnrollmentStartedLeavesTheTailnet(t *testing.T) {
+	tests := []struct {
+		name     string
+		inFlight bool
+	}{
+		{name: "configure fails while the enrollment is in flight", inFlight: true},
+		{name: "configure fails after the enrollment finished"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, true)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			configuring := h.machine.hold(t, configures)
+			var enrolling *hold
+			if tt.inFlight {
+				enrolling = h.machine.hold(t, enrolls)
+			}
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			configuring.awaitEntered(t)
+			if tt.inFlight {
+				enrolling.awaitEntered(t)
+				if h.bound() != (tailnet.Binding{Unresolved: true}) {
+					t.Fatalf("bound %v while the enroll script was running", h.bound())
+				}
+			} else {
+				h.awaitBound(tailnet.Binding{NodeID: "nNEW"})
+			}
+			configuring.release <- providers.Result{Stderr: []byte("configure held back the create"), ExitCode: 1}
+			if tt.inFlight {
+				h.machine.setStatus(running("nNEW"))
+				enrolling.release <- providers.Result{Stdout: []byte(running("nNEW"))}
+			}
+			if err := <-created; err == nil || !strings.Contains(err.Error(), "configure held back the create") {
+				t.Fatalf("Create = %v", err)
+			}
+			h.ordered(0, enrolls, logsOut)
+			if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.machine.ran("ws-1", logsOut) != 1 || h.machine.ran("ws-1", publishes) != 0 || h.bound() != (tailnet.Binding{}) {
+				t.Errorf("deleted %v, ran %q, bound %v", deleted, h.machine.scripts["ws-1"], h.bound())
+			}
+			if _, err := h.fake.Get(context.Background(), "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+				t.Errorf("the machine survived the failed create: %v", err)
+			}
+			if _, found := h.record("ws-1"); found {
+				t.Error("the failed create left a record")
 			}
 		})
 	}
