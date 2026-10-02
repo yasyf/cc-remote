@@ -40,7 +40,11 @@ claude_json() {
 plugin_root() {
   local plugins
   plugins="$(claude_json plugin list --json)" || exit
-  jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath' <<< "$plugins"
+  plugin_path "$plugins" "$1"
+}
+
+plugin_path() {
+  jq -er --arg id "$2" '.[] | select(.id == $id) | .installPath' <<< "$1"
 }
 
 pinned_blob() {
@@ -61,7 +65,7 @@ pinned_blob() {
 
 verify_plugin_bin() {
   local id="$1" bin="$2" ref="$3" root dir source launcher descriptor
-  root="$(plugin_root "$id")"
+  root="$(plugin_path "$4" "$id")"
   if [ ! -x "$root/$bin" ]; then
     echo "cc-remote: plugin $id has no executable $bin" >&2
     exit 1
@@ -104,13 +108,23 @@ PINS
 healthy() {
   local plugins
   plugins="$(claude_json plugin list --json)" || exit
-  jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$plugins" \
+  healthy_plugins "$plugins"
+}
+
+healthy_plugins() {
+  jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$1" \
     | sort
 }
 
 check_plugins() {
+  local plugins
+  plugins="$(claude_json plugin list --json)" || exit
+  verify_plugins "$plugins"
+}
+
+verify_plugins() {
   local installed
-  installed="$(healthy)"
+  installed="$(healthy_plugins "$1")"
   if ! diff <(pinned) - <<< "$installed" >&2; then
     echo "plugins: the installed, enabled and loadable plugins differ from the pins" >&2
     exit 1
@@ -155,7 +169,11 @@ checkout() {
 recorded_source() {
   local known
   known="$(claude_json plugin marketplace list --json)" || exit
-  jq -r --arg name "$1" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$known"
+  marketplace_source "$known" "$1"
+}
+
+marketplace_source() {
+  jq -r --arg name "$2" '.[] | select(.name == $name) | [.source, (.repo // .path), .ref] | map(select(. != null)) | join(" ")' <<< "$1"
 }
 
 pin_marketplace() {
@@ -171,7 +189,7 @@ pin_marketplace() {
 
 verify_marketplace() {
   local recorded
-  recorded="$(recorded_source "$1")"
+  recorded="$(marketplace_source "$3" "$1")"
   if [ "$recorded" != "$2" ]; then
     echo "cc-remote: marketplace $1 is not registered from $2" >&2
     exit 1
@@ -187,7 +205,7 @@ pin_ref_marketplace() {
 }
 
 verify_ref_marketplace() {
-  verify_marketplace "$1" "directory $marketplace_dir/$1"
+  verify_marketplace "$1" "directory $marketplace_dir/$1" "$3"
   if [ "$(git -C "$marketplace_dir/$1" rev-parse HEAD)" != "$2" ]; then
     echo "cc-remote: marketplace $1 is not checked out at $2" >&2
     exit 1
@@ -202,7 +220,7 @@ pin_branch_marketplace() {
 
 verify_branch_marketplace() {
   local name="$1" repo="$2" branch="$3"
-  verify_marketplace "$name" "github $repo $branch"
+  verify_marketplace "$name" "github $repo $branch" "$4"
   if ! jq -se --arg name "$name" --argjson held "$(held_declaration "$repo" "$branch")" 'length == 1 and .[0].extraKnownMarketplaces[$name] == $held' "$HOME/.claude/settings.json" > /dev/null; then
     echo "cc-remote: marketplace $name is not declared in Claude settings at branch $branch with auto-update off" >&2
     exit 1
@@ -492,19 +510,25 @@ run_verify() {
 {{- range .Links}}
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
 {{- end}}
+{{- if .Claude.Marketplaces}}
+  local known
+  known="$(claude_json plugin marketplace list --json)" || exit
+{{- end}}
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
-  verify_ref_marketplace {{q .Name}} {{q .Ref}}
+  verify_ref_marketplace {{q .Name}} {{q .Ref}} "$known"
 {{- else}}
-  verify_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}
+  verify_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}} "$known"
 {{- end}}
 {{- end}}
 {{- if .Claude.Plugins}}
-  check_plugins
+  local plugins
+  plugins="$(claude_json plugin list --json)" || exit
+  verify_plugins "$plugins"
 {{- range .Claude.Plugins}}
 {{- $plugin := .}}
 {{- range .Bins}}
-  verify_plugin_bin {{q $plugin.ID}} {{q .}} {{q (pluginRef $plugin)}}
+  verify_plugin_bin {{q $plugin.ID}} {{q .}} {{q (pluginRef $plugin)}} "$plugins"
 {{- end}}
 {{- end}}
 {{- end}}
