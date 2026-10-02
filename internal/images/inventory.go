@@ -314,7 +314,7 @@ func (inv Inventory) validateAptPayload(payload AptPayload) error {
 		return errors.New("apt.payload.fonts: proving a family needs fc-match under apt.payload.bins")
 	}
 	for _, consumer := range payload.Consumers {
-		if !relative(consumer) && !(path.Clean(consumer) == consumer && strings.HasPrefix(consumer, "/opt/cc-remote/")) {
+		if !relative(consumer) && (path.Clean(consumer) != consumer || !strings.HasPrefix(consumer, "/opt/cc-remote/")) {
 			return fmt.Errorf("apt.payload.consumers: %q is neither a clean path relative to the home directory nor under /opt/cc-remote", consumer)
 		}
 	}
