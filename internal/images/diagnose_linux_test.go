@@ -81,24 +81,37 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 					"6,104,343000003,-;eth0: link up\n"},
 				{progress, "font:0\n"},
 			}),
-			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"progress":"font:0","failedExecCgroup":"/sys/fs/cgroup/build",` +
+			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"countersResetAfterFailedExec":false,"progress":"font:0","failedExecCgroup":"/sys/fs/cgroup/build",` +
 				`"cgroups":{"failedExec":` + buildReading + `,"diagnostic":{"cgroup":"/sys/fs/cgroup/diagnose","memory.current":4096,"memory.max":"max","memory.peak":8192,` +
 				`"memory.events":{"low":0,"high":0,"max":0,"oom":0,"oom_kill":0,"oom_group_kill":0}}},` +
 				`"vmstat.oom_kill":1,"oom":["` + invoked + `","` + chosen + `","` + killed + `"]}`,
 		},
 		{
-			name: "a changed boot keeps both boot IDs and reports the failed exec's vanished cgroup as null, not its parent",
+			name: "the failed exec's vanished cgroup on the same boot is null, not its parent",
 			files: [][2]string{
 				{"proc/self/cgroup", "0::/\n"},
 				{"sys/fs/cgroup/cgroup.procs", "1\n"},
 				{"sys/fs/cgroup/sprite/memory.current", "999\n"},
-				{bootID, now + "\n"},
+				{bootID, then + "\n"},
 				{recorded, "boot_id " + then + "\ncgroup /sprite/exec-7\n"},
 				{vmstat, "oom_kill 0\n"},
 				{"dev/kmsg", "6,1,1,-;eth0: link up\n"},
 				{progress, "plugins\n"},
 			},
-			want: `{"bootId":{"then":"` + then + `","now":"` + now + `"},"sameBoot":false,"progress":"plugins","failedExecCgroup":"/sys/fs/cgroup/sprite/exec-7",` +
+			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"countersResetAfterFailedExec":false,"progress":"plugins","failedExecCgroup":"/sys/fs/cgroup/sprite/exec-7",` +
+				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":0,"oom":[]}`,
+		},
+		{
+			name: "a changed boot keeps both boot IDs, says the counters reset after the failed exec, and never reads a cgroup recreated at its path",
+			files: slices.Concat(build, [][2]string{
+				{"proc/self/cgroup", "0::/\n"},
+				{bootID, now + "\n"},
+				{recorded, "boot_id " + then + "\ncgroup /build\n"},
+				{vmstat, "oom_kill 0\n"},
+				{"dev/kmsg", "6,1,1,-;eth0: link up\n"},
+				{progress, "plugins\n"},
+			}),
+			want: `{"bootId":{"then":"` + then + `","now":"` + now + `"},"sameBoot":false,"countersResetAfterFailedExec":true,"progress":"plugins","failedExecCgroup":"/sys/fs/cgroup/build",` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":0,"oom":[]}`,
 		},
 		{
@@ -110,17 +123,17 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{recorded, "boot_id " + then + "\ncgroup /\n"},
 				{vmstat, "oom_kill 0\n"},
 			},
-			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"progress":null,"failedExecCgroup":"/sys/fs/cgroup",` +
+			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"countersResetAfterFailedExec":false,"progress":null,"failedExecCgroup":"/sys/fs/cgroup",` +
 				`"cgroups":{"failedExec":` + rootReading + `,"diagnostic":` + rootReading + `},"vmstat.oom_kill":0,"oom":null}`,
 		},
 		{
-			name: "an unreadable current boot leaves sameBoot unknown and still reads the recorded cgroup",
+			name: "an unreadable current boot leaves sameBoot unknown and does not attribute the cgroup at the recorded path to the failed exec",
 			files: slices.Concat(build, [][2]string{
 				{"proc/self/cgroup", "0::/\n"},
 				{recorded, "boot_id " + then + "\ncgroup /build\n"},
 			}),
-			want: `{"bootId":{"then":"` + then + `","now":null},"sameBoot":null,"progress":null,"failedExecCgroup":"/sys/fs/cgroup/build",` +
-				`"cgroups":{"failedExec":` + buildReading + `,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
+			want: `{"bootId":{"then":"` + then + `","now":null},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":"/sys/fs/cgroup/build",` +
+				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
 		},
 		{
 			name: "without a recorded context the old boot and the failed exec stay unknown, and vmstat without oom_kill is null",
@@ -129,7 +142,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{bootID, now + "\n"},
 				{vmstat, "nr_free_pages 1024\npgfault 99\n"},
 			}),
-			want: `{"bootId":{"then":null,"now":"` + now + `"},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":"` + now + `"},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
 		},
 		{
@@ -140,7 +153,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{bootID, then + "\n"},
 				{recorded, "boot_id " + then + "; rm -rf /\ncgroup /../../../etc\n"},
 			},
-			want: `{"bootId":{"then":null,"now":"` + then + `"},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":"` + then + `"},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
 		},
 		{
@@ -150,7 +163,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{bootID, then + "\n"},
 				{recorded, "boot_id " + strings.ToUpper(then) + "\ncgroup /build/..\n"},
 			}),
-			want: `{"bootId":{"then":null,"now":"` + then + `"},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":"` + then + `"},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
 		},
 		{
@@ -160,7 +173,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{bootID, then + "\n"},
 				{recorded, "boot_id " + then + "\ncgroup /build\nboot_id " + now + "\ncgroup /\n"},
 			}),
-			want: `{"bootId":{"then":null,"now":"` + then + `"},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":"` + then + `"},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
 		},
 		{
@@ -172,7 +185,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{recorded, "boot_id " + then + "\ncgroup /escape\n"},
 			},
 			links: [][2]string{{"sys/fs/cgroup/escape", "outside"}},
-			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":"` + then + `","now":"` + then + `"},"sameBoot":true,"countersResetAfterFailedExec":false,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":null}`,
 		},
 		{
@@ -185,7 +198,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{"sys/fs/cgroup/build.slice/memory.peak", "12 34\n"},
 				{progress, "font:0; rm -rf /\n"},
 			},
-			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":{"cgroup":"/sys/fs/cgroup/build.slice","memory.current":1048576,"memory.max":2147483648,"memory.peak":null,"memory.events":null}},` +
 				`"vmstat.oom_kill":null,"oom":null}`,
 		},
@@ -197,7 +210,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{"dev/kmsg", busy.String()},
 				{progress, "plugin:hooks@market\n"},
 			},
-			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"progress":"plugin:hooks@market","failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":"plugin:hooks@market","failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":` + rootReading + `},"vmstat.oom_kill":null,"oom":` + string(lastKills) + `}`,
 		},
 		{
@@ -210,7 +223,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{"sys/fs/cgroup/build/memory.events", "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"},
 				{"dev/kmsg", "6,1,1,-;eth0: link up\n"},
 			},
-			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":{"cgroup":"/sys/fs/cgroup/build","memory.current":4096,"memory.max":8192,"memory.peak":8192,` +
 				`"memory.events":{"low":0,"high":0,"max":0,"oom":0,"oom_kill":0,"oom_group_kill":0}}},"vmstat.oom_kill":null,"oom":[]}`,
 		},
@@ -221,7 +234,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{"sys/fs/cgroup/build/memory.current", "4096\n"},
 			},
 			kmsg: endlessKernelLog("6,1,1,-;eth0: link up\n3,2,2,-;" + killed + "\n"),
-			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":{"cgroup":"/sys/fs/cgroup/build","memory.current":4096,"memory.max":null,"memory.peak":null,"memory.events":null}},` +
 				`"vmstat.oom_kill":null,"oom":["` + killed + `"]}`,
 		},
@@ -232,7 +245,7 @@ func TestDiagnoseMemoryReadsTheCgroupsTheBootTheKernelLogAndTheProgress(t *testi
 				{"sys/fs/cgroup/build/memory.current", "4096\n"},
 			},
 			kmsg: unreadableKernelLog,
-			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"progress":null,"failedExecCgroup":null,` +
+			want: `{"bootId":{"then":null,"now":null},"sameBoot":null,"countersResetAfterFailedExec":null,"progress":null,"failedExecCgroup":null,` +
 				`"cgroups":{"failedExec":null,"diagnostic":{"cgroup":"/sys/fs/cgroup/build","memory.current":4096,"memory.max":null,"memory.peak":null,"memory.events":null}},` +
 				`"vmstat.oom_kill":null,"oom":null}`,
 		},

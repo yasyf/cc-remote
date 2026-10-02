@@ -134,12 +134,19 @@ context="$(head -c 4096 "$root$home/.cc-remote/verify-context" 2> /dev/null)" ||
 boot_then="$(valid "$uuid" "$(recorded boot_id)")"
 boot_now="$(cat "$root/proc/sys/kernel/random/boot_id" 2> /dev/null)" || boot_now=""
 boot_now="$(valid "$uuid" "$boot_now")"
+same_boot=null
+if [ -n "$boot_then" ] && [ -n "$boot_now" ]; then
+  same_boot=false
+  if [ "$boot_then" = "$boot_now" ]; then
+    same_boot=true
+  fi
+fi
 exec_cgroup="$(valid "$cgroup_path" "$(recorded cgroup)")"
 exec_dir=""
 failed_exec=null
 if [ -n "$exec_cgroup" ] && under_hierarchy "$hierarchy${exec_cgroup%/}"; then
   exec_dir="$hierarchy${exec_cgroup%/}"
-  if [ -d "$exec_dir" ]; then
+  if [ "$same_boot" = true ] && [ -d "$exec_dir" ]; then
     failed_exec="$(reading "$exec_dir")"
   fi
 fi
@@ -158,6 +165,7 @@ progress="$(valid "$probe" "$progress")"
 jq -cn \
   --arg boot_then "$boot_then" \
   --arg boot_now "$boot_now" \
+  --argjson same_boot "$same_boot" \
   --arg progress "$progress" \
   --arg failed_exec_cgroup "${exec_dir#"$root"}" \
   --argjson failed_exec "$failed_exec" \
@@ -167,7 +175,8 @@ jq -cn \
   'def text: if . == "" then null else . end;
   {
     bootId: {"then": ($boot_then | text), "now": ($boot_now | text)},
-    sameBoot: (if $boot_then == "" or $boot_now == "" then null else $boot_then == $boot_now end),
+    sameBoot: $same_boot,
+    countersResetAfterFailedExec: ($same_boot | if . == null then null else not end),
     progress: ($progress | text),
     failedExecCgroup: ($failed_exec_cgroup | text),
     cgroups: {failedExec: $failed_exec, diagnostic: $diagnostic},
