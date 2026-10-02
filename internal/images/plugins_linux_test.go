@@ -1145,7 +1145,9 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 					lock.Unlock()
 					switch {
 					case created || name == "cc-remote-existing":
-						fmt.Fprintln(w, `{"state":{"status":"running"}}`)
+						if _, err := fmt.Fprintln(w, `{"state":{"status":"running"}}`); err != nil {
+							t.Errorf("write the status of %s: %v", name, err)
+						}
 					case !payload || name != "cc-remote-payload":
 						w.WriteHeader(http.StatusNotFound)
 					}
