@@ -11,7 +11,7 @@ import (
 
 const (
 	probeTitle   = "remote-check"
-	ProbeCommand = `branch=$(git rev-parse --abbrev-ref HEAD) && echo "remote-check $(hostname) $branch $PWD"; echo "remote-check-exit $?"`
+	ProbeCommand = `[ "$(command -v orca)" = "$HOME/.orca-relay/bin/orca" ] && orca worktree current --json >/dev/null && branch=$(git rev-parse --abbrev-ref HEAD) && echo "remote-check $(hostname) $branch $PWD"; echo "remote-check-exit $?"`
 )
 
 var (

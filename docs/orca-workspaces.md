@@ -83,9 +83,11 @@ After registration, check the workspace from the Orca client:
 cc-remote orca verify task-name
 ```
 
-This opens a file in the editor and runs a probe in a new remote terminal. A
-successful probe establishes that the terminal ran remotely. The probe
-terminal stays open, and the command returns its handle.
+This opens a file in the editor and runs a probe in a new remote terminal. The
+probe requires `orca` to resolve to `$HOME/.orca-relay/bin/orca` and complete
+`orca worktree current --json` through the attached SSH relay before reporting
+the remote hostname, Git branch, and directory. The probe terminal stays open,
+and the command returns its handle.
 
 The [remote-workspaces skill](../skills/remote-workspaces/SKILL.md) covers recipe
 selection, preparation, and workspace lifecycle. Initial cc-remote recipes use

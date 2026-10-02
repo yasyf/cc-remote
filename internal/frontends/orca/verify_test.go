@@ -3,6 +3,10 @@ package orca_test
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +40,7 @@ func tailJSON(lines ...string) string {
 }
 
 func TestParseProbe(t *testing.T) {
-	echoed := `% branch=$(git rev-parse --abbrev-ref HEAD) && echo "remote-check $(hostname) $branch $PWD"; echo "remote-check-exit $?"`
+	echoed := "% " + orca.ProbeCommand
 	tests := []struct {
 		name    string
 		tail    []string
@@ -94,6 +98,81 @@ func TestParseProbe(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("ParseProbe() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProbeCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		launcher   string
+		cliStatus  int
+		gitStatus  int
+		wantStatus int
+		wantCall   bool
+	}{
+		{name: "missing launcher", wantStatus: 1},
+		{name: "different launcher", launcher: "other", wantStatus: 1},
+		{name: "relay command fails", launcher: "relay", cliStatus: 17, wantStatus: 17, wantCall: true},
+		{name: "git command fails", launcher: "relay", gitStatus: 128, wantStatus: 128, wantCall: true},
+		{name: "relay round trip succeeds", launcher: "relay", wantCall: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "agent home")
+			relay := filepath.Join(home, ".orca-relay", "bin")
+			bin := filepath.Join(root, "bin")
+			checkout := filepath.Join(root, "my project")
+			for _, dir := range []string{relay, bin, checkout} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeScript := func(dir, name, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeScript(bin, "git", "printf 'feature\\n'\nexit "+strconv.Itoa(tt.gitStatus))
+			writeScript(bin, "hostname", "printf 'remote-fixture\\n'")
+			if tt.launcher != "" {
+				dir := relay
+				if tt.launcher == "other" {
+					dir = bin
+				}
+				writeScript(dir, "orca", `printf '%s\n' "$@" >"$HOME/cli-args"`+"\nprintf '{\"result\":{\"worktree\":{\"id\":\"wt-remote\"}}}\\n'\nexit "+strconv.Itoa(tt.cliStatus))
+			}
+			cmd := exec.Command("/bin/sh", "-c", orca.ProbeCommand)
+			cmd.Dir = checkout
+			cmd.Env = []string{"HOME=" + home, "PATH=" + relay + string(os.PathListSeparator) + bin, "PWD=" + checkout}
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe shell: %v: %s", err, output)
+			}
+			got, err := orca.ParseProbe(strings.Split(string(output), "\n"))
+			if tt.wantStatus != 0 {
+				if !errors.Is(err, orca.ProbeExitError{Status: tt.wantStatus}) {
+					t.Fatalf("ParseProbe() error = %v, want exit %d; output: %s", err, tt.wantStatus, output)
+				}
+				if strings.Contains(string(output), "remote-check remote-fixture") {
+					t.Fatalf("failed probe printed a success marker: %s", output)
+				}
+			} else {
+				want := orca.Probe{Hostname: "remote-fixture", Branch: "feature", Cwd: checkout}
+				if err != nil || got != want {
+					t.Fatalf("ParseProbe() = %+v, %v; want %+v", got, err, want)
+				}
+			}
+			args, err := os.ReadFile(filepath.Join(home, "cli-args"))
+			if tt.wantCall {
+				if err != nil || string(args) != "worktree\ncurrent\n--json\n" {
+					t.Fatalf("relay call = %q, %v", args, err)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unexpected CLI invocation: %q, %v", args, err)
 			}
 		})
 	}
