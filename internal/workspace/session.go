@@ -44,13 +44,14 @@ type Session struct {
 	Scripts  images.Scripts
 	Stamp    string
 
-	profile        config.Profile
-	labels         []LabelledEnv
-	image          string
-	imageSpec      string
-	payload        *config.Payload
-	privatePlugins bool
-	stderr         sync.Mutex
+	profile          config.Profile
+	labels           []LabelledEnv
+	image            string
+	imageSpec        string
+	payload          *config.Payload
+	privatePlugins   bool
+	tailnetFromTools bool
+	stderr           sync.Mutex
 }
 
 func (s *Session) inPlace() bool {
@@ -78,22 +79,23 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		return nil, err
 	}
 	s := &Session{
-		Config:         cfg,
-		Provider:       provider,
-		Kind:           kind,
-		Profile:        profile,
-		Platform:       platform,
-		State:          cfg.State(),
-		Log:            slog.Default(),
-		Stderr:         os.Stderr,
-		Now:            time.Now,
-		Scripts:        rendered.scripts,
-		Stamp:          rendered.stamp,
-		profile:        spec,
-		image:          machine.Image,
-		imageSpec:      rendered.imageSpec,
-		payload:        machine.Payload,
-		privatePlugins: rendered.private,
+		Config:           cfg,
+		Provider:         provider,
+		Kind:             kind,
+		Profile:          profile,
+		Platform:         platform,
+		State:            cfg.State(),
+		Log:              slog.Default(),
+		Stderr:           os.Stderr,
+		Now:              time.Now,
+		Scripts:          rendered.scripts,
+		Stamp:            rendered.stamp,
+		profile:          spec,
+		image:            machine.Image,
+		imageSpec:        rendered.imageSpec,
+		payload:          machine.Payload,
+		privatePlugins:   rendered.private,
+		tailnetFromTools: rendered.tailnetFromTools,
 	}
 	s.Token = s.gitToken
 	for _, forward := range cfg.Forwards {
@@ -111,10 +113,11 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 }
 
 type rendered struct {
-	scripts   images.Scripts
-	stamp     string
-	imageSpec string
-	private   bool
+	scripts          images.Scripts
+	stamp            string
+	imageSpec        string
+	private          bool
+	tailnetFromTools bool
 }
 
 func render(cfg *config.Config, profile string, machine config.Machine) (rendered, error) {
@@ -127,18 +130,19 @@ func render(cfg *config.Config, profile string, machine config.Machine) (rendere
 		return rendered{}, err
 	}
 	private := slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private })
+	tailnetFromTools := inventory.TailnetFromTools()
 	if machine.Image == "" {
 		var payload string
 		if machine.Payload != nil {
 			payload = machine.Payload.SHA256
 		}
-		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil, payload), private: private}, nil
+		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil, payload), private: private, tailnetFromTools: tailnetFromTools}, nil
 	}
 	image, err := images.RenderImage(inventory)
 	if err != nil {
 		return rendered{}, err
 	}
-	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image, ""), imageSpec: image.Fingerprint(), private: private}, nil
+	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image, ""), imageSpec: image.Fingerprint(), private: private, tailnetFromTools: tailnetFromTools}, nil
 }
 
 func coverEnv(forwards []config.Forward, declared []string) error {
@@ -372,8 +376,12 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		}
 		return s.configure(ctx, record, env)
 	})
+	enrollAfter := []<-chan struct{}{packages, tools}
+	if s.tailnetFromTools {
+		enrollAfter = []<-chan struct{}{tools}
+	}
 	run.Go(func(ctx context.Context) error {
-		if err := run.after(tools); err != nil {
+		if err := run.after(enrollAfter...); err != nil {
 			return err
 		}
 		return s.enroll(context.WithoutCancel(ctx), held, record)

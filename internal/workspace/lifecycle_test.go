@@ -52,7 +52,12 @@ const (
 	publishes     = "plugins.sh publish "
 	readies       = "plugins.sh ready "
 	configures    = "plugins.sh configure"
-	inventory     = "version: 1\nsystem:\n  - { name: jq, version: 1.8.2, url: https://example.com/jq-1.8.2, sha256: " + sha + ", format: binary }\nconfigure:\n  env: [WEB_PORT]\n"
+	inventory     = systemHead + staticTailnet + configureEnv
+	systemHead    = "version: 1\nsystem:\n  - { name: jq, version: 1.8.2, url: https://example.com/jq-1.8.2, sha256: " + sha + ", format: binary }\n"
+	staticTailnet = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.tgz, sha256: " + sha + ", format: tar.gz, bins: { tailscale: tailscale/tailscale, tailscaled: tailscale/tailscaled } }\n"
+	debTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.deb, sha256: " + sha + ", format: deb, bins: { tailscale: /usr/bin/tailscale, tailscaled: /usr/sbin/tailscaled } }\n"
+	cliTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.tgz, sha256: " + sha + ", format: tar.gz, bins: { tailscale: tailscale/tailscale } }\n"
+	configureEnv  = "configure:\n  env: [WEB_PORT]\n"
 	imaged        = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
 	sha           = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
 	commit        = "008173c23f95b170204355c12626cb5a965d779a"
@@ -64,18 +69,20 @@ func running(nodeID string) string {
 }
 
 type scripted struct {
-	mu       sync.Mutex
-	status   string
-	minted   string
-	fail     error
-	failAll  bool
-	joined   bool
-	onEnroll func()
-	onStatus func()
-	scripts  map[string][]string
-	stdins   map[string][]string
-	ready    map[string]string
-	holds    map[string]*hold
+	mu            sync.Mutex
+	status        string
+	minted        string
+	fail          error
+	failAll       bool
+	joined        bool
+	tailscaleFrom string
+	tailscale     bool
+	onEnroll      func()
+	onStatus      func()
+	scripts       map[string][]string
+	stdins        map[string][]string
+	ready         map[string]string
+	holds         map[string]*hold
 }
 
 type hold struct {
@@ -138,6 +145,16 @@ func (m *scripted) currentStatus() string {
 
 func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Result {
 	script := strings.Join(cmd, " ")
+	result := m.handle(id, script, cmd[len(cmd)-1], stdin)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tailscaleFrom != "" && result.ExitCode == 0 && strings.Contains(script, m.tailscaleFrom) {
+		m.tailscale = true
+	}
+	return result
+}
+
+func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Result {
 	m.mu.Lock()
 	if m.scripts == nil {
 		m.scripts, m.stdins, m.ready = map[string][]string{}, map[string][]string{}, map[string]string{}
@@ -145,13 +162,13 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
 	failAll, joined := m.failAll, m.joined
+	missing := m.tailscaleFrom != "" && !m.tailscale && strings.Contains(script, "tailscale")
 	var held *hold
 	for fragment, h := range m.holds {
 		if strings.Contains(script, fragment) {
 			held = h
 		}
 	}
-	stamp := cmd[len(cmd)-1]
 	switch {
 	case strings.Contains(script, publishes):
 		m.ready[id] = stamp
@@ -160,6 +177,12 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 		return providers.Result{Stderr: []byte("plugins: this host was not prepared from stamp " + stamp), ExitCode: 1}
 	}
 	m.mu.Unlock()
+	if missing {
+		if held != nil {
+			close(held.entered)
+		}
+		return providers.Result{Stderr: []byte("sh: tailscale: command not found"), ExitCode: 127}
+	}
 	if held != nil {
 		close(held.entered)
 		return <-held.release
@@ -1198,6 +1221,7 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 
 func TestTheEnrollmentWaitsForTheToolInstallButNotForThePackages(t *testing.T) {
 	h := newHarness(t, true)
+	h.machine.tailscaleFrom = toolsPhase
 	var creating sync.WaitGroup
 	t.Cleanup(creating.Wait)
 	packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
@@ -1224,6 +1248,71 @@ func TestTheEnrollmentWaitsForTheToolInstallButNotForThePackages(t *testing.T) {
 	h.ordered(0, packagesPhase, configures, publishes)
 	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) || h.machine.ran("ws-1", publishes) != 1 {
 		t.Errorf("record %+v (found %v), bound %v, published %d times", record, found, h.bound(), h.machine.ran("ws-1", publishes))
+	}
+}
+
+func TestTheEnrollmentWaitsForThePackagesWhenTheyInstallTailscale(t *testing.T) {
+	tests := []struct {
+		name    string
+		tailnet string
+	}{
+		{name: "a deb installs both tailnet bins in the packages phase", tailnet: debTailnet},
+		{name: "a static artifact without tailscaled leaves the daemon to apt", tailnet: cliTailnet},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := build(t, true, systemHead+tt.tailnet+configureEnv, "{}", providers.Traits{})
+			h.machine.tailscaleFrom = packagesPhase
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			packaging, installing, enrolling := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs), h.machine.hold(t, freshens)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			packaging.awaitEntered(t)
+			installing.awaitEntered(t)
+			installing.release <- providers.Result{}
+			enrolling.stillParked(t, "while the packages that install tailscale were still running")
+			packaging.release <- providers.Result{}
+			enrolling.awaitEntered(t)
+			enrolling.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, packagesPhase, freshens, enrolls, publishes)
+			h.ordered(0, installs, freshens)
+			if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.machine.ran("ws-1", freshens) != 1 || h.machine.ran("ws-1", publishes) != 1 {
+				t.Errorf("record %+v (found %v), checked the tailnet state %d times, published %d times", record, found, h.machine.ran("ws-1", freshens), h.machine.ran("ws-1", publishes))
+			}
+		})
+	}
+}
+
+func TestTheScriptedHostLacksTailscaleUntilItsPhaseInstallsIt(t *testing.T) {
+	daemon := tailnet.Daemon{Mode: tailnet.Kernel, Supervisor: tailnet.SpriteEnv}
+	tests := []struct {
+		name      string
+		completed []string
+		want      int
+	}{
+		{name: "after another phase", completed: []string{images.PhaseTools}, want: 127},
+		{name: "after its own phase", completed: []string{images.PhaseTools, images.PhasePackages}, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &scripted{status: noState, minted: "nNEW", tailscaleFrom: packagesPhase}
+			for _, phase := range tt.completed {
+				if result := m.Handle("ws-1", []string{"sudo", "bash", "-s", phase}, nil); result.ExitCode != 0 {
+					t.Fatalf("the %s phase exited %d", phase, result.ExitCode)
+				}
+			}
+			result := m.Handle("ws-1", []string{"sh", "-c", daemon.FreshScript()}, nil)
+			if result.ExitCode != tt.want || (tt.want == 127) != strings.Contains(string(result.Stderr), "command not found") {
+				t.Errorf("the tailnet state check exited %d with %q, want exit %d", result.ExitCode, result.Stderr, tt.want)
+			}
+		})
 	}
 }
 
