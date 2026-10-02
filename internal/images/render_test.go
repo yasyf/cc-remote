@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -534,4 +536,61 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	if got, want := string(context.Provision), strings.Join(system, ""); got != want {
 		t.Errorf("the image context's provision.sh is not the rendered one without its user-home packing:\n%s", got)
 	}
+}
+
+func TestNoPayloadRendersMatchThePreClosureTemplates(t *testing.T) {
+	before := os.DirFS("testdata/ddfe484")
+	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
+	for name, inv := range map[string]Inventory{"full": validInventory(), "bare": {Version: SchemaVersion}} {
+		t.Run(name, func(t *testing.T) {
+			old, err := parseFrom(before, inv, files...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now, err := parse(inv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			renders := []struct {
+				template string
+				data     any
+			}{{"provision.sh", newView(inv, "agents")}, {"plugins.sh", newView(inv, "agents")}, {"provision.sh", newSystemView(inv)}}
+			if inv.Image != nil {
+				renders = append(renders, struct {
+					template string
+					data     any
+				}{"Dockerfile", *inv.Image})
+			}
+			for _, r := range renders {
+				want, err := execute(old, r.template, r.data)
+				if err != nil {
+					t.Fatalf("render %s from ddfe484: %v", r.template, err)
+				}
+				got, err := execute(now, r.template, r.data)
+				if err != nil {
+					t.Fatalf("render %s: %v", r.template, err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("%s drifted from the ddfe484 render for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+				}
+			}
+		})
+	}
+}
+
+func firstDifference(got, want []byte) string {
+	gotLines, wantLines := strings.Split(string(got), "\n"), strings.Split(string(want), "\n")
+	for i := range max(len(gotLines), len(wantLines)) {
+		g, w := "<end>", "<end>"
+		if i < len(gotLines) {
+			g = gotLines[i]
+		}
+		if i < len(wantLines) {
+			w = wantLines[i]
+		}
+		if g != w {
+			return fmt.Sprintf("line %d: got %q, want %q", i+1, g, w)
+		}
+	}
+	return "an identical line split"
 }

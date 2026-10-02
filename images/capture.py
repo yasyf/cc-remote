@@ -125,12 +125,16 @@ def walk(directory, base=None):
             yield directory + os.path.join(d, name)[len(top):]
 
 
-def directory(path):
+def confine(path):
     existing = path
     while not os.path.lexists(existing):
         existing = os.path.dirname(existing)
     if os.path.realpath(existing) != existing or not os.path.isdir(existing):
         fatal(f"{path[len(root):]} would be written through {existing}, which is not a directory inside the closure")
+
+
+def directory(path):
+    confine(path)
     os.makedirs(path, exist_ok=True)
 
 
@@ -186,6 +190,7 @@ def capture_files(paths_by_package, captured, new):
     for package, paths in paths_by_package.items():
         for path in paths:
             source = hostpath(path)
+            confine(os.path.dirname(root + canonical(path)))
             if not os.path.lexists(source):
                 continue
             info = os.lstat(source)

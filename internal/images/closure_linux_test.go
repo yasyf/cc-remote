@@ -380,6 +380,9 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
 			writePluginTestFile(t, filepath.Join(dir, closure, "closure.json"), []byte("{}"), 0o644)
 			writePluginTestFile(t, filepath.Join(dir, closure, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
+			if err := os.MkdirAll(filepath.Join(dir, closure, "usr/share/X11"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Symlink("../xkeyboard-config-2", filepath.Join(dir, closure, "usr/share/X11/xkb")); err != nil {
 				t.Fatal(err)
 			}
@@ -904,7 +907,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	}
 	for _, absent := range []string{"/usr/share/doc/libfoo1/missing.txt", "/lib", "/usr/sbin/sshd", "/usr/lib/fake-ld.so", lib + "/gdk-pixbuf-2.0/2.10.0/loaders.cache", "/usr/share/mime/packages/io.systemd.xml"} {
 		if _, err := os.Lstat(tree + absent); !os.IsNotExist(err) {
-			t.Errorf("the tree carries %s: %v", absent, err)
+			t.Errorf("the closure carries %s: %v", absent, err)
 		}
 	}
 	if err := filepath.WalkDir(tree+"/usr/share/fonts", func(path string, entry os.DirEntry, err error) error {
@@ -947,12 +950,12 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		OS          map[string]string            `json:"os"`
 		Libc6       string                       `json:"libc6"`
 	}
-	raw, err := os.ReadFile(tree + "/tree.json")
+	raw, err := os.ReadFile(tree + "/closure.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatalf("tree.json: %v\n%s", err, raw)
+		t.Fatalf("closure.json: %v\n%s", err, raw)
 	}
 	wantPackages := map[string]map[string]string{
 		"libfoo1":            {"version": "1.0-1", "arch": "amd64"},

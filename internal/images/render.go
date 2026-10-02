@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -326,6 +327,10 @@ func fingerprint(domain string, files ...file) string {
 }
 
 func parse(inv Inventory) (*template.Template, error) {
+	return parseFrom(assets.FS, inv, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "capture.py", "loader.py", "namespace/Dockerfile")
+}
+
+func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, error) {
 	refs := map[string]string{}
 	for _, marketplace := range inv.Claude.Marketplaces {
 		refs[marketplace.Name] = marketplace.Ref
@@ -368,7 +373,7 @@ func parse(inv Inventory) (*template.Template, error) {
 			_, marketplace, _ := strings.Cut(plugin.ID, "@")
 			return refs[marketplace]
 		},
-	}).ParseFS(assets.FS, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "capture.py", "loader.py", "namespace/Dockerfile")
+	}).ParseFS(fsys, files...)
 	if err != nil {
 		return nil, fmt.Errorf("parse image templates: %w", err)
 	}
