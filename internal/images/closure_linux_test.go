@@ -871,6 +871,17 @@ func (h *captureHost) resident(t *testing.T) []string {
 	return manifest.Resident
 }
 
+func (h *captureHost) record(extra map[string]string) {
+	h.t.Helper()
+	for name, lines := range extra {
+		recorded, err := os.ReadFile(filepath.Join(h.build, name))
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		writePluginTestFile(h.t, filepath.Join(h.build, name), append(recorded, lines...), 0o644)
+	}
+}
+
 func (h *captureHost) entries() []string {
 	h.t.Helper()
 	var paths []string
@@ -1127,13 +1138,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		{name: "a seeded deb artifact keeps its dependencies resident", mutate: func(h *captureHost) {
 			h.dpkg.Packages["orca-ide"] = &fakePackage{Version: "1.4.215", Depends: "libnew1", Files: []string{"/opt/Orca/orca-ide"}}
 			h.dpkg.Packages["libnew1"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew.so.1"}}
-			for name, extra := range map[string]string{"packages.after": "ii \tlibnew1\nii \torca-ide\n", "seeds": "orca-ide\n"} {
-				recorded, err := os.ReadFile(filepath.Join(h.build, name))
-				if err != nil {
-					h.t.Fatal(err)
-				}
-				writePluginTestFile(h.t, filepath.Join(h.build, name), append(recorded, extra...), 0o644)
-			}
+			h.record(map[string]string{"packages.after": "ii \tlibnew1\nii \torca-ide\n", "seeds": "orca-ide\n"})
 		}, check: func(t *testing.T, h *captureHost) {
 			if got, want := h.resident(t), []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca-ide"}; !slices.Equal(got, want) {
 				t.Errorf("resident = %v, want %v", got, want)
@@ -1142,13 +1147,46 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		{name: "a resident seed already on the base keeps its new dependency resident", mutate: func(h *captureHost) {
 			h.dpkg.Packages["bubblewrap"] = &fakePackage{Version: "0.11.0-1", Depends: "libnew2 (>= 1.0)", Files: []string{"/usr/bin/bwrap"}}
 			h.dpkg.Packages["libnew2"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew2.so.2"}}
-			for name, extra := range map[string]string{"packages.before": "ii \tbubblewrap\n", "packages.after": "ii \tbubblewrap\nii \tlibnew2\n"} {
-				recorded, err := os.ReadFile(filepath.Join(h.build, name))
-				if err != nil {
-					h.t.Fatal(err)
-				}
-				writePluginTestFile(h.t, filepath.Join(h.build, name), append(recorded, extra...), 0o644)
+			h.record(map[string]string{"packages.before": "ii \tbubblewrap\n", "packages.after": "ii \tbubblewrap\nii \tlibnew2\n"})
+		}, check: func(t *testing.T, h *captureHost) {
+			if got, want := h.resident(t), []string{"libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
+				t.Errorf("resident = %v, want %v", got, want)
 			}
+		}},
+		{name: "a resident root reaching a new package through an upgraded base package is fatal", mutate: func(h *captureHost) {
+			h.dpkg.Packages["openssh-server"].Depends += ", libmiddle1 (>= 2)"
+			h.dpkg.Packages["libmiddle1"] = &fakePackage{Version: "2.0-1", Depends: "libnew3", Files: []string{lib + "/libmiddle.so.1"}}
+			h.dpkg.Packages["libnew3"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew3.so.3"}}
+			h.payload.Closure = append(h.payload.Closure, "libnew3")
+			h.record(map[string]string{"packages.before": "ii \tlibmiddle1\n", "packages.after": "ii \tlibmiddle1\nii \tlibnew3\n"})
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: apt.payload.resident: openssh-server reaches the new package libnew3 through the base package libmiddle1 (openssh-server -> libmiddle1 -> libnew3), and packages.before records no versions to show whether a resident install upgrades libmiddle1; move libnew3 to apt.payload.resident"
+		}, untouched: true},
+		{name: "a base package a closure package upgraded is fatal when a resident root reaches it", mutate: func(h *captureHost) {
+			h.dpkg.Packages["openssh-server"].Depends += ", libmiddle1"
+			h.dpkg.Packages["libfoo1"].Depends += ", libmiddle1 (>= 2)"
+			h.dpkg.Packages["libmiddle1"] = &fakePackage{Version: "2.0-1", Depends: "libnew3", Files: []string{lib + "/libmiddle.so.1"}}
+			h.dpkg.Packages["libnew3"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew3.so.3"}}
+			h.payload.Closure = append(h.payload.Closure, "libnew3")
+			h.record(map[string]string{"packages.before": "ii \tlibmiddle1\n", "packages.after": "ii \tlibmiddle1\nii \tlibnew3\n"})
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: apt.payload.resident: openssh-server reaches the new package libnew3 through the base package libmiddle1 (openssh-server -> libmiddle1 -> libnew3), and packages.before records no versions to show whether a resident install upgrades libmiddle1; move libnew3 to apt.payload.resident"
+		}, untouched: true},
+		{name: "a resident seed on the base reaching a new package through another base package is fatal", mutate: func(h *captureHost) {
+			h.dpkg.Packages["bubblewrap"] = &fakePackage{Version: "0.11.0-1", Depends: "libmiddle1 (>= 2)", Files: []string{"/usr/bin/bwrap"}}
+			h.dpkg.Packages["libmiddle1"] = &fakePackage{Version: "2.0-1", Depends: "libnew2", Files: []string{lib + "/libmiddle.so.1"}}
+			h.dpkg.Packages["libnew2"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew2.so.2"}}
+			h.payload.Closure = append(h.payload.Closure, "libnew2")
+			h.record(map[string]string{"packages.before": "ii \tbubblewrap\nii \tlibmiddle1\n", "packages.after": "ii \tbubblewrap\nii \tlibmiddle1\nii \tlibnew2\n"})
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: apt.payload.resident: bubblewrap reaches the new package libnew2 through the base package libmiddle1 (bubblewrap -> libmiddle1 -> libnew2), and packages.before records no versions to show whether a resident install upgrades libmiddle1; move libnew2 to apt.payload.resident"
+		}, untouched: true},
+		{name: "a new package moved to apt.payload.resident behind a base package stays resident", mutate: func(h *captureHost) {
+			h.dpkg.Packages["bubblewrap"] = &fakePackage{Version: "0.11.0-1", Depends: "libmiddle1 (>= 2)", Files: []string{"/usr/bin/bwrap"}}
+			h.dpkg.Packages["libmiddle1"] = &fakePackage{Version: "2.0-1", Depends: "libnew2", Files: []string{lib + "/libmiddle.so.1"}}
+			h.dpkg.Packages["libnew2"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew2.so.2"}}
+			h.payload.Resident = append(h.payload.Resident, "libnew2")
+			h.record(map[string]string{"packages.before": "ii \tbubblewrap\nii \tlibmiddle1\n", "packages.after": "ii \tbubblewrap\nii \tlibmiddle1\nii \tlibnew2\n", "seeds": "libnew2\n"})
 		}, check: func(t *testing.T, h *captureHost) {
 			if got, want := h.resident(t), []string{"libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
 				t.Errorf("resident = %v, want %v", got, want)
