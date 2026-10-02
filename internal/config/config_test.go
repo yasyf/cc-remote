@@ -24,6 +24,14 @@ profiles:
 inventory: inventory.yaml
 `
 
+const digest64 = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
+
+func payload(path, sha256 string) func(string) string {
+	return func(s string) string {
+		return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { path: "+path+", sha256: "+sha256+" } }", 1)
+	}
+}
+
 func TestExampleConfigLoadsWithDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "examples", "config.yaml"))
 	if err != nil {
@@ -75,6 +83,17 @@ func TestParseFillsDefaults(t *testing.T) {
 	}
 	if _, err := cfg.ProfileNamed("full"); err == nil {
 		t.Error("an unknown profile resolved")
+	}
+}
+
+func TestParseAcceptsAPayload(t *testing.T) {
+	cfg, err := Parse([]byte(payload("payloads/agent.sqfs", digest64)(minimal)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Profiles["lean"].Machine["fake"].Payload
+	if got == nil || *got != (Payload{Path: "payloads/agent.sqfs", SHA256: digest64}) {
+		t.Errorf("payload = %+v", got)
 	}
 }
 
@@ -146,6 +165,16 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"duplicate forward label", func(s string) string {
 			return s + "forwards:\n  - { label: a, env: A }\n  - { label: a, env: B }\n"
 		}, "forward"},
+		{"payload beside an image", func(s string) string {
+			return strings.Replace(s, "fake: { size: s }", "fake: { size: s, image: img, payload: { path: p.sqfs, sha256: "+digest64+" } }", 1)
+		}, "payload and image"},
+		{"payload without a path", payload(`""`, digest64), "payload.path"},
+		{"payload with a url instead of a path", func(s string) string {
+			return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { url: https://example.com/p.sqfs, sha256: "+digest64+" } }", 1)
+		}, "url"},
+		{"payload sha256 in upper case", payload("p.sqfs", strings.ToUpper(digest64)), "payload.sha256"},
+		{"payload sha256 too short", payload("p.sqfs", digest64[:40]), "payload.sha256"},
+		{"payload without a sha256", payload("p.sqfs", `""`), "payload.sha256"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

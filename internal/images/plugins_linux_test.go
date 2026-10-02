@@ -472,7 +472,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				"claude plugin marketplace update claude-plugins-official",
 				"claude plugin update datadog@claude-plugins-official",
 			},
-			absentCalls: []string{"claude plugin marketplace remove", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
+			absentCalls: []string{"claude plugin marketplace remove", "claude plugin marketplace update tools-market", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "official from a local checkout",
@@ -510,7 +510,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			out, err := h.plugins("install", digest)
+			out, err := h.plugins("install")
 			calls := h.calls()
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(out, tt.wantErr) {
@@ -543,6 +543,10 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 					t.Errorf("settings env = %v, want it kept as %v", got, tt.settings["env"])
 				}
 			}
+			h.unready()
+			if out, err := h.plugins("publish", digest); err != nil {
+				t.Fatalf("publish failed: %v\n%s", err, out)
+			}
 			if stamp, err := os.ReadFile(filepath.Join(h.home, ".cc-remote", "ready")); err != nil || string(stamp) != digest+"\n" {
 				t.Errorf("ready stamp = %q, %v", stamp, err)
 			}
@@ -563,7 +567,7 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
 			if tt.reenable {
@@ -593,7 +597,7 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 			if err == nil || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("verify = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 			}
-			out, err = h.plugins("install", digest)
+			out, err = h.plugins("install")
 			if err == nil || !strings.Contains(out, "the installed, enabled and loadable plugins differ from the pins") {
 				t.Fatalf("reinstall = %v\n%s\nwant the pin check to fail closed", err, out)
 			}
@@ -636,7 +640,7 @@ func TestPluginsVerifyRegistrations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
 			if out, err := h.plugins("verify"); err != nil {
@@ -672,14 +676,14 @@ func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.tail, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
 			if err := os.WriteFile(filepath.Join(h.fakes, "list-tail"), []byte(tt.tail), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			for _, phase := range []string{"verify", "install"} {
-				out, err := h.plugins(phase, digest)
+				out, err := h.plugins(phase)
 				if exitCode(err) != tt.wantCode || !strings.Contains(out, tt.wantOut) {
 					t.Errorf("%s = %v\n%s\nwant exit %d with %q", phase, err, out, tt.wantCode, tt.wantOut)
 				}
@@ -701,8 +705,9 @@ func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 		{name: "plugin list exits non-zero", phase: "verify", tail: "exit 0 9", wantCode: 42},
 		{name: "plugin list prints trailing garbage", phase: "verify", tail: "garbage 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
 		{name: "plugin list prints a second document", phase: "verify", tail: "extra 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
-		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 4 1", wantCode: 42},
-		{name: "install plugin read exits non-zero once", state: registered("main", "0.7.16"), phase: "install", tail: "exit 1 1", wantCode: 42},
+		{name: "install snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 0 1", wantCode: 42},
+		{name: "post-install check read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 1 1", wantCode: 42},
+		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 2 1", wantCode: 42},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -710,17 +715,14 @@ func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 			inventory.Claude.Plugins[1].Bins = []string{"bin/datadog"}
 			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), tt.state, nil)
 			if tt.phase == "verify" {
-				if out, err := h.plugins("install", digest); err != nil {
+				if out, err := h.plugins("install"); err != nil {
 					t.Fatalf("install failed: %v\n%s", err, out)
-				}
-				if err := os.Remove(filepath.Join(h.home, ".cc-remote", "ready")); err != nil {
-					t.Fatal(err)
 				}
 			}
 			if err := os.WriteFile(filepath.Join(h.fakes, "plugin-list-tail"), []byte(tt.tail), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			out, err := h.plugins(tt.phase, digest)
+			out, err := h.plugins(tt.phase)
 			if exitCode(err) != tt.wantCode || !strings.Contains(out, tt.wantOut) {
 				t.Errorf("%s = %v\n%s\nwant exit %d with %q", tt.phase, err, out, tt.wantCode, tt.wantOut)
 			}
@@ -870,8 +872,9 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 
 func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+	for _, tt := range []struct{ fail, payload bool }{{false, false}, {true, false}, {false, true}} {
+		fail, payload := tt.fail, tt.payload
+		t.Run(fmt.Sprintf("fail=%t payload=%t", fail, payload), func(t *testing.T) {
 			names := []string{"first", "second", "existing", "third", "fourth", "cookiesync"}
 			inventory := Inventory{
 				Version:    SchemaVersion,
@@ -940,12 +943,16 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 					lock.Lock()
 					gets = append(gets, name)
 					lock.Unlock()
-					if name != "cc-remote-existing" {
+					if name != "cc-remote-existing" && (!payload || name != "cc-remote-payload") {
 						w.WriteHeader(http.StatusNotFound)
 					}
 					return
 				}
-				want := []string{"services", "create", name, "--cmd", filepath.Join(host.home, ".cc-remote", "supervise.py"), "--args", strings.TrimPrefix(name, "cc-remote-"), "--no-stream"}
+				want := []string{"services", "create", name, "--cmd", filepath.Join(host.home, ".cc-remote", "supervise.py"), "--args", strings.TrimPrefix(name, "cc-remote-")}
+				if payload {
+					want = append(want, "--needs", "cc-remote-payload")
+				}
+				want = append(want, "--no-stream")
 				if !slices.Equal(call.Args, want) || call.Input != "" {
 					t.Errorf("service create = %v input=%q, want %v with empty stdin", call.Args, call.Input, want)
 				}
@@ -1021,9 +1028,9 @@ except urllib.error.HTTPError:
 			finishArtifactScript(t, done, fail)
 			lock.Lock()
 			defer lock.Unlock()
-			wantGets := make([]string, len(names))
-			for i, name := range names {
-				wantGets[i] = "cc-remote-" + name
+			wantGets := []string{"cc-remote-payload"}
+			for _, name := range names {
+				wantGets = append(wantGets, "cc-remote-"+name)
 			}
 			if !slices.Equal(gets, wantGets) {
 				t.Errorf("get order = %v, want %v", gets, wantGets)

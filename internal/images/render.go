@@ -28,9 +28,9 @@ const (
 )
 
 type Scripts struct {
-	Provision []byte
-	Plugins   []byte
-	Env       []string
+	ProvisionScript []byte
+	Plugins         []byte
+	Env             []string
 }
 
 type Context struct {
@@ -40,10 +40,115 @@ type Context struct {
 	Start      []byte
 }
 
+type exposure string
+
+const (
+	exposeLink     exposure = "link"
+	exposeChildren exposure = "children"
+	exposeCopy     exposure = "copy"
+)
+
+type requirement string
+
+const (
+	required requirement = "required"
+	optional requirement = "optional"
+)
+
+type tree struct {
+	Kind        exposure
+	Requirement requirement
+	Path        string
+}
+
 type view struct {
 	Inventory
-	Tools   []Artifact
-	Prepare []string
+	Tools       []Artifact
+	Prepare     []string
+	SystemTrees []tree
+	HomeTrees   []tree
+}
+
+func newView(inv Inventory, profile string) view {
+	tools := slices.Concat(inv.Tools, inv.Profiles[profile].Tools)
+	return view{
+		Inventory:   inv,
+		Tools:       tools,
+		Prepare:     slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
+		SystemTrees: systemTrees(inv),
+		HomeTrees:   homeTrees(inv, tools),
+	}
+}
+
+func systemTrees(inv Inventory) []tree {
+	var trees []tree
+	for _, a := range inv.System {
+		if a.Format != Deb {
+			trees = append(trees, tree{exposeLink, required, "/opt/cc-remote/tools/" + a.dir()})
+		}
+	}
+	for _, tool := range inv.Python.System {
+		trees = append(trees, tree{exposeLink, required, "/opt/uv/tools/" + uvToolDir(tool)})
+		for _, bin := range tool.Bins {
+			trees = append(trees, tree{exposeCopy, required, "/usr/local/bin/" + bin})
+		}
+	}
+	if len(inv.Python.System) > 0 {
+		trees = append(trees, tree{exposeLink, required, "/opt/uv/python"})
+	}
+	return trees
+}
+
+func homeTrees(inv Inventory, tools []Artifact) []tree {
+	var trees []tree
+	for _, a := range tools {
+		rel := ".local/share/cc-remote/tools/" + a.dir()
+		if a.Dest != "" {
+			rel = a.Dest
+		}
+		trees = append(trees, tree{exposeLink, required, rel})
+	}
+	settings := len(inv.Claude.Plugins) > 0
+	for _, marketplace := range inv.Claude.Marketplaces {
+		if marketplace.Ref != "" {
+			trees = append(trees, tree{exposeLink, required, ".local/share/cc-remote/marketplaces/" + marketplace.Name})
+		} else {
+			trees = append(trees, tree{exposeCopy, required, ".claude/plugins/marketplaces/" + marketplace.Name})
+			settings = true
+		}
+	}
+	for _, plugin := range inv.Claude.Plugins {
+		name, marketplace, _ := strings.Cut(plugin.ID, "@")
+		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/cache/" + marketplace + "/" + name + "/" + plugin.Version})
+	}
+	if len(inv.Claude.Plugins) > 0 {
+		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/installed_plugins.json"})
+	}
+	if len(inv.Claude.Marketplaces) > 0 {
+		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/known_marketplaces.json"})
+	}
+	if settings {
+		trees = append(trees, tree{exposeCopy, required, ".claude/settings.json"})
+	}
+	if inv.CodexRuntime != nil {
+		trees = append(trees,
+			tree{exposeLink, required, ".cache/codex-runtimes/codex-primary-runtime"},
+			tree{exposeCopy, required, ".codex/config.toml"},
+			tree{exposeCopy, required, ".codex/plugins/cache/openai-primary-runtime"},
+		)
+	}
+	if inv.CaptainHook != nil {
+		trees = append(trees, tree{exposeChildren, required, ".daemonkit/tools/capt-hook/" + inv.CaptainHook.Version})
+	}
+	if inv.CaptainHook != nil || len(inv.Python.User) > 0 {
+		trees = append(trees, tree{exposeLink, optional, ".local/share/uv/python"})
+	}
+	return trees
+}
+
+func uvToolDir(tool PythonTool) string {
+	name, _, _ := strings.Cut(cmp.Or(tool.Package, tool.Name), "[")
+	return name
 }
 
 func Render(inv Inventory, profile string) (Scripts, error) {
@@ -51,11 +156,7 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	if err != nil {
 		return Scripts{}, err
 	}
-	data := view{
-		Inventory: inv,
-		Tools:     slices.Concat(inv.Tools, inv.Profiles[profile].Tools),
-		Prepare:   slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
-	}
+	data := newView(inv, profile)
 	provision, err := execute(bound, "provision.sh", data)
 	if err != nil {
 		return Scripts{}, err
@@ -64,7 +165,7 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	if err != nil {
 		return Scripts{}, err
 	}
-	return Scripts{Provision: provision, Plugins: plugins, Env: slices.Clone(inv.Configure.Env)}, nil
+	return Scripts{ProvisionScript: provision, Plugins: plugins, Env: slices.Clone(inv.Configure.Env)}, nil
 }
 
 func RenderImage(inv Inventory) (Context, error) {
@@ -79,7 +180,7 @@ func RenderImage(inv Inventory) (Context, error) {
 	if err != nil {
 		return Context{}, err
 	}
-	provision, err := execute(bound, "provision.sh", view{Inventory: inv})
+	provision, err := execute(bound, "provision.sh", newView(inv, ""))
 	if err != nil {
 		return Context{}, err
 	}
@@ -91,7 +192,7 @@ func RenderImage(inv Inventory) (Context, error) {
 }
 
 func (s Scripts) Fingerprint() string {
-	return fingerprint(toolDomain, file{"provision.sh", s.Provision}, file{"plugins.sh", s.Plugins})
+	return fingerprint(toolDomain, file{"provision.sh", s.ProvisionScript}, file{"plugins.sh", s.Plugins})
 }
 
 func Stamp(scripts Scripts, image *Context) string {
@@ -154,6 +255,19 @@ func parse(inv Inventory) (*template.Template, error) {
 		"expand":     expand,
 		"executable": serviceExecutable,
 		"spec":       spec,
+		"under":      under,
+		"home": func(rel string) string {
+			return under("HOME", rel)
+		},
+		"pins": func(marketplace string) []string {
+			var pins []string
+			for _, plugin := range inv.Claude.Plugins {
+				if _, owner, _ := strings.Cut(plugin.ID, "@"); owner == marketplace {
+					pins = append(pins, plugin.ID+" "+plugin.Version)
+				}
+			}
+			return pins
+		},
 		"pluginRef": func(plugin Plugin) string {
 			_, marketplace, _ := strings.Cut(plugin.ID, "@")
 			return refs[marketplace]

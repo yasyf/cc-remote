@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -27,17 +28,28 @@ func (r *recorder) exec(_ context.Context, argv []string, stdin io.Reader) error
 }
 
 func TestHostOperations(t *testing.T) {
-	scripts := Scripts{Provision: []byte("provision"), Plugins: []byte("plugins"), Env: []string{"PORT", "URL"}}
+	scripts := Scripts{ProvisionScript: []byte("provision"), Plugins: []byte("plugins"), Env: []string{"PORT", "URL"}}
+	fingerprint := scripts.Fingerprint()
 	run := `exec bash "$HOME/.cc-remote/plugins.sh" "$@"`
 	tests := []struct {
 		name string
 		op   func(context.Context, Exec) error
 		want call
 	}{
-		{"provision", scripts.ProvisionInPlace, call{[]string{"sudo", "bash", "-s"}, "provision"}},
+		{"provision packages", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhasePackages) }, call{[]string{"sudo", "bash", "-s", "packages"}, "provision"}},
+		{"provision tools", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhaseTools) }, call{[]string{"sudo", "bash", "-s", "tools"}, "provision"}},
+		{"provision payload", func(ctx context.Context, exec Exec) error {
+			return scripts.Provision(ctx, exec, PhasePayload, digest, fingerprint)
+		}, call{[]string{"sudo", "bash", "-s", "payload", digest, fingerprint}, "provision"}},
+		{"provision pack", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhasePack, fingerprint) }, call{[]string{"sudo", "bash", "-s", "pack", fingerprint}, "provision"}},
+		{"stage payload", func(ctx context.Context, exec Exec) error {
+			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), digest)
+		}, call{[]string{"sudo", "sh", "-c", "install -d -m 0755 /var/lib/cc-remote/payload && cat > /var/lib/cc-remote/payload/$1.sqfs.partial", "stage-payload", digest}, "image"}},
 		{"stage", scripts.StagePlugins, call{[]string{"sh", "-c", stagePlugins}, "plugins"}},
-		{"install", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "token", digest) }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install", digest}, "token\n"}},
-		{"install without token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", digest) }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install", digest}, "\n"}},
+		{"install", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "token", "") }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install"}, "token\n"}},
+		{"install without token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "") }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install"}, "\n"}},
+		{"install from payload", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "token", digest) }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install", "/opt/cc-remote/payload/" + digest}, "token\n"}},
+		{"publish", func(ctx context.Context, exec Exec) error { return scripts.Publish(ctx, exec, digest) }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "publish", digest}, ""}},
 		{"ready", func(ctx context.Context, exec Exec) error { return scripts.Ready(ctx, exec, digest) }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "ready", digest}, ""}},
 		{"configure", func(ctx context.Context, exec Exec) error {
 			return scripts.Configure(ctx, exec, map[string]string{"URL": "http://x y", "PORT": "8123"})
@@ -68,8 +80,19 @@ func TestHostOperationsRejectBadInput(t *testing.T) {
 		op   func(context.Context, Exec) error
 		want string
 	}{
+		{"stage payload digest", func(ctx context.Context, exec Exec) error {
+			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), "../"+digest)
+		}, `stage payload: "../` + digest + `" is not a sha256 digest`},
+		{"stage payload uppercase digest", func(ctx context.Context, exec Exec) error {
+			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), strings.Repeat("A", 64))
+		}, `stage payload: "` + strings.Repeat("A", 64) + `" is not a sha256 digest`},
 		{"multi-line token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "a\nb", digest) }, "plugins install: the GitHub token spans lines"},
-		{"install stamp", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "latest") }, `plugins install: stamp "latest" is not a fingerprint`},
+		{"carriage-return token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "a\rb", "") }, "plugins install: the GitHub token spans lines"},
+		{"install payload", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "latest") }, `plugins install: payload "latest" is not a sha256 digest`},
+		{"install payload path", func(ctx context.Context, exec Exec) error {
+			return scripts.Install(ctx, exec, "", "/opt/cc-remote/payload/"+digest)
+		}, `plugins install: payload "/opt/cc-remote/payload/` + digest + `" is not a sha256 digest`},
+		{"publish stamp", func(ctx context.Context, exec Exec) error { return scripts.Publish(ctx, exec, "latest") }, `plugins publish: stamp "latest" is not a fingerprint`},
 		{"ready stamp", func(ctx context.Context, exec Exec) error { return scripts.Ready(ctx, exec, "") }, `plugins ready: stamp "" is not a fingerprint`},
 		{"missing env", func(ctx context.Context, exec Exec) error { return scripts.Configure(ctx, exec, nil) }, "plugins configure: got environment [], the inventory declares [PORT]"},
 		{"extra env", func(ctx context.Context, exec Exec) error {

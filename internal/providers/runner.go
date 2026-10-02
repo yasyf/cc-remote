@@ -12,9 +12,10 @@ import (
 )
 
 type Command struct {
-	Name  string
-	Args  []string
-	Stdin io.Reader
+	Name   string
+	Args   []string
+	Stdin  io.Reader
+	Stdout io.Writer
 }
 
 func (c Command) String() string { return strings.Join(append([]string{c.Name}, c.Args...), " ") }
@@ -34,6 +35,9 @@ func (OSRunner) Run(ctx context.Context, command Command) (Result, error) {
 	cmd.Stdin = command.Stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if command.Stdout != nil {
+		cmd.Stdout = command.Stdout
+	}
 	err := cmd.Run()
 	result := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
 	var exit *exec.ExitError

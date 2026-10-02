@@ -6,7 +6,7 @@ setup commands belong to that profile; the environment manager supplies the
 host, checkout, tools, and lifecycle.
 
 cc-remote implements this separation with Sprites and Namespace backends,
-image and tool preparation, workspace lifecycle, and an Orca
+image, payload, and tool preparation, workspace lifecycle, and an Orca
 adapter. The [workspace guide](orca-workspaces.md) describes the client setup.
 The Orca composer flow and live personal-tailnet enrollment still need live
 verification; startup timings for this implementation have not been measured.
@@ -51,10 +51,33 @@ platform startup are task-specific actions. A profile can supply those commands
 when needed, including a full-stack Namespace environment.
 
 Each create request provisions a fresh provider machine named for the workspace.
-The selected image can supply tools; cc-remote runs the inventory's tool and
-plugin installation scripts and materializes the requested checkout at the
-pinned source commit. The [readiness stamp](tool-inventory.md#fingerprints-and-readiness)
-records that preparation so resume can check for changed tools or images.
+The selected image or [machine payload](tool-inventory.md#machine-payloads) can
+supply tools; cc-remote reconciles them with the inventory and materializes the
+requested checkout at the pinned source commit. A payload is a private local
+file selected by `path` and `sha256`. It requires an in-place machine with
+`sprite-env` and cannot be combined with `image`.
+
+Create streams the payload into the Sprite, checks its SHA-256 and manifest
+against the tools fingerprint, home directory, architecture, and OS version,
+then exposes the mounted trees. Any missing required tree fails creation.
+Artifact directories and pinned marketplaces use links into the read-only mount;
+plugin caches and configuration use writable copies. The `cc-remote-payload`
+service remounts stored payloads at boot, before dependent inventory services.
+
+Startup runs these lanes concurrently:
+
+| Lane | Order |
+| --- | --- |
+| Packages | Install and verify packages on machines provisioned in place. |
+| Checkout | Check out the pinned source commit, then run profile preparation. |
+| Tools | Mount the payload when configured, provision system tools in place, install user tools and plugins, configure, then enroll in the tailnet. |
+
+Each lane preserves its own order; profile preparation can overlap tool
+installation. Create publishes the
+[readiness stamp](tool-inventory.md#fingerprints-and-readiness) only after every
+lane succeeds, then connects. Installation clears the stamp; the separate
+`publish` phase writes it. Resume uses the stamp to check for changed tools or
+images.
 
 | Part of the lean profile | Task-specific setup |
 | --- | --- |
@@ -72,6 +95,13 @@ costs and lifetimes.
 Images contain tool payloads, with no authenticated agent session, tailnet state,
 or retained checkout credential. Each fresh workspace has its own host identity
 and joins the configured tailnet.
+
+`cc-remote payload build` installs the full inventory on a fresh build Sprite,
+including private marketplaces. Its GitHub token reaches only the install phase's
+stdin. Packing uses an explicit allowlist of installed tool trees and metadata;
+owner sessions, credentials, plugin data, and SSH/tailnet state stay outside the
+payload. The build streams the private file back, destroys the build Sprite, and
+confirms its absence. It creates no workspace owner record or tailnet enrollment.
 
 Cleanup uses the exact provider resource and recorded tailnet node. A retry
 distinguishes a node it enrolled from one it reattached. A failed retry preserves

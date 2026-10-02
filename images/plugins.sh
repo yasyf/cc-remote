@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-phase="${1:?usage: plugins.sh install STAMP|ready STAMP|configure|verify}"
+phase="${1:?usage: plugins.sh install [PAYLOAD_DIR]|publish STAMP|ready STAMP|configure|verify}"
 
 state_dir="$HOME/.cc-remote"
 share_dir="$HOME/.local/share/cc-remote"
@@ -103,12 +103,6 @@ pinned() {
 {{range .Claude.Plugins}}{{.ID}} {{.Version}}
 {{end -}}
 PINS
-}
-
-healthy() {
-  local plugins
-  plugins="$(claude_json plugin list --json)" || exit
-  healthy_plugins "$plugins"
 }
 
 healthy_plugins() {
@@ -228,9 +222,8 @@ verify_branch_marketplace() {
 }
 
 install_plugin() {
-  local plugins current
-  plugins="$(claude_json plugin list --json)"
-  current="$(jq -r --arg id "$1" '.[] | select(.id == $id) | .version' <<< "$plugins")"
+  local current
+  current="$(jq -r --arg id "$1" '.[] | select(.id == $id) | .version' <<< "$3")"
   if [ -z "$current" ]; then
     claude plugin install "$1"
   elif [ "$current" != "$2" ]; then
@@ -238,12 +231,30 @@ install_plugin() {
   fi
 }
 
+stale_marketplace() {
+  local working="$1" pin
+  shift
+  for pin in "$@"; do
+    if ! grep -qxF "$pin" <<< "$working"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 install_plugins() {
+  local working
+  working="$(healthy_plugins "$1")"
 {{- range .Claude.Marketplaces}}
-  claude plugin marketplace update {{q .Name}}
+{{- $name := .Name}}
+{{- with pins .Name}}
+  if stale_marketplace "$working"{{range .}} {{q .}}{{end}}; then
+    claude plugin marketplace update {{q $name}}
+  fi
+{{- end}}
 {{- end}}
 {{- range .Claude.Plugins}}
-  install_plugin {{q .ID}} {{q .Version}}
+  install_plugin {{q .ID}} {{q .Version}} "$1"
 {{- end}}
   check_plugins
 }
@@ -392,10 +403,14 @@ write_supervisor() {
 
 start_services() {
   local name
+  local -a needs=()
   if command -v sprite-env > /dev/null; then
+    if sprite-env services get cc-remote-payload > /dev/null 2>&1; then
+      needs=(--needs cc-remote-payload)
+    fi
     for name in "$@"; do
       if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
-        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" --no-stream
+        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --no-stream
       fi
     done
     drain_artifacts
@@ -405,8 +420,14 @@ start_services() {
 }
 
 run_install() {
-  local stamp="${1:?install needs the ready stamp}" github_token installed
+  local github_token plugins
   rm -f "$state_dir/ready"
+  if [ "$#" -gt 0 ]; then
+    local payload="$1"
+{{- range .HomeTrees}}
+    expose {{.Kind}} {{.Requirement}} {{home .Path}}
+{{- end}}
+  fi
   IFS= read -r github_token
   mkdir -p "$bin_dir"
 {{- range .Tools}}
@@ -428,9 +449,9 @@ run_install() {
 {{- end}}
 {{- end}}
 {{- if .Claude.Plugins}}
-  installed="$(healthy)"
-  if [ "$installed" != "$(pinned)" ]; then
-    install_plugins
+  plugins="$(claude_json plugin list --json)" || exit
+  if [ "$(healthy_plugins "$plugins")" != "$(pinned)" ]; then
+    install_plugins "$plugins"
   fi
 {{- end}}
 {{- range .Python.User}}
@@ -451,7 +472,14 @@ run_install() {
 {{- end}}
   )
 {{- end}}
-  run_verify
+  local link_check=spelling
+  verify_user
+}
+
+run_publish() {
+  local stamp="${1:?publish needs the ready stamp}"
+  verify_system
+  verify_user_links
   mkdir -p "$state_dir"
   printf '%s\n' "$stamp" > "$state_dir/ready"
 }
@@ -492,7 +520,7 @@ run_configure() {
 {{- end}}
 }
 
-run_verify() {
+verify_system() {
   :
 {{- range .System}}
 {{- range verify . "system_tool_dir" "system_bin_dir"}}
@@ -505,6 +533,10 @@ run_verify() {
   verify_bin {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
 {{- end}}
 {{- end}}
+}
+
+verify_user_links() {
+  :
 {{- range .Tools}}
 {{- range verify . "tool_dir" "bin_dir"}}
   {{.}}
@@ -513,6 +545,10 @@ run_verify() {
 {{- range .Links}}
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
 {{- end}}
+}
+
+verify_user() {
+  verify_user_links
 {{- if .Claude.Marketplaces}}
   local known
   known="$(claude_json plugin marketplace list --json)" || exit
@@ -550,12 +586,16 @@ run_verify() {
 }
 
 case "$phase" in
-  install) run_install "${2:-}" ;;
+  install) run_install "${@:2}" ;;
+  publish) run_publish "${2:-}" ;;
   ready) run_ready "${2:-}" ;;
   configure) run_configure ;;
-  verify) run_verify ;;
+  verify)
+    verify_system
+    verify_user
+    ;;
   *)
-    echo "usage: plugins.sh install STAMP|ready STAMP|configure|verify" >&2
+    echo "usage: plugins.sh install [PAYLOAD_DIR]|publish STAMP|ready STAMP|configure|verify" >&2
     exit 2
     ;;
 esac

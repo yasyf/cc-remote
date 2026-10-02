@@ -48,14 +48,16 @@ verify_pin() {
   fi
 }
 
+link_check=full
+
 verify_link() {
   local link="$1" target="$2"
   shift 2
-  if [ "$(readlink "$link")" != "$target" ] || [ ! -x "$target" ]; then
+  if [ "$(readlink "$link")" != "$target" ] || { [ "$link_check" = full ] && [ ! -x "$target" ]; }; then
     echo "cc-remote: $link does not point at the pinned $target" >&2
     exit 1
   fi
-  if [ "$#" -gt 0 ]; then
+  if [ "$link_check" = full ] && [ "$#" -gt 0 ]; then
     "$link" "$@" > /dev/null
   fi
 }
@@ -105,4 +107,32 @@ queue_artifact() {
   fi
   "$@" < /dev/null &
   artifact_pids+=("$!")
+}
+
+expose() {
+  local kind="$1" requirement="$2" path="$3" source="$payload$3"
+  if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+    if [ "$requirement" = required ]; then
+      echo "cc-remote: payload $payload lacks $path" >&2
+      exit 1
+    fi
+    return
+  fi
+  if [ -L "$path" ]; then
+    case "$(readlink "$path")" in
+      "$(dirname "$payload")"/*) rm -f "$path" ;;
+      *) return ;;
+    esac
+  elif [ -e "$path" ]; then
+    return
+  fi
+  mkdir -p "$(dirname "$path")"
+  case "$kind" in
+    link) ln -s "$source" "$path" ;;
+    copy) cp -a "$source" "$path" ;;
+    children)
+      mkdir "$path"
+      find "$source" -mindepth 1 -maxdepth 1 ! -name .lock -exec ln -s -t "$path" {} +
+      ;;
+  esac
 }

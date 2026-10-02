@@ -27,6 +27,7 @@ func NewRootCmd() *cobra.Command {
 		newVerifyCmd(),
 		newProxyCmd(),
 		newImagesCmd(),
+		newPayloadCmd(),
 		newOrcaCmd(orca.ExecRunner{Command: orca.CLICommand(os.Getenv, runtime.GOOS)}),
 	)
 	return root

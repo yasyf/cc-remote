@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
@@ -46,7 +47,9 @@ type Session struct {
 	labels         []LabelledEnv
 	image          string
 	imageSpec      string
+	payload        *config.Payload
 	privatePlugins bool
+	stderr         sync.Mutex
 }
 
 func (s *Session) inPlace() bool {
@@ -62,6 +65,9 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	err = provider.ValidateSpec(providers.Spec{Name: "workspace", Profile: profile, Image: machine.Image, Size: machine.Size, Region: machine.Region})
 	if err != nil {
 		return nil, err
+	}
+	if supervisor := provider.Traits().Supervisor; machine.Payload != nil && supervisor != providers.SupervisorSpriteEnv {
+		return nil, fmt.Errorf("profile %s: machine %s mounts a payload, which only a %s host remounts at boot; provider %s runs %s", profile, kind, providers.SupervisorSpriteEnv, kind, supervisor)
 	}
 	rendered, err := render(cfg, profile, machine.Image != "")
 	if err != nil {
@@ -85,6 +91,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		profile:        spec,
 		image:          machine.Image,
 		imageSpec:      rendered.imageSpec,
+		payload:        machine.Payload,
 		privatePlugins: rendered.private,
 	}
 	s.Token = s.gitToken
@@ -196,13 +203,20 @@ func (s *Session) execute(ctx context.Context, machine string, argv []string, st
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.Stderr.Write(result.Stderr); err != nil {
+	if err := s.writeStderr(result.Stderr); err != nil {
 		return nil, err
 	}
 	if result.ExitCode != 0 {
 		return result.Stdout, fmt.Errorf("%s on %s exited %d: %s", argv[0], machine, result.ExitCode, bytes.TrimSpace(result.Stderr))
 	}
 	return result.Stdout, nil
+}
+
+func (s *Session) writeStderr(output []byte) error {
+	s.stderr.Lock()
+	defer s.stderr.Unlock()
+	_, err := s.Stderr.Write(output)
+	return err
 }
 
 func (s *Session) exec(machine string) images.Exec {
@@ -325,32 +339,75 @@ func (s *Session) unbound(name string) error {
 
 func (s *Session) provision(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
 	machine := record.Machine
-	if err := s.installTools(ctx, machine); err != nil {
+	env, err := s.forwards(record)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.checkout(ctx, record); err != nil {
+	run := newLanes(ctx)
+	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
+	run.Go(func(ctx context.Context) error {
+		if err := s.checkout(ctx, record); err != nil {
+			return err
+		}
+		return s.prepare(ctx, record, env)
+	})
+	run.Go(func(ctx context.Context) error {
+		if err := s.installPlugins(ctx, machine); err != nil {
+			return err
+		}
+		if err := s.configure(ctx, record, env); err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		return s.enroll(context.WithoutCancel(ctx), held, record)
+	})
+	if err := run.Wait(); err != nil {
 		return nil, err
 	}
-	if err := s.configure(ctx, record); err != nil {
-		return nil, err
-	}
-	if err := s.enroll(ctx, held, record); err != nil {
+	if err := s.publish(ctx, machine); err != nil {
 		return nil, err
 	}
 	return s.connect(ctx, record)
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
+	run := newLanes(ctx)
+	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
+	run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
+	if err := run.Wait(); err != nil {
+		return err
+	}
+	return s.publish(ctx, machine)
+}
+
+func (s *Session) installPackages(ctx context.Context, machine string) error {
+	if !s.inPlace() {
+		return nil
+	}
+	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages); err != nil {
+		return err
+	}
+	s.Log.Info("installed the packages", "machine", machine)
+	return nil
+}
+
+func (s *Session) installPlugins(ctx context.Context, machine string) error {
+	run := s.exec(machine)
+	var payload string
+	if s.payload != nil {
+		if err := s.mountPayload(ctx, machine, run); err != nil {
+			return err
+		}
+		payload = s.payload.SHA256
+	}
 	if s.inPlace() {
-		if err := s.Scripts.ProvisionInPlace(ctx, s.exec(machine)); err != nil {
+		if err := s.Scripts.Provision(ctx, run, images.PhaseTools); err != nil {
 			return err
 		}
 		s.Log.Info("provisioned", "machine", machine)
 	}
-	return s.installPlugins(ctx, machine)
-}
-
-func (s *Session) installPlugins(ctx context.Context, machine string) error {
 	var token string
 	if s.privatePlugins {
 		var err error
@@ -358,14 +415,37 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 			return err
 		}
 	}
-	run := s.exec(machine)
 	if err := s.Scripts.StagePlugins(ctx, run); err != nil {
 		return err
 	}
-	if err := s.Scripts.Install(ctx, run, token, s.Stamp); err != nil {
+	if err := s.Scripts.Install(ctx, run, token, payload); err != nil {
 		return err
 	}
 	s.Log.Info("installed the tools", "machine", machine, "stamp", s.Stamp[:12])
+	return nil
+}
+
+func (s *Session) mountPayload(ctx context.Context, machine string, run images.Exec) (err error) {
+	image, err := os.Open(s.Config.ScriptPath(s.payload.Path))
+	if err != nil {
+		return fmt.Errorf("open payload: %w", err)
+	}
+	defer func() { err = errors.Join(err, image.Close()) }()
+	if err = s.Scripts.StagePayload(ctx, run, image, s.payload.SHA256); err != nil {
+		return err
+	}
+	if err = s.Scripts.Provision(ctx, run, images.PhasePayload, s.payload.SHA256, s.Scripts.Fingerprint()); err != nil {
+		return err
+	}
+	s.Log.Info("mounted the payload", "machine", machine, "sha256", s.payload.SHA256[:12])
+	return nil
+}
+
+func (s *Session) publish(ctx context.Context, machine string) error {
+	if err := s.Scripts.Publish(ctx, s.exec(machine), s.Stamp); err != nil {
+		return err
+	}
+	s.Log.Info("published the tools", "machine", machine, "stamp", s.Stamp[:12])
 	return nil
 }
 
@@ -396,14 +476,10 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 		return err
 	}
 	s.Log.Info("checked out", "machine", machine, "ref", record.Source.Ref, "head", record.Source.Head)
-	return s.prepare(ctx, record)
+	return nil
 }
 
-func (s *Session) prepare(ctx context.Context, record *Record) error {
-	env, err := s.forwards(record)
-	if err != nil {
-		return err
-	}
+func (s *Session) prepare(ctx context.Context, record *Record, env map[string]string) error {
 	if _, err := s.run(ctx, record.Machine, RefreshScript(s.ProjectRoot(), ExportEnv(env), s.profile.Prepare), nil); err != nil {
 		return err
 	}
@@ -411,11 +487,7 @@ func (s *Session) prepare(ctx context.Context, record *Record) error {
 	return nil
 }
 
-func (s *Session) configure(ctx context.Context, record *Record) error {
-	env, err := s.forwards(record)
-	if err != nil {
-		return err
-	}
+func (s *Session) configure(ctx context.Context, record *Record, env map[string]string) error {
 	if err := s.Scripts.Configure(ctx, s.exec(record.Machine), env); err != nil {
 		return err
 	}
@@ -562,10 +634,14 @@ func (s *Session) reopen(ctx context.Context, record *Record) error {
 	if err := s.readyTools(ctx, record); err != nil {
 		return err
 	}
-	if err := s.prepare(ctx, record); err != nil {
+	env, err := s.forwards(record)
+	if err != nil {
 		return err
 	}
-	return s.configure(ctx, record)
+	if err := s.prepare(ctx, record, env); err != nil {
+		return err
+	}
+	return s.configure(ctx, record, env)
 }
 
 func (s *Session) Suspend(ctx context.Context, name string) error {

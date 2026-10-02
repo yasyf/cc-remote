@@ -262,6 +262,18 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	return p.Runner.Run(ctx, p.command(stdin, append(append(args, "--"), cmd...)...))
 }
 
+func (p *Provider) Download(ctx context.Context, id, path string, w io.Writer) error {
+	if _, err := p.Get(ctx, id); err != nil {
+		return err
+	}
+	command := p.command(nil, "api", "-o", p.Org, "/v1/sprites/"+id+"/fs/read?path="+url.QueryEscape(path), "--", "-sS", "-f")
+	command.Stdout = w
+	if _, err := providers.Output(ctx, p.Runner, command); err != nil {
+		return fmt.Errorf("downloading %s from sprite %s: %w", path, id, err)
+	}
+	return nil
+}
+
 func (p *Provider) api(ctx context.Context, path string) (int, []byte, error) {
 	out, err := providers.Output(ctx, p.Runner, p.command(nil, "api", "-o", p.Org, path, "--", "-sS", "-w", "\n%{http_code}"))
 	if err != nil {

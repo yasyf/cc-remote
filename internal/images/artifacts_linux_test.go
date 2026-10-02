@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -70,6 +71,46 @@ func TestVerifyRejectsAnUnpinnedLink(t *testing.T) {
 	out, err := library(root, strings.Join(verifyCalls(artifact, "tool_dir", "bin_dir"), "\n")).CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "does not point at the pinned") {
 		t.Fatalf("verify accepted a repointed link: %v %s", err, out)
+	}
+}
+
+func TestVerifyLinkChecksOnlySpellingUntilThePublishRunsTheTarget(t *testing.T) {
+	tests := []struct {
+		name      string
+		check     string
+		points    string
+		installed bool
+		wantErr   bool
+	}{
+		{name: "spelling accepts a link whose target is still installing", check: "spelling", points: "target"},
+		{name: "spelling rejects a repointed link", check: "spelling", points: "other", wantErr: true},
+		{name: "full rejects a link whose target is missing", check: "full", points: "target", wantErr: true},
+		{name: "full runs an installed target with its verify args", check: "full", points: "target", installed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			target, link, marker := filepath.Join(root, "target"), filepath.Join(root, "link"), filepath.Join(root, "ran")
+			if tt.installed {
+				if err := os.WriteFile(target, []byte("#!/bin/sh\nprintf '%s' \"$*\" > "+quote(marker)+"\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(filepath.Join(root, tt.points), link); err != nil {
+				t.Fatal(err)
+			}
+			out, err := library(root, "link_check="+tt.check+"\nverify_link "+quote(link)+" "+quote(target)+" --version").CombinedOutput()
+			if (err != nil) != tt.wantErr || tt.wantErr && !strings.Contains(string(out), "cc-remote: "+link+" does not point at the pinned "+target) {
+				t.Fatalf("verify_link = %v\n%s\nwant error %v", err, out, tt.wantErr)
+			}
+			ran, err := os.ReadFile(marker)
+			switch {
+			case tt.installed && (err != nil || string(ran) != "--version"):
+				t.Errorf("the target ran with %q, %v; want --version", ran, err)
+			case !tt.installed && !os.IsNotExist(err):
+				t.Errorf("the target ran with %q, %v; want it untouched", ran, err)
+			}
+		})
 	}
 }
 
@@ -326,21 +367,13 @@ func TestProvisionDrainsArtifactsAtDebianBarriers(t *testing.T) {
 			t.Errorf("artifact fetch overlapped apt: %v", err)
 		}
 		switch r.URL.Path {
-		case "/first.deb":
-			if _, err := os.Stat(filepath.Join(root, "tools", "first-1.0", ".cc-remote-digest")); err != nil {
-				t.Errorf("first Debian fetch overlapped preceding install: %v", err)
-			}
-		case "/second":
-			if _, err := os.Stat(filepath.Join(root, "first-apt")); err != nil {
-				t.Errorf("second artifact preceded first apt completion: %v", err)
-			}
 		case "/second.deb":
-			if _, err := os.Stat(filepath.Join(root, "tools", "second-1.0", ".cc-remote-digest")); err != nil {
-				t.Errorf("second Debian fetch overlapped preceding install: %v", err)
+			if _, err := os.Stat(filepath.Join(root, "first-apt")); err != nil {
+				t.Errorf("second Debian fetch overlapped the first apt install: %v", err)
 			}
-		case "/third":
+		case "/first", "/second", "/third":
 			if _, err := os.Stat(filepath.Join(root, "second-apt")); err != nil {
-				t.Errorf("third artifact preceded second apt completion: %v", err)
+				t.Errorf("tools fetched %s before the packages phase finished: %v", r.URL.Path, err)
 			}
 		}
 		if _, err := fmt.Fprint(w, payload); err != nil {
@@ -383,20 +416,25 @@ done
 	if err := os.WriteFile(filepath.Join(root, "deb-target"), []byte(payload), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	provision := strings.NewReplacer("tool_dir=/opt/cc-remote/tools", "tool_dir="+quote(filepath.Join(root, "tools")), "bin_dir=/usr/local/bin", "bin_dir="+quote(filepath.Join(root, "bin")), "rm -rf /var/lib/apt/lists/*", "test -f "+quote(filepath.Join(root, "tools", "third-1.0", ".cc-remote-digest"))).Replace(string(scripts.Provision))
-	cmd := exec.Command("bash", "-c", provision)
-	cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("provision failed: %v %s", err, out)
+	provision := strings.NewReplacer("tool_dir=/opt/cc-remote/tools", "tool_dir="+quote(filepath.Join(root, "tools")), "bin_dir=/usr/local/bin", "bin_dir="+quote(filepath.Join(root, "bin")), "rm -rf /var/lib/apt/lists/*", "test -f "+quote(filepath.Join(root, "second-apt"))).Replace(string(scripts.ProvisionScript))
+	for _, phase := range []string{PhasePackages, PhaseTools} {
+		cmd := exec.Command("bash", "-c", provision, "provision.sh", phase)
+		cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("provision %s failed: %v %s", phase, err, out)
+		}
 	}
 	lock.Lock()
 	defer lock.Unlock()
-	if got, want := strings.Join(events, ","), "/first,/first.deb,/second,/second.deb,/third"; got != want {
+	if len(events) != 5 {
+		t.Fatalf("downloads = %v, want five", events)
+	}
+	if got, want := strings.Join(slices.Concat(events[:2], slices.Sorted(slices.Values(events[2:]))), ","), "/first.deb,/second.deb,/first,/second,/third"; got != want {
 		t.Errorf("download order = %s, want %s", got, want)
 	}
 }
 
-func TestPluginsDrainArtifactsBeforeConsumersAndReady(t *testing.T) {
+func TestPluginsDrainArtifactsBeforeConsumers(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
 			archive, sum := writeArchive(t, "tool", "#!/bin/sh\n")
@@ -406,19 +444,18 @@ func TestPluginsDrainArtifactsBeforeConsumersAndReady(t *testing.T) {
 			}
 			inventory := Inventory{Version: SchemaVersion, Tools: []Artifact{tool}, Prepare: []string{"test -f \"$HOME/.local/share/cc-remote/tools/tool-1.0/.cc-remote-digest\"", "touch \"$HOME/consumer\""}}
 			host := newPluginsHost(t, inventory, nil, fakeState{}, nil)
-			out, err := host.plugins("install", "stamp")
+			out, err := host.plugins("install")
 			if (err != nil) != fail {
 				t.Fatalf("install error = %v, want failure %t: %s", err, fail, out)
 			}
-			for _, name := range []string{"consumer", ".cc-remote/ready"} {
-				_, err := os.Stat(filepath.Join(host.home, name))
-				if fail && !os.IsNotExist(err) {
-					t.Errorf("failed install reached %s: %v", name, err)
-				}
-				if !fail && err != nil {
-					t.Errorf("successful install omitted %s: %v", name, err)
-				}
+			_, err = os.Stat(filepath.Join(host.home, "consumer"))
+			if fail && !os.IsNotExist(err) {
+				t.Errorf("failed install reached the consumer: %v", err)
 			}
+			if !fail && err != nil {
+				t.Errorf("successful install omitted the consumer: %v", err)
+			}
+			host.unready()
 		})
 	}
 }
@@ -436,7 +473,7 @@ func TestPluginsWorkersCannotConsumeTokenInput(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(host.fakes, "curl"), []byte(fakeCurl), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "install", "stamp")
+	cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "install")
 	cmd.Env = append(os.Environ(), "HOME="+host.home, "PATH="+host.fakes+":"+os.Getenv("PATH"))
 	cmd.Stdin = strings.NewReader("synthetic-token\nretained-input\n")
 	if out, err := cmd.CombinedOutput(); err != nil {

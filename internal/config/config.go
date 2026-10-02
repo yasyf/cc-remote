@@ -54,9 +54,15 @@ type Profile struct {
 }
 
 type Machine struct {
-	Image  string `yaml:"image"`
-	Size   string `yaml:"size"`
-	Region string `yaml:"region"`
+	Image   string   `yaml:"image"`
+	Size    string   `yaml:"size"`
+	Region  string   `yaml:"region"`
+	Payload *Payload `yaml:"payload"`
+}
+
+type Payload struct {
+	Path   string `yaml:"path"`
+	SHA256 string `yaml:"sha256"`
 }
 
 type Forward struct {
@@ -76,6 +82,7 @@ type Git struct {
 
 var (
 	envName    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	digest     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	Identifier = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,19}$`)
 )
 
@@ -186,9 +193,12 @@ func (c *Config) validate() error {
 		if profile.Checkout != Shallow && profile.Checkout != Full {
 			return fmt.Errorf("profile %s: checkout %q is neither shallow nor full", name, profile.Checkout)
 		}
-		for kind := range profile.Machine {
+		for kind, machine := range profile.Machine {
 			if _, ok := c.Providers[kind]; !ok {
 				return fmt.Errorf("profile %s: machine names provider %q, which is not under providers", name, kind)
+			}
+			if err := machine.validate(); err != nil {
+				return fmt.Errorf("profile %s: machine %s: %w", name, kind, err)
 			}
 		}
 	}
@@ -201,6 +211,22 @@ func (c *Config) validate() error {
 			return fmt.Errorf("forward %+v needs a unique label and a shell variable name in env", forward)
 		}
 		labels[forward.Label] = true
+	}
+	return nil
+}
+
+func (m Machine) validate() error {
+	if m.Payload == nil {
+		return nil
+	}
+	if m.Image != "" {
+		return fmt.Errorf("payload and image %q exclude each other; a payload is mounted on a fresh machine, an image carries its tools", m.Image)
+	}
+	if m.Payload.Path == "" {
+		return errors.New("payload.path names the SquashFS payload file, relative to this config file")
+	}
+	if !digest.MatchString(m.Payload.SHA256) {
+		return fmt.Errorf("payload.sha256 %q must be the 64 lowercase hex digits of the payload's sha256", m.Payload.SHA256)
 	}
 	return nil
 }

@@ -98,8 +98,12 @@ func TestRenderScopesProfileTools(t *testing.T) {
 	if !bytes.Contains(stack.Plugins, []byte(kind)) {
 		t.Errorf("stack plugins.sh does not install kind")
 	}
-	if !bytes.Equal(agents.Provision, stack.Provision) {
-		t.Errorf("provision.sh differs between profiles")
+	packKind := `  pack_path required "$user_home/"'.local/share/cc-remote/tools/kind-0.29.0'` + "\n"
+	if bytes.Contains(agents.ProvisionScript, []byte(packKind)) {
+		t.Errorf("agents provision.sh packs kind")
+	}
+	if !bytes.Equal(bytes.Replace(stack.ProvisionScript, []byte(packKind), nil, 1), agents.ProvisionScript) {
+		t.Errorf("provision.sh differs between profiles beyond packing kind")
 	}
 	if agents.Fingerprint() == stack.Fingerprint() {
 		t.Errorf("profiles with different tools share fingerprint %s", agents.Fingerprint())
@@ -134,8 +138,117 @@ func TestRenderPluginsServicesAndEnv(t *testing.T) {
 	if want := "  mkdir -p ~/.example\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
 		t.Errorf("plugins.sh lacks the configure step %q", want)
 	}
-	if want := "  (\n    cd \"$HOME\"\n    mkdir -p ~/.cache/example\n  )\n  run_verify\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
+	if want := "  (\n    cd \"$HOME\"\n    mkdir -p ~/.cache/example\n  )\n  local link_check=spelling\n  verify_user\n}\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
 		t.Errorf("plugins.sh lacks the prepare block %q", want)
+	}
+	if want := "  local stamp=\"${1:?publish needs the ready stamp}\"\n  verify_system\n  verify_user_links\n  mkdir -p \"$state_dir\"\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
+		t.Errorf("plugins.sh lacks the publish checks %q", want)
+	}
+}
+
+func TestRenderExposesPayloadTrees(t *testing.T) {
+	inventory := validInventory()
+	inventory.Claude.Marketplaces = append(inventory.Claude.Marketplaces, Marketplace{Name: "secret", GitHub: "owner/secret", Ref: commit, Private: true})
+	inventory.Claude.Plugins = append(inventory.Claude.Plugins, Plugin{ID: "vault@secret", Version: "2.0.0"})
+	scripts, err := Render(inventory, "agents")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	system := `  expose link required '/opt/cc-remote/tools/uv-0.1.0'
+  expose link required '/opt/cc-remote/tools/claude-2.0.0'
+  expose link required '/opt/cc-remote/tools/codex-0.2.0'
+  expose link required '/opt/uv/tools/cc-transcript'
+  expose copy required '/usr/local/bin/cc-transcript'
+  expose link required '/opt/uv/python'
+  drain_artifacts
+}
+`
+	pack := `  version="$(os_version)"
+  pack_path required '/opt/cc-remote/tools/uv-0.1.0'
+  pack_path required '/opt/cc-remote/tools/claude-2.0.0'
+  pack_path required '/opt/cc-remote/tools/codex-0.2.0'
+  pack_path required '/opt/uv/tools/cc-transcript'
+  pack_path required '/usr/local/bin/cc-transcript'
+  pack_path required '/opt/uv/python'
+  pack_path required "$user_home/"'.local/share/cc-remote/tools/jq-1.8.2'
+  pack_path required "$user_home/"'.local/share/cc-remote/tools/cookiesync-0.30.0'
+  pack_path required "$user_home/"'.local/share/cc-remote/marketplaces/market'
+  pack_path required "$user_home/"'.local/share/cc-remote/marketplaces/secret'
+  pack_path required "$user_home/"'.claude/plugins/cache/market/hooks/1.0.0'
+  pack_path required "$user_home/"'.claude/plugins/cache/secret/vault/2.0.0'
+  pack_path required "$user_home/"'.claude/plugins/installed_plugins.json'
+  pack_path required "$user_home/"'.claude/plugins/known_marketplaces.json'
+  pack_path required "$user_home/"'.claude/settings.json'
+  pack_path required "$user_home/"'.cache/codex-runtimes/codex-primary-runtime'
+  pack_path required "$user_home/"'.codex/config.toml'
+  pack_path required "$user_home/"'.codex/plugins/cache/openai-primary-runtime'
+  pack_path required "$user_home/"'.daemonkit/tools/capt-hook/1.0.0'
+  pack_path optional "$user_home/"'.local/share/uv/python'
+  jq -n `
+	for _, want := range []string{system, pack} {
+		if !bytes.Contains(scripts.ProvisionScript, []byte(want)) {
+			t.Errorf("provision.sh lacks\n%s", want)
+		}
+	}
+	home := `  if [ "$#" -gt 0 ]; then
+    local payload="$1"
+    expose link required "$HOME/"'.local/share/cc-remote/tools/jq-1.8.2'
+    expose link required "$HOME/"'.local/share/cc-remote/tools/cookiesync-0.30.0'
+    expose link required "$HOME/"'.local/share/cc-remote/marketplaces/market'
+    expose link required "$HOME/"'.local/share/cc-remote/marketplaces/secret'
+    expose copy required "$HOME/"'.claude/plugins/cache/market/hooks/1.0.0'
+    expose copy required "$HOME/"'.claude/plugins/cache/secret/vault/2.0.0'
+    expose copy required "$HOME/"'.claude/plugins/installed_plugins.json'
+    expose copy required "$HOME/"'.claude/plugins/known_marketplaces.json'
+    expose copy required "$HOME/"'.claude/settings.json'
+    expose link required "$HOME/"'.cache/codex-runtimes/codex-primary-runtime'
+    expose copy required "$HOME/"'.codex/config.toml'
+    expose copy required "$HOME/"'.codex/plugins/cache/openai-primary-runtime'
+    expose children required "$HOME/"'.daemonkit/tools/capt-hook/1.0.0'
+    expose link optional "$HOME/"'.local/share/uv/python'
+  fi
+`
+	stale := `  if stale_marketplace "$working" 'hooks@market 1.0.0'; then
+    claude plugin marketplace update 'market'
+  fi
+  if stale_marketplace "$working" 'vault@secret 2.0.0'; then
+    claude plugin marketplace update 'secret'
+  fi
+  install_plugin 'hooks@market' '1.0.0' "$1"
+  install_plugin 'vault@secret' '2.0.0' "$1"
+`
+	for _, want := range []string{home, stale} {
+		if !bytes.Contains(scripts.Plugins, []byte(want)) {
+			t.Errorf("plugins.sh lacks\n%s", want)
+		}
+	}
+}
+
+func TestHomeTreesForBranchMarketplacesWithoutPlugins(t *testing.T) {
+	inventory := Inventory{Claude: Claude{Marketplaces: []Marketplace{{Name: "official", GitHub: "owner/official", Branch: "main"}}}}
+	want := []tree{
+		{exposeCopy, required, ".claude/plugins/marketplaces/official"},
+		{exposeCopy, required, ".claude/plugins/known_marketplaces.json"},
+		{exposeCopy, required, ".claude/settings.json"},
+	}
+	if got := homeTrees(inventory, nil); !slices.Equal(got, want) {
+		t.Errorf("homeTrees = %v, want %v", got, want)
+	}
+}
+
+func TestUVToolDir(t *testing.T) {
+	tests := []struct {
+		tool PythonTool
+		want string
+	}{
+		{PythonTool{Name: "cc-transcript"}, "cc-transcript"},
+		{PythonTool{Name: "writer", Package: "writer-cli"}, "writer-cli"},
+		{PythonTool{Name: "writer", Package: "writer[lab,scoring]"}, "writer"},
+	}
+	for _, tt := range tests {
+		if got := uvToolDir(tt.tool); got != tt.want {
+			t.Errorf("uvToolDir(%+v) = %q, want %q", tt.tool, got, tt.want)
+		}
 	}
 }
 
@@ -156,7 +269,7 @@ func TestRenderProvisionWithoutOptionalSections(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, absent := range []string{"managed-settings.json", "uv\" tool install", "install_artifact '"} {
-		if bytes.Contains(scripts.Provision, []byte(absent)) {
+		if bytes.Contains(scripts.ProvisionScript, []byte(absent)) {
 			t.Errorf("empty inventory's provision.sh contains %q", absent)
 		}
 	}
@@ -166,7 +279,7 @@ func TestRenderProvisionWithoutOptionalSections(t *testing.T) {
 }
 
 func TestFingerprintFormat(t *testing.T) {
-	scripts := Scripts{Provision: []byte("A"), Plugins: []byte("BC")}
+	scripts := Scripts{ProvisionScript: []byte("A"), Plugins: []byte("BC")}
 	sum := sha256.Sum256([]byte("cc-remote/tools/v1\nprovision.sh 1\nAplugins.sh 2\nBC"))
 	if got, want := scripts.Fingerprint(), hex.EncodeToString(sum[:]); got != want {
 		t.Errorf("Scripts.Fingerprint = %s, want %s", got, want)
@@ -179,7 +292,7 @@ func TestFingerprintFormat(t *testing.T) {
 }
 
 func TestStamp(t *testing.T) {
-	scripts := Scripts{Provision: []byte("A"), Plugins: []byte("BC")}
+	scripts := Scripts{ProvisionScript: []byte("A"), Plugins: []byte("BC")}
 	image := Context{Dockerfile: []byte("D"), Provision: []byte("A"), Start: []byte("S")}
 	tools, img := scripts.Fingerprint(), image.Fingerprint()
 	sum := sha256.Sum256([]byte("cc-remote/ready/v1\ntools 64\n" + tools))
@@ -251,7 +364,8 @@ func TestRenderImageDockerfile(t *testing.T) {
 
 RUN useradd -m -s /bin/bash agent
 COPY provision.sh start.sh /tmp/cc-remote/
-RUN bash /tmp/cc-remote/provision.sh \
+RUN bash /tmp/cc-remote/provision.sh packages \
+    && bash /tmp/cc-remote/provision.sh tools \
     && install -m 0755 /tmp/cc-remote/start.sh /usr/local/bin/cc-remote-start \
     && rm -rf /tmp/cc-remote
 ENV LANG=C.UTF-8
@@ -266,7 +380,7 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !bytes.Equal(context.Provision, scripts.Provision) {
+	if !bytes.Equal(context.Provision, scripts.ProvisionScript) {
 		t.Errorf("the image context's provision.sh differs from the rendered one")
 	}
 }

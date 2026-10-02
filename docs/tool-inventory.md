@@ -13,6 +13,7 @@ to replace before installation; rendering and fingerprinting need no provider si
 | `cc-remote images render` | `--inventory`, `--profile`, `--out` | Writes `plugins.sh` and `provision.sh`; with `image`, also writes `Dockerfile` and `start.sh`. |
 | `cc-remote images fingerprint` | `--inventory`, `--profile` | Prints JSON with `tools`, and `image` when configured. |
 | `cc-remote images build` | `--inventory` | Builds and publishes the configured Namespace image through `devbox image build`. Requires a logged-in `devbox` CLI. |
+| `cc-remote payload build` | `--out` | Builds a private `SquashFS` payload on a fresh Sprite. Accepts `--config`, `--provider`, and `--profile`; prints JSON with `sha256`, `size`, `tools`, `machine`, and `path`. |
 
 The committed example has this fingerprint output:
 
@@ -31,7 +32,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 | Section | Fields | Meaning |
 | --- | --- | --- |
-| `image` | `name`, `base`, `user`, `workspaceDir`, `layer` | Optional Namespace image. `base` requires an `@sha256:` digest; `workspaceDir` is an absolute path. `layer` adds single-line Dockerfile instructions after provisioning. It forbids `FROM`, continuations, and heredocs. |
+| `image` | `name`, `base`, `user`, `workspaceDir`, `layer` | Optional Namespace image. `base` requires an `@sha256:` digest; `workspaceDir` is an absolute path. `layer` adds single-line Dockerfile instructions after provisioning and forbids `FROM`, continuations, and heredocs. |
 | `apt` | `install`, `t64`, `remove` | Root package lists. `t64` accommodates the distribution's package suffix. |
 | `system` | Artifact list | Root artifacts under `/opt/cc-remote/tools`, linked into `/usr/local/bin`. |
 | `tools` | Artifact list | User artifacts under `$HOME/.local/share/cc-remote/tools`, or their explicit `dest`, linked into `$HOME/.local/bin`. |
@@ -50,7 +51,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 | Field | Contract |
 | --- | --- |
-| `name` | Artifact name; letters, digits, dots, underscores, and hyphens. Starts with a letter or digit. |
+| `name` | Artifact name starting with a letter or digit; only letters, digits, `.`, `_`, and `-` are allowed. |
 | `version` | Pinned version string. |
 | `url` | HTTPS download URL. |
 | `sha256`, `sha512` | Exactly one is required, as lowercase hex of the appropriate length. |
@@ -60,9 +61,9 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | `verify` | Arguments used to check the linked executable, such as `[--version]`. |
 
 Non-Debian artifacts install with at most four concurrent jobs per phase. Each
-Debian artifact waits for preceding jobs and installs before later jobs start.
-All artifact jobs finish before links, plugins, preparation, or verification run.
-A failed job drains the started jobs and prevents readiness.
+Debian artifact installs serially in the `packages` phase. Each phase drains its
+artifact jobs before verification. A failed job drains the started jobs and
+prevents readiness.
 
 Every download is digest-checked before installation. Verification checks its
 digest marker and executable link target. Profile tools cannot overwrite base
@@ -122,6 +123,80 @@ marketplace access.
 Changing a marketplace ref while keeping its plugin versions unchanged does not
 reinstall those plugins. Plugin reinstallation uses the version as its identity.
 
+## Machine payloads
+
+A profile machine can select a private local `SquashFS` file with
+`profiles.<profile>.machine.<provider>.payload`. Payloads require a machine
+provisioned in place with the `sprite-env` supervisor and exclude `image`.
+
+| Field | Contract |
+| --- | --- |
+| `path` | Local payload file; relative paths resolve from the config file's directory. |
+| `sha256` | File digest as 64 lowercase hexadecimal characters. |
+
+With a configured Sprites provider and `lean` profile, a build command is:
+
+```sh
+cc-remote payload build --config ./config.yaml --provider sprites --profile lean --out ./tools.sqfs
+```
+
+The build installs the full inventory, including private marketplaces and the
+selected profile's additions, on a fresh build Sprite. Private marketplace access
+uses `GH_TOKEN`, `GITHUB_TOKEN`, or `git.token_command`; the token reaches the
+Sprite only on the install phase's stdin. The build packs an explicit allowlist
+of installed trees, streams the file back, and computes its SHA-256 and byte size.
+`--out` must not exist; the new file has mode `0600`. The build destroys its Sprite
+and confirms its absence before returning success. Its returned `path` and
+`sha256` supply the machine's payload fields.
+
+Create streams the local file into the Sprite, checks its SHA-256, and mounts it
+read-only under `/opt/cc-remote/payload/<sha256>`. The manifest
+`cc-remote-payload.json` must have `schemaVersion: 1` and match the rendered tools
+fingerprint, the target account's passwd home directory, `uname -m`, and the OS
+`VERSION_ID`. A mismatch or missing required tree fails creation. Packing also
+fails when a required tree is missing on the build Sprite.
+
+The allowlist uses the following exposure rules for entries in the inventory:
+
+| Trees | Exposure |
+| --- | --- |
+| Non-Debian system artifacts, user artifacts, and profile artifacts | Link each versioned directory or user `dest` to its payload tree. |
+| System Python tool environments | Link each `/opt/uv/tools/<name>`; keep `/opt/uv/tools` writable. Copy their `/usr/local/bin` entrypoint symlinks. |
+| `/opt/uv/python` and `$HOME/.local/share/uv/python` | Link each whole root. The user Python root is the only optional tree. |
+| Pinned `ref` marketplace checkouts, public or private | Link each checkout. |
+| Branch marketplace checkouts and every plugin cache version, public or private | Copy into writable directories. |
+| Claude's `installed_plugins.json`, `known_marketplaces.json`, and `settings.json` | Copy as regular files. |
+| Codex runtime and configuration | Link `$HOME/.cache/codex-runtimes/codex-primary-runtime`; copy `$HOME/.codex/config.toml` and `$HOME/.codex/plugins/cache/openai-primary-runtime`. |
+| Captain Hook version directory | Keep a real directory; link its children except `.lock`. |
+
+Exposure replaces links into older payloads and leaves other existing paths to
+the installer. Plugin caches are writable because plugins build runtime files
+and Claude writes `.in_use` there. The allowlist excludes owner state: agent
+authentication and sessions, plugin data, daemon locks, cc-remote workspace state,
+and SSH/tailnet state. Packing also excludes `.in_use` and `.orphaned_at`.
+
+The `cc-remote-payload` service checks stored payload digests and remounts the
+files at boot. Inventory services registered with `sprite-env` depend on it.
+
+## Script phases
+
+The rendered scripts separate package installation, tool verification, and
+readiness publication:
+
+| Invocation | Result |
+| --- | --- |
+| `provision.sh packages` | Installs packages and Debian artifacts with `apt-get`, verifies the artifacts, and clears package lists. |
+| `provision.sh tools` | Installs and verifies non-Debian system artifacts and system Python tools; writes managed Claude settings. |
+| `provision.sh payload SHA256 FINGERPRINT` | Validates and mounts the staged payload, registers boot remounting, and exposes system trees. |
+| `provision.sh pack FINGERPRINT` | Packs the allowlisted trees and manifest into a `SquashFS` file with zstd compression. |
+| `plugins.sh install [PAYLOAD_DIR]` | Clears readiness, optionally exposes home trees, reconciles tools and plugins, runs inventory preparation, and verifies user tools; links are checked by target path only, since a Debian target may still be installing. |
+| `plugins.sh publish STAMP` | Verifies system tools and user links, including that each target runs its verify arguments, then writes the readiness stamp. |
+| `plugins.sh ready STAMP` | Checks the readiness stamp. |
+| `plugins.sh configure` | Applies the declared environment, runs configuration commands, and starts services. |
+| `plugins.sh verify` | Verifies both system and user tools. |
+
+Namespace image builds run `packages` followed by `tools`.
+
 ## Fingerprints and readiness
 
 | Value | Inputs |
@@ -131,9 +206,16 @@ reinstall those plugins. Plugin reinstallation uses the version as its identity.
 | Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host. |
 
 Each uses SHA-256 with its own domain and file-name/length framing. The image
-description includes `cc-remote-image=<fingerprint>`. Installation writes the
-readiness stamp only after preparation and verification succeed; the `ready`
-script phase checks that stamp. Configuration is a separate phase.
+description includes `cc-remote-image=<fingerprint>`.
+
+Installation clears readiness and never writes the stamp. Create runs packages,
+checkout and profile preparation, and tools in concurrent lanes. The tools lane
+includes payload mounting when configured, installation, configuration, and
+tailnet enrollment.
+Only after every lane succeeds does `publish` write the stamp; connection follows.
+
+On resume, tool reinstallation runs packages and tools concurrently, then publishes
+before profile preparation and configuration. The `ready` phase checks the stamp.
 
 Namespace image building and live host startup have not been exercised with this
 implementation. CI grades rendering, validation, shell syntax, shellcheck, Python
