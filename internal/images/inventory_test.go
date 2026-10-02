@@ -230,6 +230,60 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
+func aptPayloadInventory() Inventory {
+	return Inventory{
+		Version: SchemaVersion,
+		System:  []Artifact{{Name: "uv", Version: "0.1.0", URL: "https://example.com/uv.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"uv": "uv/uv"}}},
+		Python:  Python{Version: "3.13", System: []PythonTool{{Name: "cc-transcript", Version: "1.0.0", Bins: []string{"cc-transcript"}}}},
+		Apt: Apt{
+			Install: []string{"openssh-server"},
+			Payload: &AptPayload{
+				Resident:  []string{"bubblewrap"},
+				Closure:   []string{"libnss3", "fonts-liberation"},
+				Bins:      []string{"certutil", "fc-match"},
+				Fonts:     []string{"Liberation Sans"},
+				Consumers: []string{".agent-browser/chrome", "/opt/cc-remote/tools/soffice.bin"},
+			},
+		},
+	}
+}
+
+func TestValidateAcceptsAnAptPayload(t *testing.T) {
+	if err := aptPayloadInventory().Validate(); err != nil {
+		t.Fatalf("a valid apt.payload was rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsAnAptPayload(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*AptPayload)
+		want   string
+	}{
+		{"closure name", func(p *AptPayload) { p.Closure = []string{"lib nss3"} }, `apt.payload.closure: "lib nss3" is not a Debian package name`},
+		{"resident name", func(p *AptPayload) { p.Resident = []string{"Bubble"} }, `apt.payload.resident: "Bubble" is not a Debian package name`},
+		{"empty closure", func(p *AptPayload) { p.Closure = nil }, "apt.payload.closure names no package, so the payload would carry no closure"},
+		{"closure overlaps resident", func(p *AptPayload) { p.Resident = []string{"libnss3"} }, `apt.payload.closure: "libnss3" is also under apt.payload.resident`},
+		{"duplicate bin", func(p *AptPayload) { p.Bins = []string{"certutil", "certutil"} }, `apt.payload: bin "certutil" is already installed by apt.payload`},
+		{"bin collides with a system bin", func(p *AptPayload) { p.Bins = []string{"uv"} }, `apt.payload.bins: "uv" is already a system bin`},
+		{"bin collides with a python system bin", func(p *AptPayload) { p.Bins = []string{"cc-transcript", "fc-match"} }, `apt.payload.bins: "cc-transcript" is already a system bin`},
+		{"font name", func(p *AptPayload) { p.Fonts = []string{"Bad\tFamily"} }, `apt.payload.fonts: "Bad\tFamily" is not a font family name`},
+		{"font without fc-match", func(p *AptPayload) { p.Bins = []string{"certutil"} }, "apt.payload.fonts: proving a family needs fc-match under apt.payload.bins"},
+		{"consumer escaping home", func(p *AptPayload) { p.Consumers = []string{"../chrome"} }, `apt.payload.consumers: "../chrome" is neither a clean path relative to the home directory nor under /opt/cc-remote`},
+		{"consumer absolute outside opt", func(p *AptPayload) { p.Consumers = []string{"/usr/bin/chrome"} }, `apt.payload.consumers: "/usr/bin/chrome" is neither a clean path relative to the home directory nor under /opt/cc-remote`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inventory := aptPayloadInventory()
+			tt.mutate(inventory.Apt.Payload)
+			err := inventory.Validate()
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsRepeatedArtifactNamesWithDistinctDestinations(t *testing.T) {
 	inventory := Inventory{Version: SchemaVersion, Tools: []Artifact{
 		{Name: "tool", Version: "1.0", URL: "https://example.com/first", SHA256: digest, Format: Binary, Dest: ".tools/first", Bins: map[string]string{"first": "tool"}},

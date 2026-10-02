@@ -44,6 +44,7 @@ const (
 	packagesPhase = "sudo bash -s packages"
 	toolsPhase    = "sudo bash -s tools"
 	payloadPhase  = "sudo --preserve-env=PATH bash -s payload "
+	loaderPhase   = "sudo bash -s loader"
 	mergesPlugins = "enable-payload-plugins "
 	stagesPayload = "stage-payload "
 	payloadBytes  = "hsqs squashfs payload bytes"
@@ -58,6 +59,8 @@ const (
 	debTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.deb, sha256: " + sha + ", format: deb, bins: { tailscale: /usr/bin/tailscale, tailscaled: /usr/sbin/tailscaled } }\n"
 	cliTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.tgz, sha256: " + sha + ", format: tar.gz, bins: { tailscale: tailscale/tailscale } }\n"
 	configureEnv  = "configure:\n  env: [WEB_PORT]\n"
+	closureApt    = "apt:\n  payload:\n    resident: [bubblewrap]\n    closure: [libnss3]\n    bins: [certutil]\n    consumers: [.agent-browser/chrome]\n"
+	closureInv    = systemHead + configureEnv + closureApt
 	imaged        = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
 	sha           = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
 	commit        = "008173c23f95b170204355c12626cb5a965d779a"
@@ -350,6 +353,15 @@ func newPayloadHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	return build(t, false, inventory, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+}
+
+func newClosurePayloadHarness(t *testing.T) *harness {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agent.sqfs")
+	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return build(t, false, closureInv, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
 }
 
 func build(t *testing.T, withTailnet bool, tools, machineSpec string, facts providers.Traits) *harness {
@@ -1248,6 +1260,38 @@ func TestTheEnrollmentWaitsForTheToolInstallButNotForThePackages(t *testing.T) {
 	h.ordered(0, packagesPhase, configures, publishes)
 	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) || h.machine.ran("ws-1", publishes) != 1 {
 		t.Errorf("record %+v (found %v), bound %v, published %d times", record, found, h.bound(), h.machine.ran("ws-1", publishes))
+	}
+}
+
+func TestTheClosureLoaderRunsAfterThePackagesAndTheToolInstallAndGatesConfigure(t *testing.T) {
+	h := newClosurePayloadHarness(t)
+	var creating sync.WaitGroup
+	t.Cleanup(creating.Wait)
+	packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
+	registering, configuring := h.machine.hold(t, loaderPhase), h.machine.hold(t, configures)
+	created := make(chan error, 1)
+	creating.Go(func() {
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		created <- err
+	})
+	packaging.awaitEntered(t)
+	installing.awaitEntered(t)
+	registering.stillParked(t, "while the packages and the tool install were still running")
+	packaging.release <- providers.Result{}
+	registering.stillParked(t, "once only the packages had finished")
+	installing.release <- providers.Result{}
+	registering.awaitEntered(t)
+	configuring.stillParked(t, "while the closure loader was still running")
+	registering.release <- providers.Result{}
+	configuring.awaitEntered(t)
+	configuring.release <- providers.Result{}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(0, packagesPhase, loaderPhase, configures, publishes)
+	h.ordered(0, installs, loaderPhase, prepares, publishes)
+	if packages := h.machine.scripts["ws-1"]; h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ran("ws-1", "sudo bash -s packages resident") != 1 {
+		t.Errorf("the closure create ran %q; want one resident packages phase and one loader phase", packages)
 	}
 }
 

@@ -62,7 +62,20 @@ type tree struct {
 	Path        string
 }
 
-var readyTimeout = 30 * time.Second
+var (
+	readyTimeout  = 30 * time.Second
+	closureShares = []string{"mime", "glib-2.0/schemas", "icons"}
+)
+
+type closureLink struct {
+	Path   string `json:"path"`
+	Target string `json:"target"`
+}
+
+type closureView struct {
+	AptPayload
+	Links []closureLink `json:"links"`
+}
 
 type native struct {
 	ID  string
@@ -79,6 +92,7 @@ type view struct {
 	HomeTrees    []tree
 	ReadyTimeout float64
 	Natives      []native
+	Closure      *closureView
 }
 
 func newView(inv Inventory, profile string) view {
@@ -91,6 +105,7 @@ func newView(inv Inventory, profile string) view {
 		HomeTrees:    homeTrees(inv, tools),
 		ReadyTimeout: readyTimeout.Seconds(),
 		Natives:      natives(inv),
+		Closure:      closure(inv),
 	}
 }
 
@@ -114,7 +129,28 @@ func systemTrees(inv Inventory) []tree {
 	if len(inv.Python.System) > 0 {
 		trees = append(trees, tree{exposeLink, required, "/opt/uv/python"})
 	}
+	if c := closure(inv); c != nil {
+		trees = append(trees, tree{exposeLink, required, ClosurePath})
+		for _, link := range c.Links {
+			trees = append(trees, tree{exposeCopy, required, link.Path})
+		}
+	}
 	return trees
+}
+
+func closure(inv Inventory) *closureView {
+	payload := inv.Apt.Payload
+	if payload == nil {
+		return nil
+	}
+	c := &closureView{AptPayload: *payload}
+	for _, bin := range payload.Bins {
+		c.Links = append(c.Links, closureLink{"/usr/local/bin/" + bin, "usr/bin/" + bin})
+	}
+	for _, share := range closureShares {
+		c.Links = append(c.Links, closureLink{"/usr/local/share/" + share, "usr/share/" + share})
+	}
+	return c
 }
 
 func homeTrees(inv Inventory, tools []Artifact) []tree {
@@ -221,6 +257,7 @@ func RenderImage(inv Inventory) (Context, error) {
 	if inv.Image == nil {
 		return Context{}, errors.New("inventory has no image section")
 	}
+	inv.Apt.Payload = nil
 	bound, err := parse(inv)
 	if err != nil {
 		return Context{}, err
@@ -311,6 +348,12 @@ func parse(inv Inventory) (*template.Template, error) {
 		"home": func(rel string) string {
 			return under("HOME", rel)
 		},
+		"consumer": func(p string) string {
+			if strings.HasPrefix(p, "/") {
+				return quote(p)
+			}
+			return under("HOME", p)
+		},
 		"pins": func(marketplace string) []string {
 			var pins []string
 			for _, plugin := range inv.Claude.Plugins {
@@ -324,7 +367,7 @@ func parse(inv Inventory) (*template.Template, error) {
 			_, marketplace, _ := strings.Cut(plugin.ID, "@")
 			return refs[marketplace]
 		},
-	}).ParseFS(assets.FS, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile")
+	}).ParseFS(assets.FS, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "capture.py", "namespace/Dockerfile")
 	if err != nil {
 		return nil, fmt.Errorf("parse image templates: %w", err)
 	}

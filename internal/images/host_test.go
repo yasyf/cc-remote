@@ -37,6 +37,10 @@ func TestHostOperations(t *testing.T) {
 		want call
 	}{
 		{"provision packages", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhasePackages) }, call{[]string{"sudo", "bash", "-s", "packages"}, "provision"}},
+		{"provision resident packages", func(ctx context.Context, exec Exec) error {
+			return scripts.Provision(ctx, exec, PhasePackages, PackagesResident)
+		}, call{[]string{"sudo", "bash", "-s", "packages", "resident"}, "provision"}},
+		{"provision loader", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhaseLoader) }, call{[]string{"sudo", "bash", "-s", "loader"}, "provision"}},
 		{"provision tools", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhaseTools) }, call{[]string{"sudo", "bash", "-s", "tools"}, "provision"}},
 		{"provision payload", func(ctx context.Context, exec Exec) error {
 			return scripts.Provision(ctx, exec, PhasePayload, digest, fingerprint)

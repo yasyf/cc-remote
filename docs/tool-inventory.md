@@ -33,7 +33,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | Section | Fields | Meaning |
 | --- | --- | --- |
 | `image` | `name`, `base`, `user`, `workspaceDir`, `layer` | Optional Namespace image. `base` requires an `@sha256:` digest; `workspaceDir` is an absolute path. `layer` adds single-line Dockerfile instructions after provisioning and forbids `FROM`, continuations, and heredocs. |
-| `apt` | `install`, `t64`, `remove` | Root package lists. `t64` accommodates the distribution's package suffix. |
+| `apt` | `install`, `t64`, `remove`, `payload` | Root package lists. `t64` accommodates the distribution's package suffix. `payload` is read only when the machine mounts a verified payload: its `closure` packages install on the build machine, which captures their files into `/opt/cc-remote/closure` for the payload to carry, so each machine installs only the `resident` set plus what is not in the closure. `bins` are the closure executables linked onto `PATH`, `fonts` the families readiness proves with `fc-match`, and `consumers` the executables readiness loads with `ld.so`. Without a payload, and in a Namespace image, the full `install` set installs as usual. |
 | `system` | Artifact list | Root artifacts under `/opt/cc-remote/tools`, linked into `/usr/local/bin`. |
 | `tools` | Artifact list | User artifacts under `$HOME/.local/share/cc-remote/tools`, or their explicit `dest`, linked into `$HOME/.local/bin`. |
 | `links` | Executable names | Adds user links to installed system executables. |

@@ -355,6 +355,85 @@ func TestRenderProvisionWithoutOptionalSections(t *testing.T) {
 	}
 }
 
+func TestRenderExposesAndActivatesTheClosure(t *testing.T) {
+	scripts, err := Render(scriptInventory(), "agents")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	provision := string(scripts.ProvisionScript)
+	for _, want := range []string{
+		"closure_packages=('libnss3' 'libasound2t64' 'fonts-x')",
+		"provision_capture \"$user_home\"",
+		"expose link required '/opt/cc-remote/closure'",
+		"expose copy required '/usr/local/bin/certutil'",
+		"expose copy required '/usr/local/share/mime'",
+		`closure_link "$closure_root" "$payload$closure_root"`,
+		`closure_link '/usr/local/bin/certutil' "$closure_root/"'usr/bin/certutil'`,
+		`write_conf "$closure_loader_conf" "$closure_root/usr/lib/$(uname -m)-linux-gnu"`,
+		"flock \"$closure_lock\" ldconfig",
+	} {
+		if !strings.Contains(provision, want) {
+			t.Errorf("provision.sh lacks\n%s", want)
+		}
+	}
+	if !strings.Contains(provision, "packages) provision_packages \"${2:-}\" ;;") || !strings.Contains(provision, "loader) provision_loader ;;") {
+		t.Errorf("provision.sh does not route the packages mode and loader phase:\n%s", provision)
+	}
+	plugins := string(scripts.Plugins)
+	for _, want := range []string{
+		"verify_closure_bin 'certutil'",
+		"verify_closure_bin 'fc-match'",
+		`verify_loader "$HOME/"'.agent-browser/chrome'`,
+		"verify_loader '/opt/cc-remote/tools/office/soffice.bin'",
+		"verify_font 'Noto Sans CJK JP'",
+	} {
+		if !strings.Contains(plugins, want) {
+			t.Errorf("plugins.sh lacks\n%s", want)
+		}
+	}
+}
+
+func TestRenderWithoutAPayloadNeverMentionsTheClosure(t *testing.T) {
+	withPayload := scriptInventory()
+	withoutPayload := withPayload
+	withoutPayload.Apt.Payload = nil
+	plain, err := Render(withoutPayload, "agents")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	for name, data := range map[string][]byte{"provision.sh": plain.ProvisionScript, "plugins.sh": plain.Plugins} {
+		if bytes.Contains(data, []byte("closure")) {
+			t.Errorf("a payload-free inventory's %s mentions the closure", name)
+		}
+	}
+	bare := Inventory{Version: SchemaVersion, Apt: Apt{Install: withPayload.Apt.Install, T64: withPayload.Apt.T64}}
+	baseline, err := Render(bare, "agents")
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !bytes.Equal(plain.ProvisionScript, baseline.ProvisionScript) {
+		t.Errorf("dropping apt.payload did not leave provision.sh byte-identical to today")
+	}
+}
+
+func TestRenderImageDropsTheClosure(t *testing.T) {
+	inventory := scriptInventory()
+	inventory.Image = &Image{Name: "agent-host", Base: "ubuntu:24.04@sha256:" + digest, User: "agent", WorkspaceDir: "/workspaces"}
+	context, err := RenderImage(inventory)
+	if err != nil {
+		t.Fatalf("RenderImage: %v", err)
+	}
+	if bytes.Contains(context.Provision, []byte("closure")) {
+		t.Errorf("the Namespace image's provision.sh carries the closure:\n%s", context.Provision)
+	}
+	if !bytes.Contains(context.Provision, []byte("packages) provision_packages ;;")) {
+		t.Errorf("the Namespace image build does not run the full packages phase:\n%s", context.Provision)
+	}
+	if !bytes.Contains(context.Dockerfile, []byte("provision.sh packages \\")) {
+		t.Errorf("the Dockerfile does not run the packages phase:\n%s", context.Dockerfile)
+	}
+}
+
 func TestFingerprintFormat(t *testing.T) {
 	scripts := Scripts{ProvisionScript: []byte("A"), Plugins: []byte("BC")}
 	sum := sha256.Sum256([]byte("cc-remote/tools/v1\nprovision.sh 1\nAplugins.sh 2\nBC"))

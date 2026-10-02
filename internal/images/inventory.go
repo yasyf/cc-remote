@@ -42,6 +42,7 @@ var (
 	envPattern         = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	userPattern        = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	aptPattern         = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*$`)
+	fontPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._+-]*$`)
 	baseImagePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
 	imageNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*$`)
 	instructionPattern = regexp.MustCompile(`^([A-Z]+)[ \t]+[^\r\n]*[^\s\\]$`)
@@ -75,9 +76,23 @@ type Image struct {
 }
 
 type Apt struct {
-	Install []string `yaml:"install"`
-	T64     []string `yaml:"t64"`
-	Remove  []string `yaml:"remove"`
+	Install []string    `yaml:"install"`
+	T64     []string    `yaml:"t64"`
+	Remove  []string    `yaml:"remove"`
+	Payload *AptPayload `yaml:"payload"`
+}
+
+type AptPayload struct {
+	Resident  []string `yaml:"resident" json:"resident"`
+	Closure   []string `yaml:"closure" json:"closure"`
+	Bins      []string `yaml:"bins" json:"bins"`
+	Fonts     []string `yaml:"fonts" json:"fonts"`
+	Consumers []string `yaml:"consumers" json:"consumers"`
+}
+
+type packageList struct {
+	field string
+	names []string
 }
 
 type Artifact struct {
@@ -242,15 +257,51 @@ func (inv Inventory) validateImage() error {
 }
 
 func (inv Inventory) validateApt() error {
-	lists := []struct {
-		field string
-		names []string
-	}{{"install", inv.Apt.Install}, {"t64", inv.Apt.T64}, {"remove", inv.Apt.Remove}}
+	lists := []packageList{{"install", inv.Apt.Install}, {"t64", inv.Apt.T64}, {"remove", inv.Apt.Remove}}
+	if payload := inv.Apt.Payload; payload != nil {
+		lists = append(lists, packageList{"payload.resident", payload.Resident}, packageList{"payload.closure", payload.Closure})
+	}
 	for _, list := range lists {
 		for _, name := range list.names {
 			if !aptPattern.MatchString(name) {
 				return fmt.Errorf("apt.%s: %q is not a Debian package name", list.field, name)
 			}
+		}
+	}
+	if inv.Apt.Payload == nil {
+		return nil
+	}
+	return inv.validateAptPayload(*inv.Apt.Payload)
+}
+
+func (inv Inventory) validateAptPayload(payload AptPayload) error {
+	if len(payload.Closure) == 0 {
+		return errors.New("apt.payload.closure names no package, so the payload would carry no closure")
+	}
+	for _, name := range payload.Closure {
+		if slices.Contains(payload.Resident, name) {
+			return fmt.Errorf("apt.payload.closure: %q is also under apt.payload.resident", name)
+		}
+	}
+	if err := claim(map[string]string{}, payload.Bins, "apt.payload"); err != nil {
+		return err
+	}
+	for _, bin := range payload.Bins {
+		if inv.providesSystem(bin) || slices.ContainsFunc(inv.Python.System, func(tool PythonTool) bool { return slices.Contains(tool.Bins, bin) }) {
+			return fmt.Errorf("apt.payload.bins: %q is already a system bin", bin)
+		}
+	}
+	for _, font := range payload.Fonts {
+		if !fontPattern.MatchString(font) {
+			return fmt.Errorf("apt.payload.fonts: %q is not a font family name", font)
+		}
+	}
+	if len(payload.Fonts) > 0 && !slices.Contains(payload.Bins, "fc-match") {
+		return errors.New("apt.payload.fonts: proving a family needs fc-match under apt.payload.bins")
+	}
+	for _, consumer := range payload.Consumers {
+		if !relative(consumer) && !(path.Clean(consumer) == consumer && strings.HasPrefix(consumer, "/opt/cc-remote/")) {
+			return fmt.Errorf("apt.payload.consumers: %q is neither a clean path relative to the home directory nor under /opt/cc-remote", consumer)
 		}
 	}
 	return nil

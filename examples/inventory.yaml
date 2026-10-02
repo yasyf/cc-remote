@@ -27,6 +27,26 @@ apt:
     - libgtk-3-0
   remove:
     - watchman
+  payload:
+    resident:
+      - bubblewrap
+      - dbus-user-session
+      - fontconfig-config
+    closure:
+      - libdrm2
+      - libgbm1
+      - libnss3
+      - libxkbcommon0
+      - fonts-liberation
+      - fonts-noto-color-emoji
+      - libasound2t64
+      - libatk-bridge2.0-0t64
+      - libcups2t64
+      - libgtk-3-0t64
+    bins: [certutil, fc-match]
+    fonts: ["Liberation Sans", "Noto Color Emoji"]
+    consumers:
+      - .agent-browser/browsers/chrome-154.0.8037.92/chrome-linux64/chrome
 
 system:
   - name: uv

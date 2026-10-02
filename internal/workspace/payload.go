@@ -55,7 +55,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	if machine.Image != "" {
 		return PayloadBuild{}, fmt.Errorf("profile %s boots %s machines from image %q; a payload is built on a machine provisioned in place", profile, kind, machine.Image)
 	}
-	rendered, err := render(cfg, profile, machine)
+	rendered, err := render(cfg, profile, machine, true)
 	if err != nil {
 		return PayloadBuild{}, err
 	}
@@ -87,7 +87,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 func packPayload(ctx context.Context, run images.Exec, downloader Downloader, scripts images.Scripts, githubToken, machine string, out io.Writer) (PayloadBuild, error) {
 	tools := scripts.Fingerprint()
 	steps := []func() error{
-		func() error { return scripts.Provision(ctx, run, images.PhasePackages) },
+		func() error { return scripts.Provision(ctx, run, images.PhasePackages, images.PackagesFull) },
 		func() error { return scripts.Provision(ctx, run, images.PhaseTools) },
 		func() error { return scripts.StagePlugins(ctx, run) },
 		func() error { return scripts.Install(ctx, run, githubToken, "") },

@@ -49,6 +49,7 @@ type Session struct {
 	image            string
 	imageSpec        string
 	payload          *config.Payload
+	closure          bool
 	privatePlugins   bool
 	tailnetFromTools bool
 	stderr           sync.Mutex
@@ -71,7 +72,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if supervisor := provider.Traits().Supervisor; machine.Payload != nil && supervisor != providers.SupervisorSpriteEnv {
 		return nil, fmt.Errorf("profile %s: machine %s mounts a payload, which only a %s host remounts at boot; provider %s runs %s", profile, kind, providers.SupervisorSpriteEnv, kind, supervisor)
 	}
-	rendered, err := render(cfg, profile, machine)
+	rendered, err := render(cfg, profile, machine, machine.Payload != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -94,6 +95,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		image:            machine.Image,
 		imageSpec:        rendered.imageSpec,
 		payload:          machine.Payload,
+		closure:          rendered.closure,
 		privatePlugins:   rendered.private,
 		tailnetFromTools: rendered.tailnetFromTools,
 	}
@@ -118,31 +120,41 @@ type rendered struct {
 	imageSpec        string
 	private          bool
 	tailnetFromTools bool
+	closure          bool
 }
 
-func render(cfg *config.Config, profile string, machine config.Machine) (rendered, error) {
+func render(cfg *config.Config, profile string, machine config.Machine, payload bool) (rendered, error) {
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
 	if err != nil {
 		return rendered{}, err
+	}
+	if !payload {
+		inventory.Apt.Payload = nil
 	}
 	scripts, err := images.Render(inventory, profile)
 	if err != nil {
 		return rendered{}, err
 	}
-	private := slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private })
-	tailnetFromTools := inventory.TailnetFromTools()
+	out := rendered{
+		scripts:          scripts,
+		private:          slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private }),
+		tailnetFromTools: inventory.TailnetFromTools(),
+		closure:          inventory.Apt.Payload != nil,
+	}
 	if machine.Image == "" {
 		var payload string
 		if machine.Payload != nil {
 			payload = machine.Payload.SHA256
 		}
-		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil, payload), private: private, tailnetFromTools: tailnetFromTools}, nil
+		out.stamp = images.Stamp(scripts, nil, payload)
+		return out, nil
 	}
 	image, err := images.RenderImage(inventory)
 	if err != nil {
 		return rendered{}, err
 	}
-	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image, ""), imageSpec: image.Fingerprint(), private: private, tailnetFromTools: tailnetFromTools}, nil
+	out.stamp, out.imageSpec = images.Stamp(scripts, &image, ""), image.Fingerprint()
+	return out, nil
 }
 
 func coverEnv(forwards []config.Forward, declared []string) error {
@@ -358,6 +370,12 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	run := newLanes(ctx)
 	packages := run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
 	tools := run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
+	loader := run.Go(func(ctx context.Context) error {
+		if err := run.after(packages, tools); err != nil {
+			return err
+		}
+		return s.registerClosure(ctx, machine)
+	})
 	run.Go(func(ctx context.Context) error {
 		if err := s.checkout(ctx, record); err != nil {
 			return err
@@ -365,13 +383,13 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		if len(s.profile.Prepare) == 0 {
 			return nil
 		}
-		if err := run.after(packages, tools); err != nil {
+		if err := run.after(loader); err != nil {
 			return err
 		}
 		return s.prepare(ctx, record, env)
 	})
 	run.Go(func(ctx context.Context) error {
-		if err := run.after(packages, tools); err != nil {
+		if err := run.after(loader); err != nil {
 			return err
 		}
 		return s.configure(ctx, record, env)
@@ -405,6 +423,9 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 	if err := run.Wait(); err != nil {
 		return err
 	}
+	if err := s.registerClosure(ctx, machine); err != nil {
+		return err
+	}
 	return s.publish(ctx, machine)
 }
 
@@ -419,10 +440,25 @@ func (s *Session) installPackages(ctx context.Context, machine string) error {
 	if !s.inPlace() {
 		return nil
 	}
-	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages); err != nil {
+	var mode []string
+	if s.payload != nil {
+		mode = []string{images.PackagesResident}
+	}
+	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...); err != nil {
 		return err
 	}
 	s.Log.Info("installed the packages", "machine", machine)
+	return nil
+}
+
+func (s *Session) registerClosure(ctx context.Context, machine string) error {
+	if !s.inPlace() || s.payload == nil || !s.closure {
+		return nil
+	}
+	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhaseLoader); err != nil {
+		return err
+	}
+	s.Log.Info("registered the payload's closure with the loader", "machine", machine)
 	return nil
 }
 

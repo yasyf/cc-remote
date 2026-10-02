@@ -11,6 +11,9 @@ marketplace_dir="$share_dir/marketplaces"
 bin_dir="$HOME/.local/bin"
 system_tool_dir=/opt/cc-remote/tools
 system_bin_dir=/usr/local/bin
+{{- with .Closure}}
+closure_root=/opt/cc-remote/closure
+{{- end}}
 tmp_dir="$(mktemp -d)"
 trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
 export PATH="$bin_dir:$PATH"
@@ -722,6 +725,38 @@ run_configure() {
 {{- end}}
 }
 
+{{- with .Closure}}
+verify_loader() {
+  local missing
+  missing="$(ld.so --list "$1" | awk '$2 == "=>" && $3 == "not" && $4 == "found" { print $1 }')" || exit
+  if [ -n "$missing" ]; then
+    echo "cc-remote: $1 cannot load ${missing//$'\n'/ }" >&2
+    exit 1
+  fi
+}
+
+verify_font() {
+  local family
+  family="$(fc-match -f '%{family}' "$1")" || exit
+  if ! tr ',' '\n' <<< "$family" | sed 's/^ *//' | grep -qxF "$1"; then
+    echo "cc-remote: fc-match resolves $1 to ${family:-no font}" >&2
+    exit 1
+  fi
+}
+
+verify_closure_bin() {
+  local path
+  if [ -L "$closure_root" ]; then
+    path="$system_bin_dir/$1"
+    verify_link "$path" "$closure_root/usr/bin/$1"
+  elif ! path="$(command -v "$1")"; then
+    echo "cc-remote: $1 is not on PATH" >&2
+    exit 1
+  fi
+  verify_loader "$path"
+}
+
+{{end -}}
 verify_system() {
   :
 {{- range .System}}
@@ -733,6 +768,17 @@ verify_system() {
 {{- $tool := .}}
 {{- range .Bins}}
   verify_bin {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
+{{- end}}
+{{- end}}
+{{- with .Closure}}
+{{- range .Bins}}
+  verify_closure_bin {{q .}}
+{{- end}}
+{{- range .Consumers}}
+  verify_loader {{consumer .}}
+{{- end}}
+{{- range .Fonts}}
+  verify_font {{q .}}
 {{- end}}
 {{- end}}
 }
