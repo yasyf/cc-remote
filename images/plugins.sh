@@ -394,9 +394,11 @@ start_services() {
   local name
   if command -v sprite-env > /dev/null; then
     for name in "$@"; do
-      sprite-env services get "cc-remote-$name" > /dev/null 2>&1 \
-        || sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" --no-stream
+      if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
+        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" --no-stream
+      fi
     done
+    drain_artifacts
   else
     "$state_dir/start.sh"
   fi
