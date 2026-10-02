@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,12 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
+	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
 	"github.com/yasyf/cc-remote/internal/state"
@@ -26,25 +29,41 @@ import (
 )
 
 const (
-	suffix     = "example.ts.net"
-	tag        = "tag:cc-remote"
-	token      = "ghp_" + "testtokenthatmustnotreachascript00000000"
-	enrolls    = ` up --auth-key="file:`
-	freshens   = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
-	logsOut    = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
-	renews     = `rm -rf "$HOME"/.claude.json`
-	checkout   = "clone --quiet"
-	prepares   = "cd /home/fake/app\n"
-	noState    = `{"BackendState":"NoState"}`
-	provisions = "sudo bash -s"
-	installs   = "plugins.sh install "
-	readies    = "plugins.sh ready "
-	configures = "plugins.sh configure"
-	inventory  = "version: 1\nsystem:\n  - { name: jq, version: 1.8.2, url: https://example.com/jq-1.8.2, sha256: " + sha + ", format: binary }\nconfigure:\n  env: [WEB_PORT]\n"
-	imaged     = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
-	sha        = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
-	commit     = "008173c23f95b170204355c12626cb5a965d779a"
-	private    = "version: 1\nsystem:\n  - { name: claude, version: 2.0.0, url: https://example.com/claude, sha256: " + sha + ", format: binary }\nclaude:\n  marketplaces:\n    - { name: market, github: owner/market, ref: " + commit + ", private: true }\nconfigure:\n  env: [WEB_PORT]\n"
+	suffix        = "example.ts.net"
+	tag           = "tag:cc-remote"
+	token         = "ghp_" + "testtokenthatmustnotreachascript00000000"
+	enrolls       = ` up --auth-key="file:`
+	freshens      = `! sudo -n test -e "/var/lib/tailscale/tailscaled.state"`
+	logsOut       = "tailscale --socket=/run/tailscale/tailscaled.sock logout"
+	renews        = `rm -rf "$HOME"/.claude.json`
+	checkout      = "clone --quiet"
+	prepares      = "cd /home/fake/app\n"
+	noState       = `{"BackendState":"NoState"}`
+	provisions    = "sudo bash -s"
+	prereqsPhase  = "sudo bash -s prerequisites"
+	packagesPhase = "sudo bash -s packages"
+	toolsPhase    = "sudo bash -s tools"
+	payloadPhase  = "sudo --preserve-env=PATH bash -s payload "
+	loaderPhase   = "sudo bash -s loader"
+	mergesPlugins = "enable-payload-plugins "
+	stagesPayload = "stage-payload "
+	payloadBytes  = "hsqs squashfs payload bytes"
+	stages        = "plugins.sh.tmp"
+	installs      = "plugins.sh install"
+	publishes     = "plugins.sh publish "
+	readies       = "plugins.sh ready "
+	configures    = "plugins.sh configure"
+	inventory     = systemHead + staticTailnet + configureEnv
+	systemHead    = "version: 1\nsystem:\n  - { name: jq, version: 1.8.2, url: https://example.com/jq-1.8.2, sha256: " + sha + ", format: binary }\n"
+	staticTailnet = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.tgz, sha256: " + sha + ", format: tar.gz, bins: { tailscale: tailscale/tailscale, tailscaled: tailscale/tailscaled } }\n"
+	debTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.deb, sha256: " + sha + ", format: deb, bins: { tailscale: /usr/bin/tailscale, tailscaled: /usr/sbin/tailscaled } }\n"
+	cliTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.tgz, sha256: " + sha + ", format: tar.gz, bins: { tailscale: tailscale/tailscale } }\n"
+	configureEnv  = "configure:\n  env: [WEB_PORT]\n"
+	closureApt    = "apt:\n  install: [openssh-server, libnss3]\n  payload:\n    resident: [bubblewrap]\n    closure: [libnss3]\n    bins: [certutil]\n"
+	imaged        = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
+	sha           = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
+	commit        = "008173c23f95b170204355c12626cb5a965d779a"
+	private       = "version: 1\nsystem:\n  - { name: claude, version: 2.0.0, url: https://example.com/claude, sha256: " + sha + ", format: binary }\nclaude:\n  marketplaces:\n    - { name: market, github: owner/market, ref: " + commit + ", private: true }\nconfigure:\n  env: [WEB_PORT]\n"
 )
 
 func running(nodeID string) string {
@@ -52,17 +71,66 @@ func running(nodeID string) string {
 }
 
 type scripted struct {
-	mu       sync.Mutex
-	status   string
-	minted   string
-	fail     error
-	failAll  bool
-	joined   bool
-	onEnroll func()
-	onStatus func()
-	scripts  map[string][]string
-	stdins   map[string][]string
-	ready    map[string]string
+	mu            sync.Mutex
+	status        string
+	minted        string
+	fail          error
+	failAll       bool
+	joined        bool
+	tailscaleFrom string
+	tailscale     bool
+	onEnroll      func()
+	onStatus      func()
+	scripts       map[string][]string
+	stdins        map[string][]string
+	ready         map[string]string
+	holds         map[string]*hold
+}
+
+type hold struct {
+	fragment string
+	entered  chan struct{}
+	release  chan providers.Result
+}
+
+func (m *scripted) hold(t *testing.T, fragment string) *hold {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.holds == nil {
+		m.holds = map[string]*hold{}
+	}
+	h := &hold{fragment: fragment, entered: make(chan struct{}), release: make(chan providers.Result, 1)}
+	m.holds[fragment] = h
+	t.Cleanup(func() { close(h.release) })
+	return h
+}
+
+func (h *hold) awaitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%q never ran", h.fragment)
+	}
+}
+
+func (h *hold) stillParked(t *testing.T, stage string) {
+	t.Helper()
+	select {
+	case <-h.entered:
+		t.Fatalf("%q ran %s", h.fragment, stage)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func (h *hold) ran() bool {
+	select {
+	case <-h.entered:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *scripted) setStatus(status string) {
@@ -79,6 +147,16 @@ func (m *scripted) currentStatus() string {
 
 func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Result {
 	script := strings.Join(cmd, " ")
+	result := m.handle(id, script, cmd[len(cmd)-1], stdin)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tailscaleFrom != "" && result.ExitCode == 0 && strings.Contains(script, m.tailscaleFrom) {
+		m.tailscale = true
+	}
+	return result
+}
+
+func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Result {
 	m.mu.Lock()
 	if m.scripts == nil {
 		m.scripts, m.stdins, m.ready = map[string][]string{}, map[string][]string{}, map[string]string{}
@@ -86,15 +164,31 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
 	failAll, joined := m.failAll, m.joined
-	stamp := cmd[len(cmd)-1]
+	missing := m.tailscaleFrom != "" && !m.tailscale && strings.Contains(script, "tailscale")
+	var held *hold
+	for fragment, h := range m.holds {
+		if strings.Contains(script, fragment) {
+			held = h
+		}
+	}
 	switch {
-	case strings.Contains(script, installs):
+	case strings.Contains(script, publishes):
 		m.ready[id] = stamp
 	case strings.Contains(script, readies) && m.ready[id] != stamp:
 		m.mu.Unlock()
 		return providers.Result{Stderr: []byte("plugins: this host was not prepared from stamp " + stamp), ExitCode: 1}
 	}
 	m.mu.Unlock()
+	if missing {
+		if held != nil {
+			close(held.entered)
+		}
+		return providers.Result{Stderr: []byte("sh: tailscale: command not found"), ExitCode: 127}
+	}
+	if held != nil {
+		close(held.entered)
+		return <-held.release
+	}
 	if failAll {
 		return providers.Result{Stderr: []byte("the machine went away"), ExitCode: 1}
 	}
@@ -243,18 +337,36 @@ type harness struct {
 
 func newHarness(t *testing.T, withTailnet bool) *harness {
 	t.Helper()
-	return build(t, withTailnet, inventory, "")
+	return build(t, withTailnet, inventory, "{}", providers.Traits{})
 }
 
 func newImagedHarness(t *testing.T) *harness {
 	t.Helper()
-	return build(t, false, imaged, "agent-host")
+	return build(t, false, imaged, "{ image: agent-host }", providers.Traits{})
 }
 
-func build(t *testing.T, withTailnet bool, tools, image string) *harness {
+func newPayloadHarness(t *testing.T) *harness {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agent.sqfs")
+	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return build(t, false, inventory, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+}
+
+func newClosureHarness(t *testing.T) *harness {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agent.sqfs")
+	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+}
+
+func build(t *testing.T, withTailnet bool, tools, machineSpec string, facts providers.Traits) *harness {
 	t.Helper()
 	machine := &scripted{status: noState, minted: "nNEW"}
-	fake := &providertest.Fake{Handle: machine.Handle}
+	fake := &providertest.Fake{Facts: facts, Handle: machine.Handle}
 	provider := &flaky{Provider: fake}
 	inventoryPath := filepath.Join(t.TempDir(), "inventory.yaml")
 	if err := os.WriteFile(inventoryPath, []byte(tools), 0o600); err != nil {
@@ -274,11 +386,11 @@ profiles:
   lean:
     prepare: [true]
     machine:
-      fake: { image: %q }
+      fake: %s
 inventory: %s
 forwards:
   - { label: web, env: WEB_PORT }
-`, t.TempDir(), image, inventoryPath)
+`, t.TempDir(), machineSpec, inventoryPath)
 	if withTailnet {
 		text += "tailnet:\n  tag: " + tag + "\n"
 	}
@@ -344,6 +456,17 @@ func (h *harness) bound() tailnet.Binding {
 	return binding
 }
 
+func (h *harness) awaitBound(want tailnet.Binding) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for h.bound() != want {
+		if time.Now().After(deadline) {
+			h.t.Fatalf("never bound to %v; bound %v", want, h.bound())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (h *harness) bind(to tailnet.Binding) {
 	h.t.Helper()
 	held, err := h.session.State.Hold("ws-1")
@@ -378,34 +501,48 @@ func (h *harness) calls() string {
 	return strings.Join(h.fake.Calls(), " ")
 }
 
+func (h *harness) ordered(from int, fragments ...string) []int {
+	h.t.Helper()
+	order := h.machine.order("ws-1", from, fragments...)
+	for i := range order {
+		if order[i] < 0 || (i > 0 && order[i] <= order[i-1]) {
+			h.t.Fatalf("scripts ran out of order: %v for %q in %q", order, fragments, h.machine.scripts["ws-1"][from:])
+		}
+	}
+	return order
+}
+
 func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	h := newHarness(t, true)
 	result, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", 0, provisions, installs, checkout, prepares, configures, freshens, enrolls)
-	for i := 1; i < len(order); i++ {
-		if order[i-1] < 0 || order[i] <= order[i-1] {
-			t.Fatalf("scripts ran out of order: %v", order)
-		}
+	h.ordered(0, prereqsPhase, packagesPhase, publishes)
+	h.ordered(0, prereqsPhase, checkout)
+	h.ordered(0, prereqsPhase, toolsPhase)
+	toolsLane := h.ordered(0, toolsPhase, stages, installs, configures, publishes)
+	h.ordered(0, installs, freshens, enrolls, publishes)
+	h.ordered(0, packagesPhase, configures)
+	source := h.ordered(0, checkout, prepares, publishes)
+	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", publishes) != 1 || h.machine.ran("ws-1", prereqsPhase) != 1 {
+		t.Errorf("a fresh create renewed identity, checked a ready stamp, mounted a payload, merged its plugins, or ran its prerequisites or publish other than once: %q", h.machine.scripts["ws-1"])
 	}
-	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 {
-		t.Error("a fresh create renewed identity or checked a ready stamp it could not have")
-	}
-	if got := h.machine.stdins["ws-1"][order[1]]; got != "" {
+	if got := h.machine.stdins["ws-1"][toolsLane[2]]; got != "" {
 		t.Errorf("the tool install read %q on stdin although no private marketplace needs a token", got)
 	}
-	order = order[2:]
+	if got := h.machine.scripts["ws-1"][toolsLane[2]]; !strings.HasSuffix(got, installs) {
+		t.Errorf("the install named a payload on a machine without one: %q", got)
+	}
 	for i, script := range h.machine.scripts["ws-1"] {
 		if strings.Contains(script, token) || strings.Contains(script, "tskey-auth") {
 			t.Errorf("script %d carries a secret", i)
 		}
 	}
-	if got := h.machine.stdins["ws-1"][order[0]]; got != token {
+	if got := h.machine.stdins["ws-1"][source[0]]; got != token {
 		t.Errorf("checkout read %q on stdin", got)
 	}
-	if !strings.Contains(h.machine.scripts["ws-1"][order[0]], "--depth 1") || !strings.Contains(h.machine.scripts["ws-1"][order[0]], "ref=feature") {
+	if !strings.Contains(h.machine.scripts["ws-1"][source[0]], "--depth 1") || !strings.Contains(h.machine.scripts["ws-1"][source[0]], "ref=feature") {
 		t.Error("the lean checkout is not a shallow checkout of the requested ref")
 	}
 	if result.Machine != "ws-1" || !strings.Contains(h.calls(), "create ws-1") || result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Source.Ref != "feature" {
@@ -796,18 +933,512 @@ func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testin
 }
 
 func TestTheInstallReadsTheTokenOnlyForPrivateMarketplaces(t *testing.T) {
-	h := build(t, false, private, "")
+	h := build(t, false, private, "{}", providers.Traits{})
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", 0, installs)
-	if order[0] < 0 || h.machine.stdins["ws-1"][order[0]] != token {
+	order := h.ordered(0, installs)
+	if h.machine.stdins["ws-1"][order[0]] != token {
 		t.Errorf("the install read %q on stdin; want the token for the private marketplace", h.machine.stdins["ws-1"][order[0]])
 	}
 	for i, script := range h.machine.scripts["ws-1"] {
 		if strings.Contains(script, token) {
 			t.Errorf("script %d carries the token", i)
 		}
+	}
+}
+
+func TestAPayloadIsStagedAndMountedBeforeTheToolsAndHandedToTheInstall(t *testing.T) {
+	h := newPayloadHarness(t)
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	order := h.ordered(0, stagesPayload, payloadPhase, mergesPlugins, toolsPhase, stages, installs, configures, publishes)
+	h.ordered(0, prereqsPhase, stagesPayload)
+	h.ordered(0, packagesPhase, publishes)
+	h.ordered(0, checkout, prepares, publishes)
+	if stage := h.machine.scripts["ws-1"][order[0]]; !strings.HasPrefix(stage, "sudo sh -c ") || !strings.HasSuffix(stage, " "+stagesPayload+sha) {
+		t.Errorf("the payload was staged by %q", stage)
+	}
+	if staged := h.machine.stdins["ws-1"][order[0]]; staged != payloadBytes {
+		t.Errorf("the staging read %q on stdin, want the payload file", staged)
+	}
+	if mount := h.machine.scripts["ws-1"][order[1]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint() {
+		t.Errorf("the payload phase ran as %q", mount)
+	}
+	if merge := h.machine.scripts["ws-1"][order[2]]; !strings.HasPrefix(merge, "sh -c ") || !strings.HasSuffix(merge, " "+mergesPlugins+images.PayloadRoot+"/"+sha) {
+		t.Errorf("the plugin flags were merged by %q; want the user's shell with the payload directory as its argument", merge)
+	}
+	if install := h.machine.scripts["ws-1"][order[5]]; !strings.HasSuffix(install, installs+" "+images.PayloadRoot+"/"+sha) {
+		t.Errorf("the install ran as %q; want the payload directory as its argument", install)
+	}
+	if h.machine.ran("ws-1", stagesPayload) != 1 || h.machine.ran("ws-1", payloadPhase) != 1 || h.machine.ran("ws-1", mergesPlugins) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the payload was staged %d times, mounted %d times, and merged %d times, and the stamp is %q", h.machine.ran("ws-1", stagesPayload), h.machine.ran("ws-1", payloadPhase), h.machine.ran("ws-1", mergesPlugins), h.machine.ready["ws-1"])
+	}
+	for i, script := range h.machine.scripts["ws-1"] {
+		if strings.Contains(script, token) || strings.Contains(script, payloadBytes) {
+			t.Errorf("script %d carries a secret or the payload itself", i)
+		}
+	}
+}
+
+func TestAMissingPayloadFileFailsTheCreateBeforeAnythingIsPublished(t *testing.T) {
+	h := newPayloadHarness(t)
+	if err := os.Remove(h.cfg.Profiles["lean"].Machine["fake"].Payload.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !errors.Is(err, fs.ErrNotExist) || !strings.HasPrefix(err.Error(), "open payload: ") {
+		t.Fatalf("Create = %v", err)
+	}
+	if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
+		t.Errorf("a create without its payload file ran %q", h.machine.scripts["ws-1"])
+	}
+	if _, ok := h.record("ws-1"); ok {
+		t.Error("the failed create kept its record")
+	}
+}
+
+func TestAPayloadPathMustResolveToARegularFile(t *testing.T) {
+	notRegular := func(path string, info os.FileInfo) string {
+		return fmt.Sprintf("open payload: %s is not a regular file (mode %v)", path, info.Mode())
+	}
+	shared := func(path string, info os.FileInfo) string {
+		return fmt.Sprintf("open payload: %s is readable by others (mode %v); only its owner may read a payload", path, info.Mode())
+	}
+	tests := []struct {
+		name    string
+		replace func(path, staged string) error
+		refused func(path string, info os.FileInfo) string
+	}{
+		{name: "a private payload is accepted", replace: func(path, staged string) error { return os.Rename(staged, path) }},
+		{name: "a symlink to a private payload is followed", replace: func(path, staged string) error { return os.Symlink(staged, path) }},
+		{name: "a directory is refused", replace: func(path, _ string) error { return os.Mkdir(path, 0o700) }, refused: notRegular},
+		{name: "a fifo is refused without waiting for a writer", replace: func(path, _ string) error { return syscall.Mkfifo(path, 0o600) }, refused: notRegular},
+		{name: "a payload readable by others is refused", replace: func(path, staged string) error {
+			if err := os.Rename(staged, path); err != nil {
+				return err
+			}
+			return os.Chmod(path, 0o644)
+		}, refused: shared},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPayloadHarness(t)
+			path := h.cfg.Profiles["lean"].Machine["fake"].Payload.Path
+			staged := filepath.Join(t.TempDir(), "staged.sqfs")
+			if err := os.Rename(path, staged); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.replace(path, staged); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+			if tt.refused == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				order := h.ordered(0, stagesPayload, payloadPhase, publishes)
+				if got := h.machine.stdins["ws-1"][order[0]]; got != payloadBytes {
+					t.Errorf("the staging read %q, want the payload file", got)
+				}
+				return
+			}
+			if want := tt.refused(path, info); err == nil || err.Error() != want {
+				t.Fatalf("Create = %v, want %q", err, want)
+			}
+			if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
+				t.Errorf("a create with a non-regular payload ran %q", h.machine.scripts["ws-1"])
+			}
+			if _, ok := h.record("ws-1"); ok {
+				t.Error("the failed create kept its record")
+			}
+		})
+	}
+}
+
+func TestResumeRemountsThePayloadOnlyWhenItsDigestChanged(t *testing.T) {
+	other := strings.Repeat("ab", 32)
+	tests := []struct {
+		name    string
+		sha256  string
+		moved   bool
+		remount bool
+	}{
+		{name: "a new digest stages and mounts the new payload", sha256: other, remount: true},
+		{name: "the same digest at a new path stays ready", sha256: sha, moved: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPayloadHarness(t)
+			ctx := context.Background()
+			if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+				t.Fatal(err)
+			}
+			machine := h.cfg.Profiles["lean"].Machine["fake"]
+			path := machine.Payload.Path
+			if tt.moved {
+				moved := filepath.Join(t.TempDir(), "moved.sqfs")
+				if err := os.Rename(path, moved); err != nil {
+					t.Fatal(err)
+				}
+				path = moved
+			}
+			machine.Payload = &config.Payload{Path: path, SHA256: tt.sha256}
+			h.cfg.Profiles["lean"].Machine["fake"] = machine
+			repaid := h.open()
+			if (repaid.Stamp != h.session.Stamp) != tt.remount {
+				t.Fatalf("the payload change moved the stamp from %s to %s, want a move %v", h.session.Stamp, repaid.Stamp, tt.remount)
+			}
+			before := len(h.machine.scripts["ws-1"])
+			if _, err := repaid.Resume(ctx, "ws-1"); err != nil {
+				t.Fatal(err)
+			}
+			if h.machine.ready["ws-1"] != repaid.Stamp {
+				t.Errorf("the resume left stamp %q, want %q", h.machine.ready["ws-1"], repaid.Stamp)
+			}
+			if !tt.remount {
+				for _, script := range h.machine.scripts["ws-1"][before:] {
+					if strings.Contains(script, stagesPayload) || strings.Contains(script, payloadPhase) || strings.Contains(script, mergesPlugins) || strings.Contains(script, publishes) {
+						t.Errorf("a resume at the ready stamp ran %q", script)
+					}
+				}
+				return
+			}
+			order := h.ordered(before, readies, prereqsPhase, stagesPayload+tt.sha256, payloadPhase+tt.sha256, mergesPlugins+images.PayloadRoot+"/"+tt.sha256, toolsPhase, installs+" "+images.PayloadRoot+"/"+tt.sha256, publishes, prepares, configures)
+			if staged := h.machine.stdins["ws-1"][order[2]]; staged != payloadBytes {
+				t.Errorf("the staging read %q on stdin, want the payload file", staged)
+			}
+		})
+	}
+}
+
+func TestOpenRefusesAPayloadOnAProviderWithoutSpriteEnv(t *testing.T) {
+	h := newPayloadHarness(t)
+	h.fake.Facts = providers.Traits{Supervisor: providers.SupervisorSetsid}
+	if _, err := Open(h.cfg, h.provider, "fake", "lean", h.session.Platform); err == nil || !strings.Contains(err.Error(), "sprite-env") {
+		t.Errorf("Open = %v", err)
+	}
+	h.fake.Facts = providers.Traits{Supervisor: providers.SupervisorSpriteEnv}
+	if _, err := Open(h.cfg, h.provider, "fake", "lean", h.session.Platform); err != nil {
+		t.Errorf("Open on sprite-env = %v", err)
+	}
+}
+
+func TestAFailedLaneCancelsItsSiblingsBeforeAnythingIsPublished(t *testing.T) {
+	h := newHarness(t, true)
+	h.machine.fail = errors.New("the tailnet refused the key")
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "refused the key") {
+		t.Fatalf("Create = %v", err)
+	}
+	if h.machine.ran("ws-1", publishes) != 0 || h.machine.ready["ws-1"] != "" {
+		t.Errorf("a failed create published stamp %q", h.machine.ready["ws-1"])
+	}
+}
+
+func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
+	tests := []struct {
+		name    string
+		empty   bool
+		release []string
+		fails   string
+	}{
+		{name: "prepare runs once the packages and then the tool install finish", release: []string{packagesPhase, installs}},
+		{name: "prepare runs once the tool install and then the packages finish", release: []string{installs, packagesPhase}},
+		{name: "an empty prepare runs nothing and waits for nothing", empty: true, release: []string{packagesPhase, installs}},
+		{name: "a failed packages lane never prepares", release: []string{packagesPhase, installs}, fails: packagesPhase},
+		{name: "a failed tool install never prepares", release: []string{installs, packagesPhase}, fails: installs},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, false)
+			if tt.empty {
+				profile := h.cfg.Profiles["lean"]
+				profile.Prepare = nil
+				h.cfg.Profiles["lean"] = profile
+				h.session = h.open()
+			}
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
+			checkingOut, preparing, configuring := h.machine.hold(t, checkout), h.machine.hold(t, prepares), h.machine.hold(t, configures)
+			release := func(fragment string) {
+				result := providers.Result{}
+				if fragment == tt.fails {
+					result = providers.Result{Stderr: []byte(fragment + " held back the create"), ExitCode: 1}
+				}
+				upstream[fragment].release <- result
+			}
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			upstream[packagesPhase].awaitEntered(t)
+			upstream[installs].awaitEntered(t)
+			checkingOut.awaitEntered(t)
+			checkingOut.release <- providers.Result{}
+			preparing.stillParked(t, "while the packages and the tool install were still running")
+			configuring.stillParked(t, "while the packages and the tool install were still running")
+			release(tt.release[0])
+			preparing.stillParked(t, "once only "+tt.release[0]+" had finished")
+			configuring.stillParked(t, "once only "+tt.release[0]+" had finished")
+			release(tt.release[1])
+			if tt.fails != "" {
+				if err := <-created; err == nil || !strings.Contains(err.Error(), tt.fails+" held back the create") {
+					t.Fatalf("Create = %v", err)
+				}
+				if preparing.ran() || configuring.ran() || h.machine.ran("ws-1", publishes) != 0 {
+					t.Errorf("a create whose %q failed ran %q", tt.fails, h.machine.scripts["ws-1"])
+				}
+				if _, ok := h.record("ws-1"); ok {
+					t.Error("the failed create kept its record")
+				}
+				return
+			}
+			configuring.awaitEntered(t)
+			configuring.release <- providers.Result{}
+			if tt.empty {
+				if err := <-created; err != nil {
+					t.Fatal(err)
+				}
+				if preparing.ran() || h.machine.ran("ws-1", prepares) != 0 || h.machine.ran("ws-1", publishes) != 1 {
+					t.Errorf("a create with no prepare steps ran %q", h.machine.scripts["ws-1"])
+				}
+				return
+			}
+			preparing.awaitEntered(t)
+			preparing.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, checkout, prepares, publishes)
+			h.ordered(0, packagesPhase, prepares)
+			h.ordered(0, installs, prepares)
+			h.ordered(0, packagesPhase, configures, publishes)
+			h.ordered(0, installs, configures, publishes)
+			if h.machine.ran("ws-1", prepares) != 1 || h.machine.ran("ws-1", publishes) != 1 {
+				t.Errorf("the create prepared %d times and published %d times: %q", h.machine.ran("ws-1", prepares), h.machine.ran("ws-1", publishes), h.machine.scripts["ws-1"])
+			}
+		})
+	}
+}
+
+func TestTheEnrollmentWaitsForTheToolInstallButNotForThePackages(t *testing.T) {
+	h := newHarness(t, true)
+	h.machine.tailscaleFrom = toolsPhase
+	var creating sync.WaitGroup
+	t.Cleanup(creating.Wait)
+	packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
+	enrolling, configuring := h.machine.hold(t, freshens), h.machine.hold(t, configures)
+	created := make(chan error, 1)
+	creating.Go(func() {
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		created <- err
+	})
+	packaging.awaitEntered(t)
+	installing.awaitEntered(t)
+	enrolling.stillParked(t, "while the tool install was still running")
+	installing.release <- providers.Result{}
+	enrolling.awaitEntered(t)
+	configuring.stillParked(t, "once only the tool install had finished")
+	enrolling.release <- providers.Result{}
+	packaging.release <- providers.Result{}
+	configuring.awaitEntered(t)
+	configuring.release <- providers.Result{}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(0, installs, freshens, enrolls, publishes)
+	h.ordered(0, packagesPhase, configures, publishes)
+	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.bound() != (tailnet.Binding{NodeID: "nNEW"}) || h.machine.ran("ws-1", publishes) != 1 {
+		t.Errorf("record %+v (found %v), bound %v, published %d times", record, found, h.bound(), h.machine.ran("ws-1", publishes))
+	}
+}
+
+func TestTheEnrollmentWaitsForThePackagesWhenTheyInstallTailscale(t *testing.T) {
+	tests := []struct {
+		name    string
+		tailnet string
+	}{
+		{name: "a deb installs both tailnet bins in the packages phase", tailnet: debTailnet},
+		{name: "a static artifact without tailscaled leaves the daemon to apt", tailnet: cliTailnet},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := build(t, true, systemHead+tt.tailnet+configureEnv, "{}", providers.Traits{})
+			h.machine.tailscaleFrom = packagesPhase
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			packaging, installing, enrolling := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs), h.machine.hold(t, freshens)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			packaging.awaitEntered(t)
+			installing.awaitEntered(t)
+			installing.release <- providers.Result{}
+			enrolling.stillParked(t, "while the packages that install tailscale were still running")
+			packaging.release <- providers.Result{}
+			enrolling.awaitEntered(t)
+			enrolling.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, packagesPhase, freshens, enrolls, publishes)
+			h.ordered(0, installs, freshens)
+			if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.machine.ran("ws-1", freshens) != 1 || h.machine.ran("ws-1", publishes) != 1 {
+				t.Errorf("record %+v (found %v), checked the tailnet state %d times, published %d times", record, found, h.machine.ran("ws-1", freshens), h.machine.ran("ws-1", publishes))
+			}
+		})
+	}
+}
+
+func TestTheScriptedHostLacksTailscaleUntilItsPhaseInstallsIt(t *testing.T) {
+	daemon := tailnet.Daemon{Mode: tailnet.Kernel, Supervisor: tailnet.SpriteEnv}
+	tests := []struct {
+		name      string
+		completed []string
+		want      int
+	}{
+		{name: "after another phase", completed: []string{images.PhaseTools}, want: 127},
+		{name: "after its own phase", completed: []string{images.PhaseTools, images.PhasePackages}, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &scripted{status: noState, minted: "nNEW", tailscaleFrom: packagesPhase}
+			for _, phase := range tt.completed {
+				if result := m.Handle("ws-1", []string{"sudo", "bash", "-s", phase}, nil); result.ExitCode != 0 {
+					t.Fatalf("the %s phase exited %d", phase, result.ExitCode)
+				}
+			}
+			result := m.Handle("ws-1", []string{"sh", "-c", daemon.FreshScript()}, nil)
+			if result.ExitCode != tt.want || (tt.want == 127) != strings.Contains(string(result.Stderr), "command not found") {
+				t.Errorf("the tailnet state check exited %d with %q, want exit %d", result.ExitCode, result.Stderr, tt.want)
+			}
+		})
+	}
+}
+
+func TestTheEnrollmentDoesNotWaitForConfigure(t *testing.T) {
+	h := newHarness(t, true)
+	var creating sync.WaitGroup
+	t.Cleanup(creating.Wait)
+	configuring := h.machine.hold(t, configures)
+	created := make(chan error, 1)
+	creating.Go(func() {
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		created <- err
+	})
+	configuring.awaitEntered(t)
+	h.awaitBound(tailnet.Binding{NodeID: "nNEW"})
+	if h.machine.ran("ws-1", enrolls) != 1 || h.machine.ran("ws-1", publishes) != 0 {
+		t.Errorf("with configure still running, the create enrolled %d times and published %d times", h.machine.ran("ws-1", enrolls), h.machine.ran("ws-1", publishes))
+	}
+	configuring.release <- providers.Result{}
+	if err := <-created; err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(0, installs, freshens, enrolls, publishes)
+	h.ordered(0, configures, publishes)
+	if record, found := h.record("ws-1"); !found || record.Tailnet == nil || record.Tailnet.NodeID != "nNEW" || h.machine.ran("ws-1", publishes) != 1 {
+		t.Errorf("record %+v (found %v), published %d times", record, found, h.machine.ran("ws-1", publishes))
+	}
+}
+
+func TestTheEnrollmentNeverStartsWhenTheToolInstallFails(t *testing.T) {
+	tests := []struct {
+		name  string
+		fails string
+	}{
+		{name: "the tools phase fails", fails: toolsPhase},
+		{name: "the plugin install fails", fails: installs},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, true)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			failing, enrolling := h.machine.hold(t, tt.fails), h.machine.hold(t, freshens)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			failing.awaitEntered(t)
+			enrolling.stillParked(t, "before the tool install had finished")
+			failing.release <- providers.Result{Stderr: []byte(tt.fails + " held back the create"), ExitCode: 1}
+			if err := <-created; err == nil || !strings.Contains(err.Error(), tt.fails+" held back the create") {
+				t.Fatalf("Create = %v", err)
+			}
+			if enrolling.ran() || h.machine.ran("ws-1", enrolls) != 0 || h.machine.ran("ws-1", logsOut) != 0 || h.machine.ran("ws-1", publishes) != 0 || h.api.mintedKeys() != 0 || len(h.api.deletedNodes()) != 0 || h.bound() != (tailnet.Binding{}) {
+				t.Errorf("a create whose %q failed ran %q, minted %d keys, deleted %v, bound %v", tt.fails, h.machine.scripts["ws-1"], h.api.mintedKeys(), h.api.deletedNodes(), h.bound())
+			}
+			if _, found := h.record("ws-1"); found {
+				t.Error("the failed create kept its record")
+			}
+		})
+	}
+}
+
+func TestAConfigureFailureAfterTheEnrollmentStartedLeavesTheTailnet(t *testing.T) {
+	tests := []struct {
+		name     string
+		inFlight bool
+	}{
+		{name: "configure fails while the enrollment is in flight", inFlight: true},
+		{name: "configure fails after the enrollment finished"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, true)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			configuring := h.machine.hold(t, configures)
+			var enrolling *hold
+			if tt.inFlight {
+				enrolling = h.machine.hold(t, enrolls)
+			}
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			configuring.awaitEntered(t)
+			if tt.inFlight {
+				enrolling.awaitEntered(t)
+				if h.bound() != (tailnet.Binding{Unresolved: true}) {
+					t.Fatalf("bound %v while the enroll script was running", h.bound())
+				}
+			} else {
+				h.awaitBound(tailnet.Binding{NodeID: "nNEW"})
+			}
+			configuring.release <- providers.Result{Stderr: []byte("configure held back the create"), ExitCode: 1}
+			if tt.inFlight {
+				h.machine.setStatus(running("nNEW"))
+				enrolling.release <- providers.Result{Stdout: []byte(running("nNEW"))}
+			}
+			if err := <-created; err == nil || !strings.Contains(err.Error(), "configure held back the create") {
+				t.Fatalf("Create = %v", err)
+			}
+			h.ordered(0, enrolls, logsOut)
+			if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.machine.ran("ws-1", logsOut) != 1 || h.machine.ran("ws-1", publishes) != 0 || h.bound() != (tailnet.Binding{}) {
+				t.Errorf("deleted %v, ran %q, bound %v", deleted, h.machine.scripts["ws-1"], h.bound())
+			}
+			if _, err := h.fake.Get(context.Background(), "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+				t.Errorf("the machine survived the failed create: %v", err)
+			}
+			if _, found := h.record("ws-1"); found {
+				t.Error("the failed create left a record")
+			}
+		})
 	}
 }
 
@@ -827,12 +1458,8 @@ func TestResumeProvisionsAnEnrolledHostInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", before, readies, provisions, "plugins.sh.tmp", installs, prepares, configures)
-	for i := 1; i < len(order); i++ {
-		if order[i-1] < 0 || order[i] <= order[i-1] {
-			t.Fatalf("the resume ran scripts out of order: %v", order)
-		}
-	}
+	h.ordered(before, readies, packagesPhase, publishes)
+	order := h.ordered(before, readies, toolsPhase, stages, installs, publishes, prepares, configures)
 	after := strings.Join(h.machine.scripts["ws-1"][before:], "\n")
 	for _, kept := range []string{freshens, enrolls, logsOut, renews, checkout} {
 		if strings.Contains(after, kept) {
@@ -864,12 +1491,9 @@ func TestResumeProvisionsInPlaceWhenTheInventoryDrifted(t *testing.T) {
 	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", before, readies, provisions, "plugins.sh.tmp", installs, prepares, configures)
-	for i := 1; i < len(order); i++ {
-		if order[i-1] < 0 || order[i] <= order[i-1] {
-			t.Fatalf("the resume ran scripts out of order: %v", order)
-		}
-	}
+	h.ordered(before, readies, prereqsPhase, packagesPhase, publishes)
+	h.ordered(before, prereqsPhase, toolsPhase)
+	order := h.ordered(before, readies, toolsPhase, stages, installs, publishes, prepares, configures)
 	provision, plugins := h.machine.stdins["ws-1"][order[1]], h.machine.stdins["ws-1"][order[2]]
 	if !strings.Contains(provision, "jq-1.8.3") || strings.Contains(provision, "1.8.2") || !strings.Contains(plugins, "jq-1.8.3") || strings.Contains(plugins, "1.8.2") {
 		t.Errorf("the resume provisioned with %q and staged %q; want only the new pin", provision, plugins)
@@ -942,12 +1566,7 @@ func TestResumeInstallsPluginsWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T)
 	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	order := h.machine.order("ws-1", before, readies, installs, prepares, configures)
-	for i := 1; i < len(order); i++ {
-		if order[i-1] < 0 || order[i] <= order[i-1] {
-			t.Fatalf("the resume ran scripts out of order: %v", order)
-		}
-	}
+	h.ordered(before, readies, stages, installs, publishes, prepares, configures)
 	if strings.Contains(strings.Join(h.machine.scripts["ws-1"][before:], "\n"), provisions) || h.machine.ready["ws-1"] != drifted.Stamp {
 		t.Errorf("the resume provisioned an image host in place, or left stamp %q", h.machine.ready["ws-1"])
 	}
@@ -1166,5 +1785,61 @@ func TestDestroyRefusesALegacySpareOwnershipLabel(t *testing.T) {
 	}
 	if _, found := h.record("ws-1"); !found {
 		t.Fatal("the legacy workspace record was removed")
+	}
+}
+
+func TestTheClosureLoaderRunsOnceAfterThePackagesAndTheToolInstall(t *testing.T) {
+	tests := []struct {
+		name    string
+		release []string
+	}{
+		{name: "the packages finish first", release: []string{packagesPhase, installs}},
+		{name: "the tool install finishes first", release: []string{installs, packagesPhase}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newClosureHarness(t)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
+			loading, preparing, configuring := h.machine.hold(t, loaderPhase), h.machine.hold(t, prepares), h.machine.hold(t, configures)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			upstream[packagesPhase].awaitEntered(t)
+			upstream[installs].awaitEntered(t)
+			loading.stillParked(t, "while the packages and the tool install were still running")
+			upstream[tt.release[0]].release <- providers.Result{}
+			loading.stillParked(t, "once only "+tt.release[0]+" had finished")
+			upstream[tt.release[1]].release <- providers.Result{}
+			loading.awaitEntered(t)
+			preparing.stillParked(t, "while the loader was still registering the closure")
+			configuring.stillParked(t, "while the loader was still registering the closure")
+			loading.release <- providers.Result{}
+			preparing.awaitEntered(t)
+			preparing.release <- providers.Result{}
+			configuring.awaitEntered(t)
+			configuring.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, packagesPhase+" resident", loaderPhase, prepares, publishes)
+			h.ordered(0, installs, loaderPhase, configures, publishes)
+			if h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 || h.machine.ran("ws-1", packagesPhase+" full") != 0 {
+				t.Errorf("the create ran the loader %d times and the resident packages %d times: %q", h.machine.ran("ws-1", loaderPhase), h.machine.ran("ws-1", packagesPhase+" resident"), h.machine.scripts["ws-1"])
+			}
+		})
+	}
+}
+
+func TestAPayloadWithoutAClosureNeverRunsTheLoader(t *testing.T) {
+	h := newPayloadHarness(t)
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.machine.ran("ws-1", loaderPhase) != 0 {
+		t.Errorf("a payload without apt.payload registered a closure: %q", h.machine.scripts["ws-1"])
 	}
 }

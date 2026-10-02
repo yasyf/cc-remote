@@ -252,14 +252,31 @@ func (p *Provider) Destroy(ctx context.Context, id string) error {
 }
 
 func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {
-	if _, err := p.Get(ctx, id); err != nil {
-		return providers.Result{}, err
+	if providers.CheckName(id, nameLimit) != nil {
+		return providers.Result{}, fmt.Errorf("sprite %q: %w", id, providers.ErrNotFound)
 	}
 	args := []string{"exec", "-o", p.Org, "-s", id, "--no-port-forward"}
 	if stdin == nil {
 		args = append(args, "--no-stdin")
 	}
-	return p.Runner.Run(ctx, p.command(stdin, append(append(args, "--"), cmd...)...))
+	result, err := p.Runner.Run(ctx, p.command(stdin, append(append(args, "--"), cmd...)...))
+	if err != nil || result.ExitCode == 0 {
+		return result, err
+	}
+	_, err = p.Get(ctx, id)
+	return result, err
+}
+
+func (p *Provider) Download(ctx context.Context, id, path string, w io.Writer) error {
+	if _, err := p.Get(ctx, id); err != nil {
+		return err
+	}
+	command := p.command(nil, "api", "-o", p.Org, "/v1/sprites/"+id+"/fs/read?path="+url.QueryEscape(path), "--", "-sS", "-f")
+	command.Stdout = w
+	if _, err := providers.Output(ctx, p.Runner, command); err != nil {
+		return fmt.Errorf("downloading %s from sprite %s: %w", path, id, err)
+	}
+	return nil
 }
 
 func (p *Provider) api(ctx context.Context, path string) (int, []byte, error) {

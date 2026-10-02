@@ -26,7 +26,7 @@ install_artifact() {
       tar.gz) tar -xzf "$download" -C "$dir" ;;
       tar.xz) tar -xJf "$download" -C "$dir" ;;
       zip) unzip -q "$download" -d "$dir" ;;
-      deb){{- if and . .Closure}} record_deb "$download";{{- end}} apt-get install -y -qq "$download" > /dev/null ;;
+      deb) apt-get install -y -qq "$download" > /dev/null ;;
     esac
     rm -rf "$staging"
     printf '%s\n' "$digest" > "$dir/.cc-remote-digest"

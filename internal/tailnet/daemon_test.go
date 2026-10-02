@@ -106,7 +106,7 @@ exit 0`)
 
 func TestKernelModeRunsTailscaledAsRootUnderSpriteEnv(t *testing.T) {
 	script := sprites.EnrollScript("ws-1")
-	if !strings.Contains(script, `sprite-env services create tailscaled --cmd "`+launcherPath+`"`) || strings.Contains(script, "setsid") {
+	if !strings.Contains(script, `sprite-env services create tailscaled --cmd "`+launcherPath+`" --duration 1ms --no-stream`) || strings.Contains(script, "setsid") {
 		t.Errorf("enrollment starts tailscaled outside sprite-env:\n%s", script)
 	}
 	if launcher := sprites.Launcher(); !strings.Contains(launcher, "exec sudo -n tailscaled --state=/var/lib/tailscale/tailscaled.state") || strings.Contains(launcher, "userspace") {

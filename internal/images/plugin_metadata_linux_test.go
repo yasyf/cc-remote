@@ -10,11 +10,11 @@ import (
 
 func TestVerificationReadsMetadataOnceAndRunsEveryProbe(t *testing.T) {
 	h := metadataHost(t, nil)
-	if out, err := h.plugins("install", digest); err != nil {
+	if out, err := h.plugins("install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
-	if got := metadataReadCount(h.calls()); got != 46 {
-		t.Fatalf("install metadata reads = %d, want 46", got)
+	if got := metadataReadCount(h.calls()); got != 18 {
+		t.Fatalf("install metadata reads = %d, want 18", got)
 	}
 	state := h.state()
 	for _, plugin := range state.Plugins[:7] {
@@ -48,7 +48,7 @@ func TestVerificationUsesCurrentMetadataOnEveryInvocation(t *testing.T) {
 	for _, change := range []string{"version", "disabled", "errors", "path", "duplicate-id", "marketplace"} {
 		t.Run(change, func(t *testing.T) {
 			h := metadataHost(t, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install: %v\n%s", err, out)
 			}
 			state := h.state()
@@ -56,7 +56,9 @@ func TestVerificationUsesCurrentMetadataOnEveryInvocation(t *testing.T) {
 			case "version":
 				state.Plugins[0]["version"] = "9.0.0"
 			case "disabled":
-				state.Plugins[0]["enabled"] = false
+				settings := h.settings()
+				settings["enabledPlugins"].(map[string]any)[state.Plugins[0]["id"].(string)] = false
+				writePluginTestFile(t, filepath.Join(h.home, ".claude", "settings.json"), mustJSON(t, settings), 0o600)
 			case "errors":
 				state.Plugins[0]["errors"] = []string{"unloadable"}
 			case "path":
@@ -79,7 +81,7 @@ func TestFinalVerificationReadsAfterPrepare(t *testing.T) {
 		t.Run(mutation, func(t *testing.T) {
 			prepare := "python3 -c " + quote(`import json, os; path = os.environ["FAKE_STATE"]; data = json.load(open(path)); `+mutation+`; json.dump(data, open(path, "w"))`)
 			h := metadataHost(t, []string{prepare})
-			if out, err := h.plugins("install", digest); err == nil {
+			if out, err := h.plugins("install"); err == nil {
 				t.Fatalf("install accepted metadata changed after plugin installation: %s", out)
 			}
 			h.unready()

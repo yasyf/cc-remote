@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
@@ -42,11 +44,15 @@ type Session struct {
 	Scripts  images.Scripts
 	Stamp    string
 
-	profile        config.Profile
-	labels         []LabelledEnv
-	image          string
-	imageSpec      string
-	privatePlugins bool
+	profile          config.Profile
+	labels           []LabelledEnv
+	image            string
+	imageSpec        string
+	payload          *config.Payload
+	closure          bool
+	privatePlugins   bool
+	tailnetFromTools bool
+	stderr           sync.Mutex
 }
 
 func (s *Session) inPlace() bool {
@@ -63,7 +69,10 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if err != nil {
 		return nil, err
 	}
-	rendered, err := render(cfg, profile, machine.Image != "")
+	if supervisor := provider.Traits().Supervisor; machine.Payload != nil && supervisor != providers.SupervisorSpriteEnv {
+		return nil, fmt.Errorf("profile %s: machine %s mounts a payload, which only a %s host remounts at boot; provider %s runs %s", profile, kind, providers.SupervisorSpriteEnv, kind, supervisor)
+	}
+	rendered, err := render(cfg, profile, machine, machine.Payload != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -71,21 +80,24 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		return nil, err
 	}
 	s := &Session{
-		Config:         cfg,
-		Provider:       provider,
-		Kind:           kind,
-		Profile:        profile,
-		Platform:       platform,
-		State:          cfg.State(),
-		Log:            slog.Default(),
-		Stderr:         os.Stderr,
-		Now:            time.Now,
-		Scripts:        rendered.scripts,
-		Stamp:          rendered.stamp,
-		profile:        spec,
-		image:          machine.Image,
-		imageSpec:      rendered.imageSpec,
-		privatePlugins: rendered.private,
+		Config:           cfg,
+		Provider:         provider,
+		Kind:             kind,
+		Profile:          profile,
+		Platform:         platform,
+		State:            cfg.State(),
+		Log:              slog.Default(),
+		Stderr:           os.Stderr,
+		Now:              time.Now,
+		Scripts:          rendered.scripts,
+		Stamp:            rendered.stamp,
+		profile:          spec,
+		image:            machine.Image,
+		imageSpec:        rendered.imageSpec,
+		payload:          machine.Payload,
+		closure:          rendered.closure,
+		privatePlugins:   rendered.private,
+		tailnetFromTools: rendered.tailnetFromTools,
 	}
 	s.Token = s.gitToken
 	for _, forward := range cfg.Forwards {
@@ -103,30 +115,46 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 }
 
 type rendered struct {
-	scripts   images.Scripts
-	stamp     string
-	imageSpec string
-	private   bool
+	scripts          images.Scripts
+	stamp            string
+	imageSpec        string
+	private          bool
+	tailnetFromTools bool
+	closure          bool
 }
 
-func render(cfg *config.Config, profile string, imaged bool) (rendered, error) {
+func render(cfg *config.Config, profile string, machine config.Machine, payload bool) (rendered, error) {
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
 	if err != nil {
 		return rendered{}, err
+	}
+	if !payload {
+		inventory.Apt.Payload = nil
 	}
 	scripts, err := images.Render(inventory, profile)
 	if err != nil {
 		return rendered{}, err
 	}
-	private := slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private })
-	if !imaged {
-		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil), private: private}, nil
+	out := rendered{
+		scripts:          scripts,
+		private:          slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private }),
+		tailnetFromTools: inventory.TailnetFromTools(),
+		closure:          inventory.Apt.Payload != nil,
+	}
+	if machine.Image == "" {
+		var payload string
+		if machine.Payload != nil {
+			payload = machine.Payload.SHA256
+		}
+		out.stamp = images.Stamp(scripts, nil, payload)
+		return out, nil
 	}
 	image, err := images.RenderImage(inventory)
 	if err != nil {
 		return rendered{}, err
 	}
-	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image), imageSpec: image.Fingerprint(), private: private}, nil
+	out.stamp, out.imageSpec = images.Stamp(scripts, &image, ""), image.Fingerprint()
+	return out, nil
 }
 
 func coverEnv(forwards []config.Forward, declared []string) error {
@@ -196,7 +224,7 @@ func (s *Session) execute(ctx context.Context, machine string, argv []string, st
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.Stderr.Write(result.Stderr); err != nil {
+	if err := s.writeStderr(result.Stderr); err != nil {
 		return nil, err
 	}
 	if result.ExitCode != 0 {
@@ -205,10 +233,30 @@ func (s *Session) execute(ctx context.Context, machine string, argv []string, st
 	return result.Stdout, nil
 }
 
+func (s *Session) writeStderr(output []byte) error {
+	s.stderr.Lock()
+	defer s.stderr.Unlock()
+	_, err := s.Stderr.Write(output)
+	return err
+}
+
 func (s *Session) exec(machine string) images.Exec {
 	return func(ctx context.Context, argv []string, stdin io.Reader) error {
 		_, err := s.execute(ctx, machine, argv, stdin)
 		return err
+	}
+}
+
+func (s *Session) capture(machine string) images.Capture {
+	return func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
+		result, err := s.Provider.Exec(ctx, machine, argv, stdin)
+		if err != nil {
+			return nil, err
+		}
+		if result.ExitCode != 0 {
+			return nil, fmt.Errorf("%s on %s exited %d", argv[0], machine, result.ExitCode)
+		}
+		return result.Stdout, nil
 	}
 }
 
@@ -325,32 +373,126 @@ func (s *Session) unbound(name string) error {
 
 func (s *Session) provision(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
 	machine := record.Machine
-	if err := s.installTools(ctx, machine); err != nil {
+	env, err := s.forwards(record)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.checkout(ctx, record); err != nil {
+	if err := s.installPrerequisites(ctx, machine); err != nil {
 		return nil, err
 	}
-	if err := s.configure(ctx, record); err != nil {
+	run := newLanes(ctx)
+	packages := run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
+	tools := run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
+	loader := run.Go(func(ctx context.Context) error {
+		if err := run.after(packages, tools); err != nil {
+			return err
+		}
+		return s.registerClosure(ctx, machine)
+	})
+	run.Go(func(ctx context.Context) error {
+		if err := s.checkout(ctx, record); err != nil {
+			return err
+		}
+		if len(s.profile.Prepare) == 0 {
+			return nil
+		}
+		if err := run.after(loader); err != nil {
+			return err
+		}
+		return s.prepare(ctx, record, env)
+	})
+	run.Go(func(ctx context.Context) error {
+		if err := run.after(loader); err != nil {
+			return err
+		}
+		return s.configure(ctx, record, env)
+	})
+	enrollAfter := []<-chan struct{}{packages, tools}
+	if s.tailnetFromTools {
+		enrollAfter = []<-chan struct{}{tools}
+	}
+	run.Go(func(ctx context.Context) error {
+		if err := run.after(enrollAfter...); err != nil {
+			return err
+		}
+		return s.enroll(context.WithoutCancel(ctx), held, record)
+	})
+	if err := run.Wait(); err != nil {
 		return nil, err
 	}
-	if err := s.enroll(ctx, held, record); err != nil {
+	if err := s.publish(ctx, machine); err != nil {
 		return nil, err
 	}
 	return s.connect(ctx, record)
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
+	if err := s.installPrerequisites(ctx, machine); err != nil {
+		return err
+	}
+	run := newLanes(ctx)
+	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
+	run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
+	if err := run.Wait(); err != nil {
+		return err
+	}
+	if err := s.registerClosure(ctx, machine); err != nil {
+		return err
+	}
+	return s.publish(ctx, machine)
+}
+
+func (s *Session) installPrerequisites(ctx context.Context, machine string) error {
+	if !s.inPlace() {
+		return nil
+	}
+	return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePrerequisites)
+}
+
+func (s *Session) installPackages(ctx context.Context, machine string) error {
+	if !s.inPlace() {
+		return nil
+	}
+	var mode []string
+	if s.payload != nil {
+		mode = []string{images.PackagesResident}
+	}
+	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...); err != nil {
+		return err
+	}
+	s.Log.Info("installed the packages", "machine", machine)
+	return nil
+}
+
+func (s *Session) registerClosure(ctx context.Context, machine string) error {
+	if !s.inPlace() || s.payload == nil || !s.closure {
+		return nil
+	}
+	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhaseLoader); err != nil {
+		return err
+	}
+	s.Log.Info("registered the payload's closure with the loader", "machine", machine)
+	return nil
+}
+
+func (s *Session) installPlugins(ctx context.Context, machine string) error {
+	run := s.exec(machine)
+	var payload string
+	if s.payload != nil {
+		if err := s.mountPayload(ctx, machine, run); err != nil {
+			return err
+		}
+		if err := s.Scripts.EnablePayloadPlugins(ctx, run, s.payload.SHA256); err != nil {
+			return err
+		}
+		payload = s.payload.SHA256
+	}
 	if s.inPlace() {
-		if err := s.Scripts.ProvisionInPlace(ctx, s.exec(machine)); err != nil {
+		if err := s.Scripts.Provision(ctx, run, images.PhaseTools); err != nil {
 			return err
 		}
 		s.Log.Info("provisioned", "machine", machine)
 	}
-	return s.installPlugins(ctx, machine)
-}
-
-func (s *Session) installPlugins(ctx context.Context, machine string) error {
 	var token string
 	if s.privatePlugins {
 		var err error
@@ -358,14 +500,51 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 			return err
 		}
 	}
-	run := s.exec(machine)
 	if err := s.Scripts.StagePlugins(ctx, run); err != nil {
 		return err
 	}
-	if err := s.Scripts.Install(ctx, run, token, s.Stamp); err != nil {
+	if err := s.Scripts.Install(ctx, run, token, payload); err != nil {
 		return err
 	}
 	s.Log.Info("installed the tools", "machine", machine, "stamp", s.Stamp[:12])
+	return nil
+}
+
+func (s *Session) mountPayload(ctx context.Context, machine string, run images.Exec) (err error) {
+	// O_NONBLOCK keeps a FIFO from blocking the open until a writer appears, so the fstat can reject it.
+	image, err := os.OpenFile(s.Config.ScriptPath(s.payload.Path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("open payload: %w", err)
+	}
+	defer func() { err = errors.Join(err, image.Close()) }()
+	info, err := image.Stat()
+	if err != nil {
+		return fmt.Errorf("open payload: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("open payload: %s is not a regular file (mode %v)", image.Name(), info.Mode())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("open payload: %s is readable by others (mode %v); only its owner may read a payload", image.Name(), info.Mode())
+	}
+	if owner := info.Sys().(*syscall.Stat_t).Uid; int(owner) != os.Getuid() {
+		return fmt.Errorf("open payload: %s is owned by uid %d, not by this user (uid %d)", image.Name(), owner, os.Getuid())
+	}
+	if err = s.Scripts.StagePayload(ctx, run, image, s.payload.SHA256); err != nil {
+		return err
+	}
+	if err = s.Scripts.Provision(ctx, run, images.PhasePayload, s.payload.SHA256, s.Scripts.Fingerprint()); err != nil {
+		return err
+	}
+	s.Log.Info("mounted the payload", "machine", machine, "sha256", s.payload.SHA256[:12])
+	return nil
+}
+
+func (s *Session) publish(ctx context.Context, machine string) error {
+	if err := s.Scripts.Publish(ctx, s.exec(machine), s.Stamp); err != nil {
+		return err
+	}
+	s.Log.Info("published the tools", "machine", machine, "stamp", s.Stamp[:12])
 	return nil
 }
 
@@ -396,14 +575,10 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 		return err
 	}
 	s.Log.Info("checked out", "machine", machine, "ref", record.Source.Ref, "head", record.Source.Head)
-	return s.prepare(ctx, record)
+	return nil
 }
 
-func (s *Session) prepare(ctx context.Context, record *Record) error {
-	env, err := s.forwards(record)
-	if err != nil {
-		return err
-	}
+func (s *Session) prepare(ctx context.Context, record *Record, env map[string]string) error {
 	if _, err := s.run(ctx, record.Machine, RefreshScript(s.ProjectRoot(), ExportEnv(env), s.profile.Prepare), nil); err != nil {
 		return err
 	}
@@ -411,11 +586,7 @@ func (s *Session) prepare(ctx context.Context, record *Record) error {
 	return nil
 }
 
-func (s *Session) configure(ctx context.Context, record *Record) error {
-	env, err := s.forwards(record)
-	if err != nil {
-		return err
-	}
+func (s *Session) configure(ctx context.Context, record *Record, env map[string]string) error {
 	if err := s.Scripts.Configure(ctx, s.exec(record.Machine), env); err != nil {
 		return err
 	}
@@ -562,10 +733,14 @@ func (s *Session) reopen(ctx context.Context, record *Record) error {
 	if err := s.readyTools(ctx, record); err != nil {
 		return err
 	}
-	if err := s.prepare(ctx, record); err != nil {
+	env, err := s.forwards(record)
+	if err != nil {
 		return err
 	}
-	return s.configure(ctx, record)
+	if err := s.prepare(ctx, record, env); err != nil {
+		return err
+	}
+	return s.configure(ctx, record, env)
 }
 
 func (s *Session) Suspend(ctx context.Context, name string) error {

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yasyf/cc-remote/internal/config"
@@ -257,14 +258,17 @@ func verifyReportsEveryCheck(t *testing.T, _ Harness, s *workspace.Session) {
 
 type capture struct {
 	providers.Provider
+	mu       sync.Mutex
 	commands [][]string
 	stdin    bool
 }
 
 func (c *capture) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {
+	c.mu.Lock()
 	c.commands = append(c.commands, append([]string(nil), cmd...))
 	if stdin != nil {
 		c.stdin = true
 	}
+	c.mu.Unlock()
 	return c.Provider.Exec(ctx, id, cmd, stdin)
 }

@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	assets "github.com/yasyf/cc-remote/images"
 )
@@ -28,9 +30,9 @@ const (
 )
 
 type Scripts struct {
-	Provision []byte
-	Plugins   []byte
-	Env       []string
+	ProvisionScript []byte
+	Plugins         []byte
+	Env             []string
 }
 
 type Context struct {
@@ -40,10 +42,200 @@ type Context struct {
 	Start      []byte
 }
 
+type exposure string
+
+const (
+	exposeLink     exposure = "link"
+	exposeChildren exposure = "children"
+	exposeCopy     exposure = "copy"
+)
+
+type requirement string
+
+const (
+	required requirement = "required"
+	optional requirement = "optional"
+)
+
+type tree struct {
+	Kind        exposure
+	Requirement requirement
+	Path        string
+}
+
+var (
+	readyTimeout  = 30 * time.Second
+	closureShares = []string{"mime", "glib-2.0/schemas", "icons"}
+)
+
+type closureLink struct {
+	Path        string      `json:"path"`
+	Target      string      `json:"target"`
+	Requirement requirement `json:"requirement"`
+}
+
+type closureView struct {
+	AptPayload
+	Links []closureLink `json:"links"`
+}
+
+type native struct {
+	ID  string
+	Ref string
+	Dir string
+	Bin string
+}
+
 type view struct {
 	Inventory
-	Tools   []Artifact
-	Prepare []string
+	Tools        []Artifact
+	Prepare      []string
+	SystemTrees  []tree
+	HomeTrees    []tree
+	ReadyTimeout float64
+	Natives      []native
+	Closure      *closureView
+}
+
+func newView(inv Inventory, profile string) view {
+	tools := slices.Concat(inv.Tools, inv.Profiles[profile].Tools)
+	return view{
+		Inventory:    inv,
+		Tools:        tools,
+		Prepare:      slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
+		SystemTrees:  systemTrees(inv),
+		HomeTrees:    homeTrees(inv, tools),
+		ReadyTimeout: readyTimeout.Seconds(),
+		Natives:      natives(inv),
+		Closure:      closure(inv),
+	}
+}
+
+func newSystemView(inv Inventory) view {
+	return view{Inventory: inv, SystemTrees: systemTrees(inv)}
+}
+
+func systemTrees(inv Inventory) []tree {
+	var trees []tree
+	for _, a := range inv.System {
+		if a.Format != Deb {
+			trees = append(trees, tree{exposeLink, required, "/opt/cc-remote/tools/" + a.dir()})
+		}
+	}
+	for _, tool := range inv.Python.System {
+		trees = append(trees, tree{exposeLink, required, "/opt/uv/tools/" + uvToolDir(tool)})
+		for _, bin := range tool.Bins {
+			trees = append(trees, tree{exposeCopy, required, "/usr/local/bin/" + bin})
+		}
+	}
+	if len(inv.Python.System) > 0 {
+		trees = append(trees, tree{exposeLink, required, "/opt/uv/python"})
+	}
+	if c := closure(inv); c != nil {
+		trees = append(trees, tree{exposeLink, required, ClosurePath})
+		for _, link := range c.Links {
+			trees = append(trees, tree{exposeCopy, link.Requirement, link.Path})
+		}
+	}
+	return trees
+}
+
+func closure(inv Inventory) *closureView {
+	payload := inv.Apt.Payload
+	if payload == nil {
+		return nil
+	}
+	c := &closureView{AptPayload: *payload}
+	for _, bin := range payload.Bins {
+		c.Links = append(c.Links, closureLink{"/usr/local/bin/" + bin, "usr/bin/" + bin, required})
+	}
+	for _, share := range closureShares {
+		c.Links = append(c.Links, closureLink{"/usr/local/share/" + share, "usr/share/" + share, optional})
+	}
+	return c
+}
+
+func homeTrees(inv Inventory, tools []Artifact) []tree {
+	var trees []tree
+	for _, a := range tools {
+		rel := ".local/share/cc-remote/tools/" + a.dir()
+		if a.Dest != "" {
+			rel = a.Dest
+		}
+		trees = append(trees, tree{exposeLink, required, rel})
+	}
+	settings := len(inv.Claude.Plugins) > 0
+	for _, marketplace := range inv.Claude.Marketplaces {
+		if marketplace.Ref != "" {
+			trees = append(trees, tree{exposeLink, required, ".local/share/cc-remote/marketplaces/" + marketplace.Name})
+		} else {
+			trees = append(trees, tree{exposeCopy, required, ".claude/plugins/marketplaces/" + marketplace.Name})
+			settings = true
+		}
+	}
+	for _, plugin := range inv.Claude.Plugins {
+		trees = append(trees, tree{exposeCopy, required, pluginCacheDir(plugin)})
+	}
+	if len(inv.Claude.Plugins) > 0 {
+		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/installed_plugins.json"})
+	}
+	if len(inv.Claude.Marketplaces) > 0 {
+		trees = append(trees, tree{exposeCopy, required, ".claude/plugins/known_marketplaces.json"})
+	}
+	if settings {
+		trees = append(trees, tree{exposeCopy, required, ".claude/settings.json"})
+	}
+	if inv.CodexRuntime != nil {
+		trees = append(trees,
+			tree{exposeLink, required, ".cache/codex-runtimes/codex-primary-runtime"},
+			tree{exposeCopy, required, ".codex/config.toml"},
+			tree{exposeCopy, required, ".codex/plugins/cache/openai-primary-runtime"},
+		)
+	}
+	if inv.CaptainHook != nil {
+		trees = append(trees, tree{exposeChildren, required, ".daemonkit/tools/capt-hook/" + inv.CaptainHook.Version})
+	}
+	if inv.CaptainHook != nil || len(inv.Python.User) > 0 {
+		trees = append(trees, tree{exposeLink, optional, ".local/share/uv/python"})
+	}
+	return trees
+}
+
+func pluginCacheDir(plugin Plugin) string {
+	name, marketplace, _ := strings.Cut(plugin.ID, "@")
+	return ".claude/plugins/cache/" + marketplace + "/" + name + "/" + plugin.Version
+}
+
+func natives(inv Inventory) []native {
+	refs := map[string]string{}
+	for _, marketplace := range inv.Claude.Marketplaces {
+		refs[marketplace.Name] = marketplace.Ref
+	}
+	var candidates []native
+	for _, plugin := range inv.Claude.Plugins {
+		name, marketplace, _ := strings.Cut(plugin.ID, "@")
+		if name == "captain-hook" || refs[marketplace] == "" {
+			continue
+		}
+		bins := slices.Clone(plugin.Bins)
+		for _, service := range inv.Services {
+			if service.Plugin == plugin.ID {
+				bins = append(bins, service.Command[0])
+			}
+		}
+		for _, bin := range bins {
+			candidate := native{plugin.ID, refs[marketplace], pluginCacheDir(plugin), bin}
+			if !slices.Contains(candidates, candidate) {
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	return candidates
+}
+
+func uvToolDir(tool PythonTool) string {
+	name, _, _ := strings.Cut(cmp.Or(tool.Package, tool.Name), "[")
+	return name
 }
 
 func Render(inv Inventory, profile string) (Scripts, error) {
@@ -51,11 +243,7 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	if err != nil {
 		return Scripts{}, err
 	}
-	data := view{
-		Inventory: inv,
-		Tools:     slices.Concat(inv.Tools, inv.Profiles[profile].Tools),
-		Prepare:   slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
-	}
+	data := newView(inv, profile)
 	provision, err := execute(bound, "provision.sh", data)
 	if err != nil {
 		return Scripts{}, err
@@ -64,13 +252,14 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	if err != nil {
 		return Scripts{}, err
 	}
-	return Scripts{Provision: provision, Plugins: plugins, Env: slices.Clone(inv.Configure.Env)}, nil
+	return Scripts{ProvisionScript: provision, Plugins: plugins, Env: slices.Clone(inv.Configure.Env)}, nil
 }
 
 func RenderImage(inv Inventory) (Context, error) {
 	if inv.Image == nil {
 		return Context{}, errors.New("inventory has no image section")
 	}
+	inv.Apt.Payload = nil
 	bound, err := parse(inv)
 	if err != nil {
 		return Context{}, err
@@ -79,7 +268,7 @@ func RenderImage(inv Inventory) (Context, error) {
 	if err != nil {
 		return Context{}, err
 	}
-	provision, err := execute(bound, "provision.sh", view{Inventory: inv})
+	provision, err := execute(bound, "provision.sh", newSystemView(inv))
 	if err != nil {
 		return Context{}, err
 	}
@@ -91,13 +280,16 @@ func RenderImage(inv Inventory) (Context, error) {
 }
 
 func (s Scripts) Fingerprint() string {
-	return fingerprint(toolDomain, file{"provision.sh", s.Provision}, file{"plugins.sh", s.Plugins})
+	return fingerprint(toolDomain, file{"provision.sh", s.ProvisionScript}, file{"plugins.sh", s.Plugins})
 }
 
-func Stamp(scripts Scripts, image *Context) string {
+func Stamp(scripts Scripts, image *Context, payload string) string {
 	files := []file{{"tools", []byte(scripts.Fingerprint())}}
 	if image != nil {
 		files = append(files, file{"image", []byte(image.Fingerprint())})
+	}
+	if payload != "" {
+		files = append(files, file{"payload", []byte(payload)})
 	}
 	return fingerprint(stampDomain, files...)
 }
@@ -135,6 +327,10 @@ func fingerprint(domain string, files ...file) string {
 }
 
 func parse(inv Inventory) (*template.Template, error) {
+	return parseFrom(assets.FS, inv, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "capture.py", "loader.py", "namespace/Dockerfile")
+}
+
+func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, error) {
 	refs := map[string]string{}
 	for _, marketplace := range inv.Claude.Marketplaces {
 		refs[marketplace.Name] = marketplace.Ref
@@ -154,11 +350,30 @@ func parse(inv Inventory) (*template.Template, error) {
 		"expand":     expand,
 		"executable": serviceExecutable,
 		"spec":       spec,
+		"under":      under,
+		"home": func(rel string) string {
+			return under("HOME", rel)
+		},
+		"consumer": func(p string) string {
+			if strings.HasPrefix(p, "/") {
+				return quote(p)
+			}
+			return under("HOME", p)
+		},
+		"pins": func(marketplace string) []string {
+			var pins []string
+			for _, plugin := range inv.Claude.Plugins {
+				if _, owner, _ := strings.Cut(plugin.ID, "@"); owner == marketplace {
+					pins = append(pins, plugin.ID+" "+plugin.Version)
+				}
+			}
+			return pins
+		},
 		"pluginRef": func(plugin Plugin) string {
 			_, marketplace, _ := strings.Cut(plugin.ID, "@")
 			return refs[marketplace]
 		},
-	}).ParseFS(assets.FS, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile")
+	}).ParseFS(fsys, files...)
 	if err != nil {
 		return nil, fmt.Errorf("parse image templates: %w", err)
 	}
@@ -254,7 +469,7 @@ func verifyCalls(a Artifact, toolDir, binDir string) []string {
 
 func serviceExecutable(s Service) string {
 	if s.Plugin != "" {
-		return `"$(plugin_root ` + quote(s.Plugin) + `)/"` + quote(s.Command[0])
+		return `"$(plugin_path "$plugins" ` + quote(s.Plugin) + `)/"` + quote(s.Command[0])
 	}
 	return `"$(command -v ` + quote(s.Command[0]) + `)"`
 }

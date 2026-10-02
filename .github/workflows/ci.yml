@@ -73,11 +73,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Render the example inventory
+      - name: Render the example inventory and the closure fixture
         run: |
           for profile in agents stack; do
             go run ./cmd/cc-remote images render --inventory examples/inventory.yaml --profile "$profile" --out "$RUNNER_TEMP/images/$profile"
           done
+          awk '/^image:/ { skip = 1; next } skip && /^[^ \t]/ { skip = 0 } !skip' examples/inventory.yaml > "$RUNNER_TEMP/closure-inventory.yaml"
+          go run ./cmd/cc-remote images render --inventory "$RUNNER_TEMP/closure-inventory.yaml" --profile agents --out "$RUNNER_TEMP/images/closure"
       - name: bash -n
         run: |
           for script in "$RUNNER_TEMP"/images/*/*.sh; do

@@ -54,9 +54,9 @@ func TestPluginsInstallLeavesPythonUserToolsForFirstUse(t *testing.T) {
 				spec = "writer[lab,scoring] @ git+file://" + filepath.Join(h.home, ".local/share/cc-remote/marketplaces", toolsRef.Name) + "@" + commit
 			}
 			writePluginTestFile(t, filepath.Join(h.fakes, "uv"), []byte(fakeUV), 0o755)
-			for _, phase := range []string{"install", "verify", "ready"} {
-				if out, err := h.plugins(phase, "test-stamp"); err != nil {
-					t.Fatalf("%s: %v\n%s", phase, err, out)
+			for _, args := range [][]string{{"install"}, {"publish", "test-stamp"}, {"verify"}, {"ready", "test-stamp"}} {
+				if out, err := h.plugins(args[0], args[1:]...); err != nil {
+					t.Fatalf("%s: %v\n%s", args[0], err, out)
 				}
 			}
 			uvLog := filepath.Join(h.fakes, "calls.log.uv")
@@ -107,6 +107,9 @@ type lazyLayout struct {
 	link         string
 	untracked    []string
 	unexecutable []string
+	descriptor   []byte
+	files        map[string]string
+	services     []Service
 }
 
 var lazyLayouts = []struct {
@@ -121,9 +124,9 @@ func TestPluginsVerifyPinnedLazyLaunchersWithoutExecutingThem(t *testing.T) {
 	for _, tt := range lazyLayouts {
 		t.Run(tt.name, func(t *testing.T) {
 			h := lazyPluginHost(t, "tool", fakeLazyLauncher, tt.layout)
-			for _, phase := range []string{"install", "verify", "ready"} {
-				if out, err := h.plugins(phase, "test-stamp"); err != nil {
-					t.Fatalf("%s: %v\n%s", phase, err, out)
+			for _, args := range [][]string{{"install"}, {"publish", "test-stamp"}, {"verify"}, {"ready", "test-stamp"}} {
+				if out, err := h.plugins(args[0], args[1:]...); err != nil {
+					t.Fatalf("%s: %v\n%s", args[0], err, out)
 				}
 			}
 			bin := filepath.Join(h.fakes, "plugins/tool/bin/tool")
@@ -176,7 +179,7 @@ func TestPluginsRejectChangedLazyLauncherPins(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(layout.name+"/"+tt.change, func(t *testing.T) {
 				h := lazyPluginHost(t, "tool", fakeLazyLauncher, layout.layout)
-				if out, err := h.plugins("install", "test-stamp"); err != nil {
+				if out, err := h.plugins("install"); err != nil {
 					t.Fatalf("install: %v\n%s", err, out)
 				}
 				bin := filepath.Join(h.fakes, "plugins/tool/bin/tool")
@@ -232,7 +235,7 @@ func TestPluginsRejectLazyLaunchersExecutableOnlyOutsideTheirPin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := lazyPluginHost(t, "tool", fakeLazyLauncher, tt.layout)
-			out, err := h.plugins("install", "test-stamp")
+			out, err := h.plugins("install")
 			if exitCode(err) != 1 || !strings.Contains(out, "differs from its pinned launcher or descriptor") {
 				t.Fatalf("install accepted a launcher its pin does not make executable: %v\n%s", err, out)
 			}
@@ -251,7 +254,7 @@ func TestPluginsRejectLazyLaunchersTheirPinDoesNotCommit(t *testing.T) {
 		outside string
 		wantErr string
 	}{
-		{name: "untracked-descriptor", layout: lazyLayout{untracked: []string{"plugin/bin/tool.binrun"}}, wantErr: "differs from its pinned launcher or descriptor"},
+		{name: "untracked-descriptor", layout: lazyLayout{untracked: []string{"plugin/bin/tool.binrun"}}, wantErr: "bin/tool.binrun is not a committed file at"},
 		{name: "untracked-target", layout: lazyLayout{link: "../scripts/launch.sh", untracked: []string{"plugin/scripts/launch.sh"}}, wantErr: "is not a committed file at"},
 		{name: "escaping-target", layout: lazyLayout{link: "../../../launch.sh"}, outside: ".local/share/cc-remote/marketplaces/launch.sh", wantErr: "is not a committed file at"},
 		{name: "absolute-target", layout: lazyLayout{link: filepath.Join(t.TempDir(), "launch.sh")}, wantErr: "is not a committed file at"},
@@ -263,7 +266,7 @@ func TestPluginsRejectLazyLaunchersTheirPinDoesNotCommit(t *testing.T) {
 			if tt.outside != "" {
 				writePluginTestFile(t, filepath.Join(h.home, tt.outside), []byte(fakeLazyLauncher), 0o755)
 			}
-			out, err := h.plugins("install", "test-stamp")
+			out, err := h.plugins("install")
 			if exitCode(err) != 1 || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("install = %v\n%s\nwant exit 1 containing %q", err, out, tt.wantErr)
 			}
@@ -283,7 +286,7 @@ func TestPluginsKeepRuntimeProbesForMandatoryAndNonLazyBins(t *testing.T) {
 				launcher = "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FAKE_LOG.probe\"\nexit 29\n"
 			}
 			h := lazyPluginHost(t, plugin, launcher, lazyLayout{})
-			out, err := h.plugins("install", "test-stamp")
+			out, err := h.plugins("install")
 			if exitCode(err) != 29 {
 				t.Fatalf("install did not propagate the runtime probe failure: %v\n%s", err, out)
 			}
@@ -298,7 +301,11 @@ func lazyPluginHost(t *testing.T, plugin, launcher string, layout lazyLayout) pl
 	manifest := map[string]any{"plugins": []map[string]string{{"name": plugin, "source": "./plugin"}}}
 	writePluginTestFile(t, filepath.Join(source, ".claude-plugin/marketplace.json"), mustJSON(t, manifest), 0o644)
 	bin := filepath.Join(source, "plugin/bin/tool")
-	writePluginTestFile(t, bin+".binrun", binrunDescriptor(t, digest), 0o644)
+	descriptor := layout.descriptor
+	if descriptor == nil {
+		descriptor = binrunDescriptor(t, digest)
+	}
+	writePluginTestFile(t, bin+".binrun", descriptor, 0o644)
 	if layout.link == "" {
 		writePluginTestFile(t, bin, []byte(launcher), 0o755)
 	} else {
@@ -311,14 +318,24 @@ func lazyPluginHost(t *testing.T, plugin, launcher string, layout lazyLayout) pl
 			t.Fatal(err)
 		}
 	}
+	for rel, content := range layout.files {
+		writePluginTestFile(t, filepath.Join(source, rel), []byte(content), 0o755)
+	}
 	ref := commitPin(t, source, layout)
-	inventory := Inventory{Version: SchemaVersion, Claude: Claude{Marketplaces: []Marketplace{{Name: "tools-market", GitHub: "owner/tools-market", Ref: ref}}, Plugins: []Plugin{{ID: plugin + "@tools-market", Version: "1.0.0", Bins: []string{"bin/tool"}}}}}
+	inventory := Inventory{Version: SchemaVersion, Claude: Claude{Marketplaces: []Marketplace{{Name: "tools-market", GitHub: "owner/tools-market", Ref: ref}}, Plugins: []Plugin{{ID: plugin + "@tools-market", Version: "1.0.0", Bins: []string{"bin/tool"}}}}, Services: layout.services}
 	catalog := map[string]any{"dir:tools-market": map[string]any{"name": "tools-market", "plugins": map[string]string{plugin: "1.0.0"}}}
 	h := newPluginsHost(t, inventory, catalog, fakeState{}, nil)
 	if err := os.Mkdir(filepath.Join(h.fakes, "sources"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(source, filepath.Join(h.fakes, "sources/tools-market")); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(h.home, ".claude/plugins/cache/tools-market", plugin, "1.0.0")
+	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(h.fakes, "plugins", plugin), cache); err != nil {
 		t.Fatal(err)
 	}
 	writePluginTestFile(t, filepath.Join(h.fakes, "binrun"), []byte(fakeBinrun), 0o755)
@@ -350,8 +367,24 @@ func commitPin(t *testing.T, dir string, layout lazyLayout) string {
 
 func binrunDescriptor(t *testing.T, sha256 string) []byte {
 	t.Helper()
-	descriptor := map[string]any{"schema": 1, "kind": "release-binary", "version": map[string]string{"static": "1.0.0"}, "platforms": map[string]any{"linux-x86_64": map[string]any{"size": 123, "hash": "sha256", "digest": sha256}}}
-	return append([]byte("#!/usr/bin/env binrun\n"), mustJSON(t, descriptor)...)
+	return append([]byte("#!/usr/bin/env binrun\n"), mustJSON(t, releaseBinary(sha256))...)
+}
+
+func releaseBinary(sha256 string) map[string]any {
+	return map[string]any{
+		"schema":  1,
+		"kind":    "release-binary",
+		"name":    "tool",
+		"version": map[string]string{"static": "1.0.0"},
+		"platforms": map[string]any{"linux-x86_64": map[string]any{
+			"size":      123,
+			"hash":      "sha256",
+			"digest":    sha256,
+			"path":      "tool",
+			"format":    "tar.gz",
+			"providers": []map[string]string{{"type": "github-release", "repo": "owner/tool", "tag": "v1.0.0", "name": "tool_1.0.0_linux_amd64.tar.gz"}},
+		}},
+	}
 }
 
 func writePluginTestFile(t *testing.T, path string, data []byte, mode os.FileMode) {

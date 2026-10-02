@@ -1,19 +1,24 @@
 package images
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const fakeClaude = `#!/usr/bin/env python3
@@ -104,7 +109,8 @@ elif args[:3] == ["plugin", "marketplace", "remove"]:
     declared.get("extraKnownMarketplaces", {}).pop(args[3], None)
     save_settings(declared)
 elif args == ["plugin", "list", "--json"]:
-    print(json.dumps(state["plugins"]))
+    enabled = settings().get("enabledPlugins", {})
+    print(json.dumps([dict(p, enabled=enabled.get(p["id"]) is True) for p in state["plugins"]]))
     tail_path = os.path.join(os.path.dirname(state_path), "plugin-list-tail")
     if os.path.exists(tail_path):
         mode, skip, faults = open(tail_path).read().split()
@@ -136,8 +142,12 @@ elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
             tool.write("#!/bin/sh\n")
         os.chmod(os.path.join(root, "bin", name), 0o755)
     state["plugins"] = [p for p in state["plugins"] if p["id"] != args[2]]
-    state["plugins"].append({"id": args[2], "version": version, "enabled": True, "errors": [], "installPath": root})
+    state["plugins"].append({"id": args[2], "version": version, "errors": [], "installPath": root})
     save()
+    if args[1] == "install":
+        declared = settings()
+        declared.setdefault("enabledPlugins", {})[args[2]] = True
+        save_settings(declared)
 elif args == ["auto-update"]:
     declared = settings().get("extraKnownMarketplaces", {})
     for source in state["marketplaces"]:
@@ -187,7 +197,10 @@ if [ -f "$XDG_CONFIG_HOME/synckit/state.json" ]; then
   state=present
 fi
 echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
-[ "$2" != get ]
+case "$2" in
+  get) [ -f "${FAKE_LOG%/*}/services/$3" ] || exit 1; [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")" ;;
+  create) mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3" ;;
+esac
 `
 
 type fakeState struct {
@@ -215,7 +228,7 @@ func marketplaceInventory(marketplaces []Marketplace) Inventory {
 }
 
 func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, state fakeState, settings map[string]any) pluginsHost {
-	h := pluginsHost{t: t, home: t.TempDir(), fakes: t.TempDir()}
+	h := pluginsHost{t: t, home: shortHome(t), fakes: t.TempDir()}
 	scripts, err := Render(inventory, "agents")
 	if err != nil {
 		t.Fatal(err)
@@ -232,12 +245,14 @@ func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, s
 		}
 	}
 	files := map[string][]byte{
-		"claude":     []byte(fakeClaude),
-		"git":        []byte(fakeGit),
-		"sprite-env": []byte(fakeSynckitReader),
-		"cookiesync": []byte(fakeSynckitReader),
-		"plugins.sh": scripts.Plugins,
-		"state.json": mustJSON(t, state),
+		"claude":         []byte(fakeClaude),
+		"git":            []byte(fakeGit),
+		"sprite-env":     []byte(fakeSynckitReader),
+		"cookiesync":     []byte(fakeSynckitReader),
+		"getent":         []byte(fakeGetent),
+		"plugins.sh":     scripts.Plugins,
+		"state.json":     mustJSON(t, state),
+		"service-status": []byte("running\n"),
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(h.fakes, name), data, 0o700); err != nil {
@@ -256,13 +271,76 @@ func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, s
 	return h
 }
 
+func shortHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.MkdirTemp("", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	return home
+}
+
+func listenFullBacklog(t *testing.T, home, rel string) {
+	t.Helper()
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Listen(fd, 0); err != nil {
+		t.Fatal(err)
+	}
+	for range 1024 {
+		conn, err := net.Dial("unix", path)
+		if errors.Is(err, syscall.EAGAIN) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	t.Fatalf("%s queued 1024 connections without filling its backlog", path)
+}
+
+func listenReady(t *testing.T, home, rel string) *net.UnixListener {
+	t.Helper()
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return listener
+}
+
 func (h pluginsHost) setCatalog(catalog map[string]any) {
 	if err := os.WriteFile(filepath.Join(h.fakes, "catalog.json"), mustJSON(h.t, catalog), 0o600); err != nil {
 		h.t.Fatal(err)
 	}
 }
 
-func (h pluginsHost) run(name string, args ...string) (string, error) {
+func (h pluginsHost) command(name string, args ...string) *exec.Cmd {
 	git, err := exec.LookPath("git")
 	if err != nil {
 		h.t.Fatal(err)
@@ -279,7 +357,11 @@ func (h pluginsHost) run(name string, args ...string) (string, error) {
 		"FAKE_SOURCES="+filepath.Join(h.fakes, "sources"),
 		"REAL_GIT="+git,
 	)
-	out, err := cmd.CombinedOutput()
+	return cmd
+}
+
+func (h pluginsHost) run(name string, args ...string) (string, error) {
+	out, err := h.command(name, args...).CombinedOutput()
 	return string(out), err
 }
 
@@ -364,6 +446,7 @@ var (
 		"source":     map[string]any{"source": "github", "repo": "anthropics/claude-plugins-official", "ref": "main"},
 		"autoUpdate": false,
 	}
+	enabledPins = map[string]any{"hook@tools-market": true, "datadog@claude-plugins-official": true}
 )
 
 func marketplaceCatalog(official string) map[string]any {
@@ -374,8 +457,8 @@ func marketplaceCatalog(official string) map[string]any {
 	}
 }
 
-func healthyPlugin(id, version string) map[string]any {
-	return map[string]any{"id": id, "version": version, "enabled": true, "errors": []any{}}
+func installedPlugin(id, version string) map[string]any {
+	return map[string]any{"id": id, "version": version, "errors": []any{}}
 }
 
 func registered(officialRef any, officialVersion string) fakeState {
@@ -389,7 +472,7 @@ func registered(officialRef any, officialVersion string) fakeState {
 			{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market", "snapshot": map[string]string{"hook": "1.0.0"}},
 			official,
 		},
-		Plugins: []map[string]any{healthyPlugin("hook@tools-market", "1.0.0"), healthyPlugin("datadog@claude-plugins-official", officialVersion)},
+		Plugins: []map[string]any{installedPlugin("hook@tools-market", "1.0.0"), installedPlugin("datadog@claude-plugins-official", officialVersion)},
 	}
 }
 
@@ -421,6 +504,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "official added without a ref",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered(nil, "0.7.17"),
+			settings:     map[string]any{"enabledPlugins": enabledPins},
 			wantCalls: []string{
 				"claude plugin marketplace remove claude-plugins-official",
 				"claude plugin marketplace add anthropics/claude-plugins-official#main",
@@ -431,21 +515,21 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "official already pinned",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "pinned official with auto-update turned on",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
+			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
 		{
 			name:         "settings and a stale temp file at 0644",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
 			loose:        true,
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
@@ -457,6 +541,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				state.Marketplaces[0] = map[string]any{"name": "tools-market", "source": "github", "repo": "owner/tools-market", "ref": "main", "key": "github:owner/tools-market#main", "snapshot": map[string]string{"hook": "1.0.0"}}
 				return state
 			}(),
+			settings: map[string]any{"enabledPlugins": enabledPins},
 			wantCalls: []string{
 				"claude plugin marketplace remove tools-market",
 				"claude plugin marketplace add HOME/.local/share/cc-remote/marketplaces/tools-market",
@@ -468,11 +553,12 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "pinned official refreshed by update",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.16"),
+			settings:     map[string]any{"enabledPlugins": enabledPins},
 			wantCalls: []string{
 				"claude plugin marketplace update claude-plugins-official",
 				"claude plugin update datadog@claude-plugins-official",
 			},
-			absentCalls: []string{"claude plugin marketplace remove", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
+			absentCalls: []string{"claude plugin marketplace remove", "claude plugin marketplace update tools-market", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "official from a local checkout",
@@ -510,7 +596,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			out, err := h.plugins("install", digest)
+			out, err := h.plugins("install")
 			calls := h.calls()
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(out, tt.wantErr) {
@@ -538,10 +624,17 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			if got := h.checkedOut("tools-market"); got != commit {
 				t.Errorf("tools-market checkout = %q, want %s", got, commit)
 			}
+			if got := h.settings()["enabledPlugins"]; !reflect.DeepEqual(got, enabledPins) {
+				t.Errorf("settings enable %v, want every pin enabled as %v", got, enabledPins)
+			}
 			if tt.settings != nil {
 				if got := h.settings()["env"]; !reflect.DeepEqual(got, tt.settings["env"]) {
 					t.Errorf("settings env = %v, want it kept as %v", got, tt.settings["env"])
 				}
+			}
+			h.unready()
+			if out, err := h.plugins("publish", digest); err != nil {
+				t.Fatalf("publish failed: %v\n%s", err, out)
 			}
 			if stamp, err := os.ReadFile(filepath.Join(h.home, ".cc-remote", "ready")); err != nil || string(stamp) != digest+"\n" {
 				t.Errorf("ready stamp = %q, %v", stamp, err)
@@ -563,7 +656,7 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
 			if tt.reenable {
@@ -593,7 +686,7 @@ func TestPluginsHoldBranchMarketplaceAgainstAutoUpdate(t *testing.T) {
 			if err == nil || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("verify = %v\n%s\nwant failure containing %q", err, out, tt.wantErr)
 			}
-			out, err = h.plugins("install", digest)
+			out, err = h.plugins("install")
 			if err == nil || !strings.Contains(out, "the installed, enabled and loadable plugins differ from the pins") {
 				t.Fatalf("reinstall = %v\n%s\nwant the pin check to fail closed", err, out)
 			}
@@ -636,7 +729,7 @@ func TestPluginsVerifyRegistrations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
 			if out, err := h.plugins("verify"); err != nil {
@@ -672,14 +765,14 @@ func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.tail, func(t *testing.T) {
 			h := newPluginsHost(t, marketplaceInventory([]Marketplace{toolsRef, officialBranch}), marketplaceCatalog("0.7.17"), fakeState{}, nil)
-			if out, err := h.plugins("install", digest); err != nil {
+			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install failed: %v\n%s", err, out)
 			}
 			if err := os.WriteFile(filepath.Join(h.fakes, "list-tail"), []byte(tt.tail), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			for _, phase := range []string{"verify", "install"} {
-				out, err := h.plugins(phase, digest)
+				out, err := h.plugins(phase)
 				if exitCode(err) != tt.wantCode || !strings.Contains(out, tt.wantOut) {
 					t.Errorf("%s = %v\n%s\nwant exit %d with %q", phase, err, out, tt.wantCode, tt.wantOut)
 				}
@@ -690,9 +783,11 @@ func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
 }
 
 func TestPluginsFailClosedOnPluginReads(t *testing.T) {
+	enabled := map[string]any{"enabledPlugins": enabledPins}
 	tests := []struct {
 		name     string
 		state    fakeState
+		settings map[string]any
 		phase    string
 		tail     string
 		wantCode int
@@ -701,26 +796,24 @@ func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 		{name: "plugin list exits non-zero", phase: "verify", tail: "exit 0 9", wantCode: 42},
 		{name: "plugin list prints trailing garbage", phase: "verify", tail: "garbage 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
 		{name: "plugin list prints a second document", phase: "verify", tail: "extra 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
-		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 4 1", wantCode: 42},
-		{name: "install plugin read exits non-zero once", state: registered("main", "0.7.16"), phase: "install", tail: "exit 1 1", wantCode: 42},
+		{name: "install snapshot read exits non-zero", state: registered("main", "0.7.16"), settings: enabled, phase: "install", tail: "exit 0 1", wantCode: 42},
+		{name: "post-install check read exits non-zero", state: registered("main", "0.7.16"), settings: enabled, phase: "install", tail: "exit 1 1", wantCode: 42},
+		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), settings: enabled, phase: "install", tail: "exit 2 1", wantCode: 42},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			inventory := marketplaceInventory([]Marketplace{toolsRef, officialBranch})
 			inventory.Claude.Plugins[1].Bins = []string{"bin/datadog"}
-			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), tt.state, nil)
+			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), tt.state, tt.settings)
 			if tt.phase == "verify" {
-				if out, err := h.plugins("install", digest); err != nil {
+				if out, err := h.plugins("install"); err != nil {
 					t.Fatalf("install failed: %v\n%s", err, out)
-				}
-				if err := os.Remove(filepath.Join(h.home, ".cc-remote", "ready")); err != nil {
-					t.Fatal(err)
 				}
 			}
 			if err := os.WriteFile(filepath.Join(h.fakes, "plugin-list-tail"), []byte(tt.tail), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			out, err := h.plugins(tt.phase, digest)
+			out, err := h.plugins(tt.phase)
 			if exitCode(err) != tt.wantCode || !strings.Contains(out, tt.wantOut) {
 				t.Errorf("%s = %v\n%s\nwant exit %d with %q", tt.phase, err, out, tt.wantCode, tt.wantOut)
 			}
@@ -788,7 +881,7 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 		Version:    SchemaVersion,
 		Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
 		Cookiesync: &Cookiesync{SchemaFingerprint: digest},
-		Services:   []Service{{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}}},
+		Services:   []Service{{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}, Ready: ".s/cookiesync"}},
 		Configure:  Configure{Run: []string{"cookiesync check"}},
 	}
 	pinned := `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + digest + `"}}`
@@ -807,6 +900,7 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			listenReady(t, h.home, ".s/cookiesync")
 			state := filepath.Join(h.home, ".config", "synckit", "state.json")
 			if tt.existing != "" {
 				if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
@@ -860,6 +954,149 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 	}
 }
 
+func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
+	inventory := Inventory{
+		Version:    SchemaVersion,
+		Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
+		Cookiesync: &Cookiesync{SchemaFingerprint: digest},
+		Services: []Service{
+			{Name: "capt", Command: []string{"cookiesync", "supervise"}, Ready: ".s/capt"},
+			{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}, Ready: ".s/cookiesync"},
+		},
+	}
+	tests := []struct {
+		name      string
+		status    string
+		existing  bool
+		namespace bool
+		stall     bool
+		sockets   string
+		timeout   time.Duration
+		wantErr   bool
+	}{
+		{name: "every socket accepts", status: "running", sockets: "listening", timeout: 30 * time.Second},
+		{name: "install waits for the last socket", status: "running", sockets: "late", timeout: 30 * time.Second},
+		{name: "a stale socket file is not ready", status: "running", sockets: "stale", timeout: time.Second, wantErr: true},
+		{name: "a running service without a socket is not ready", status: "running", sockets: "none", timeout: time.Second, wantErr: true},
+		{name: "a listener with a full accept backlog is not ready", status: "running", sockets: "backlog", timeout: time.Second, wantErr: true},
+		{name: "a stopped service behind a listening socket is not ready", status: "stopped", sockets: "listening", timeout: time.Second, wantErr: true},
+		{name: "a stalled sprite-env status read is not ready", status: "running", stall: true, sockets: "listening", timeout: time.Second, wantErr: true},
+		{name: "an existing service is gated but never created", status: "running", existing: true, sockets: "listening", timeout: 30 * time.Second},
+		{name: "the namespace branch is gated on sockets alone", namespace: true, sockets: "listening", timeout: 30 * time.Second},
+		{name: "the namespace branch fails closed without a socket", namespace: true, sockets: "none", timeout: time.Second, wantErr: true},
+		{name: "the namespace branch fails closed on a full accept backlog", namespace: true, sockets: "backlog", timeout: time.Second, wantErr: true},
+	}
+	const probe = time.Second
+	notReady := regexp.MustCompile(`cc-remote: service capt did not become ready in [0-9]+\.[0-9]s \(deadline 1s\): it must be running and (\S+) must accept a connection; its log is (\S+)`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readyTimeout = tt.timeout
+			t.Cleanup(func() { readyTimeout = 30 * time.Second })
+			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			writePluginTestFile(t, filepath.Join(h.fakes, "service-status"), []byte(tt.status+"\n"), 0o600)
+			writePluginTestFile(t, filepath.Join(h.fakes, "nohup"), []byte("#!/bin/sh\necho \"nohup $*\" >> \"$FAKE_LOG\"\n"), 0o700)
+			if tt.stall {
+				writePluginTestFile(t, filepath.Join(h.fakes, "stall-get"), nil, 0o600)
+			}
+			if tt.namespace {
+				if err := os.Remove(filepath.Join(h.fakes, "sprite-env")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, service := range inventory.Services {
+				if tt.existing {
+					writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-"+service.Name), nil, 0o600)
+				}
+				switch {
+				case tt.sockets == "listening", tt.sockets == "late" && service.Name == "cookiesync":
+					listenReady(t, h.home, service.Ready)
+				case tt.sockets == "stale":
+					listener := listenReady(t, h.home, service.Ready)
+					listener.SetUnlinkOnClose(false)
+					if err := listener.Close(); err != nil {
+						t.Fatal(err)
+					}
+				case tt.sockets == "backlog":
+					listenFullBacklog(t, h.home, service.Ready)
+				}
+			}
+			var out string
+			var err error
+			started := time.Now()
+			if tt.sockets == "late" {
+				done := startArtifactScript(h.command("bash", filepath.Join(h.fakes, "plugins.sh"), "configure"))
+				deadline := time.Now().Add(10 * time.Second)
+				for countCall(h.calls(), "sprite-env services get cc-remote-capt state=present") < 3 {
+					select {
+					case result := <-done:
+						t.Fatalf("configure exited before the capt socket listened: %v %s", result.err, result.out)
+					default:
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("configure never polled the capt service")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if countCall(h.calls(), "cookiesync install state=present") != 0 {
+					t.Error("cookiesync install ran before every socket accepted")
+				}
+				listenReady(t, h.home, ".s/capt")
+				result := <-done
+				out, err = string(result.out), result.err
+			} else {
+				out, err = h.plugins("configure")
+			}
+			elapsed := time.Since(started)
+			calls := h.calls()
+			installs := countCall(calls, "cookiesync install state=present")
+			creates, mutations, spriteEnv := 0, 0, 0
+			for _, call := range calls {
+				switch {
+				case strings.HasPrefix(call, "sprite-env services create "):
+					creates++
+				case strings.HasPrefix(call, "sprite-env services start "), strings.HasPrefix(call, "sprite-env services restart "):
+					mutations++
+				}
+				if strings.HasPrefix(call, "sprite-env ") {
+					spriteEnv++
+				}
+			}
+			wantCreates := 2
+			if tt.existing || tt.namespace {
+				wantCreates = 0
+			}
+			if tt.wantErr {
+				match := notReady.FindStringSubmatch(out)
+				if exitCode(err) != 1 || match == nil || match[1] != filepath.Join(h.home, ".s", "capt") || match[2] != filepath.Join(h.home, ".cc-remote", "services", "capt.log") {
+					t.Fatalf("configure = %v\n%s\nwant exit 1 with %v naming the capt socket and log", err, out, notReady)
+				}
+				if elapsed < tt.timeout || elapsed > tt.timeout+probe+2*time.Second {
+					t.Errorf("configure failed closed after %v, want within [%v, %v]", elapsed, tt.timeout, tt.timeout+probe+2*time.Second)
+				}
+				if installs != 0 || creates != wantCreates || mutations != 0 {
+					t.Errorf("installs=%d creates=%d start/restart=%d although a service never became ready, want 0 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("configure failed: %v\n%s", err, out)
+			}
+			if installs != 1 || creates != wantCreates || mutations != 0 {
+				t.Errorf("installs=%d creates=%d start/restart=%d, want 1 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
+			}
+			if tt.existing && countCall(calls, "sprite-env services get cc-remote-capt state=present") != 2 {
+				t.Errorf("the existing capt service was not gated through sprite-env:\n%s", strings.Join(calls, "\n"))
+			}
+			if tt.namespace {
+				launched := countCall(calls, "nohup setsid HOME/.cc-remote/supervise.py capt") + countCall(calls, "nohup setsid HOME/.cc-remote/supervise.py cookiesync")
+				if spriteEnv != 0 || launched != 2 {
+					t.Errorf("namespace configure made %d sprite-env calls and launched %d supervisors, want 0 and 2:\n%s", spriteEnv, launched, strings.Join(calls, "\n"))
+				}
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -870,18 +1107,32 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 
 func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+	for _, tt := range []struct{ fail, payload, plugins bool }{{false, false, false}, {true, false, false}, {false, true, false}, {false, false, true}} {
+		fail, payload, plugins := tt.fail, tt.payload, tt.plugins
+		t.Run(fmt.Sprintf("fail=%t payload=%t plugins=%t", fail, payload, plugins), func(t *testing.T) {
 			names := []string{"first", "second", "existing", "third", "fourth", "cookiesync"}
 			inventory := Inventory{
 				Version:    SchemaVersion,
 				Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
 				Cookiesync: &Cookiesync{SchemaFingerprint: digest},
 			}
+			var state fakeState
+			executables := map[string]string{}
 			for _, name := range names {
-				inventory.Services = append(inventory.Services, Service{Name: name, Command: []string{"cookiesync", "supervise"}})
+				service := Service{Name: name, Command: []string{"cookiesync", "supervise"}, Ready: ".s/" + name}
+				if plugins && name != "cookiesync" {
+					service = Service{Name: name, Plugin: name + "@tools-market", Command: []string{"bin/" + name, "supervise"}, Ready: ".s/" + name}
+					plugin := installedPlugin(service.Plugin, "1.0.0")
+					plugin["installPath"] = filepath.Join("/plugins", name)
+					state.Plugins = append(state.Plugins, plugin)
+					executables[name] = filepath.Join("/plugins", name, "bin", name)
+				}
+				inventory.Services = append(inventory.Services, service)
 			}
-			host := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			host := newPluginsHost(t, inventory, nil, state, nil)
+			for _, name := range names {
+				listenReady(t, host.home, ".s/"+name)
+			}
 			starts := make(chan string, len(names))
 			release := make(chan struct{})
 			cookieRelease := make(chan struct{})
@@ -939,13 +1190,23 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 				if call.Args[1] == "get" {
 					lock.Lock()
 					gets = append(gets, name)
+					created := finished[name]
 					lock.Unlock()
-					if name != "cc-remote-existing" {
+					switch {
+					case created || name == "cc-remote-existing":
+						if _, err := fmt.Fprintln(w, `{"state":{"status":"running"}}`); err != nil {
+							t.Errorf("write the status of %s: %v", name, err)
+						}
+					case !payload || name != "cc-remote-payload":
 						w.WriteHeader(http.StatusNotFound)
 					}
 					return
 				}
-				want := []string{"services", "create", name, "--cmd", filepath.Join(host.home, ".cc-remote", "supervise.py"), "--args", strings.TrimPrefix(name, "cc-remote-"), "--no-stream"}
+				want := []string{"services", "create", name, "--cmd", filepath.Join(host.home, ".cc-remote", "supervise.py"), "--args", strings.TrimPrefix(name, "cc-remote-")}
+				if payload {
+					want = append(want, "--needs", "cc-remote-payload")
+				}
+				want = append(want, "--duration", "1ms", "--no-stream")
 				if !slices.Equal(call.Args, want) || call.Input != "" {
 					t.Errorf("service create = %v input=%q, want %v with empty stdin", call.Args, call.Input, want)
 				}
@@ -979,7 +1240,7 @@ args = sys.argv[1:]
 request = {"program": os.path.basename(sys.argv[0]), "args": args, "input": sys.stdin.read() if args[:2] == ["services", "create"] else ""}
 try:
     with urllib.request.urlopen(os.environ["TEST_SERVICE_API"], json.dumps(request).encode()) as response:
-        response.read()
+        sys.stdout.write(response.read().decode())
 except urllib.error.HTTPError:
     sys.exit(7)
 `
@@ -989,7 +1250,8 @@ except urllib.error.HTTPError:
 				}
 			}
 			cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "configure")
-			cmd.Env = append(os.Environ(), "HOME="+host.home, "XDG_CONFIG_HOME="+filepath.Join(host.home, ".config"), "PATH="+host.fakes+":"+os.Getenv("PATH"), "TEST_SERVICE_API="+server.URL)
+			cmd.Env = append(os.Environ(), "HOME="+host.home, "XDG_CONFIG_HOME="+filepath.Join(host.home, ".config"), "PATH="+host.fakes+":"+os.Getenv("PATH"), "TEST_SERVICE_API="+server.URL,
+				"FAKE_STATE="+filepath.Join(host.fakes, "state.json"), "FAKE_CATALOG="+filepath.Join(host.fakes, "catalog.json"), "FAKE_LOG="+filepath.Join(host.fakes, "calls.log"))
 			cmd.Stdin = strings.NewReader("retained-input\n")
 			done := startArtifactScript(cmd)
 			for range 4 {
@@ -1021,12 +1283,16 @@ except urllib.error.HTTPError:
 			finishArtifactScript(t, done, fail)
 			lock.Lock()
 			defer lock.Unlock()
-			wantGets := make([]string, len(names))
-			for i, name := range names {
-				wantGets[i] = "cc-remote-" + name
+			wantGets := make([]string, 0, 1+len(names))
+			wantGets = append(wantGets, "cc-remote-payload")
+			for _, name := range names {
+				wantGets = append(wantGets, "cc-remote-"+name)
+			}
+			if !fail {
+				wantGets = slices.Concat(wantGets, wantGets[1:])
 			}
 			if !slices.Equal(gets, wantGets) {
-				t.Errorf("get order = %v, want %v", gets, wantGets)
+				t.Errorf("get order = %v, want the existence checks then one readiness check per service: %v", gets, wantGets)
 			}
 			wantCreates := []string{"cc-remote-first", "cc-remote-second", "cc-remote-third", "cc-remote-fourth"}
 			if !fail {
@@ -1043,6 +1309,19 @@ except urllib.error.HTTPError:
 			for _, name := range wantCreates {
 				if !finished[name] {
 					t.Errorf("Configure returned before create completed: %s", name)
+				}
+			}
+			wantLists := 0
+			if plugins {
+				wantLists = 1
+			}
+			if got := countCall(host.calls(), "claude plugin list --json"); got != wantLists {
+				t.Errorf("configure read the plugin list %d times, want %d", got, wantLists)
+			}
+			for _, name := range names {
+				want := "exec " + quote(cmp.Or(executables[name], filepath.Join(host.fakes, "cookiesync"))) + " 'supervise'\n"
+				if recipe, err := os.ReadFile(filepath.Join(host.home, ".cc-remote", "services", name)); err != nil || string(recipe) != want {
+					t.Errorf("service %s recipe = %q, %v; want %q", name, recipe, err, want)
 				}
 			}
 		})

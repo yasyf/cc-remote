@@ -20,6 +20,8 @@ apt:
     - libxkbcommon0
     - fonts-liberation
     - fonts-noto-color-emoji
+    - libnss3-tools
+    - fontconfig
   t64:
     - libasound2
     - libatk-bridge2.0-0
@@ -27,6 +29,31 @@ apt:
     - libgtk-3-0
   remove:
     - watchman
+  payload:
+    resident:
+      - bubblewrap
+      - dbus-user-session
+      - fontconfig-config
+    closure:
+      - libdrm2
+      - libgbm1
+      - libnss3
+      - libxkbcommon0
+      - fonts-liberation
+      - fonts-noto-color-emoji
+      - libasound2t64
+      - libatk-bridge2.0-0t64
+      - libcups2t64
+      - libgtk-3-0t64
+      - libnss3-tools
+      - fontconfig
+      - xkb-data
+    bins: [certutil, fc-match]
+    fonts: ["Liberation Sans", "Noto Color Emoji"]
+    consumers:
+      - .agent-browser/browsers/chrome-154.0.8037.92/chrome-linux64/chrome
+    projections:
+      - /usr/share/X11/xkb
 
 system:
   - name: uv
@@ -179,14 +206,17 @@ cookiesync:
 services:
   - name: capt-hookd
     command: [capt-hookd, supervise]
+    ready: .daemonkit/a/com.example.capt-hookd/sv.sock
   - name: example-plugin
     plugin: example-plugin@example-marketplace
     command: [bin/example-plugin, serve]
+    ready: .daemonkit/a/com.example.plugin/sv.sock
     env:
       EXAMPLE_PORT: ${EXAMPLE_PORT}
       EXAMPLE_URL: http://127.0.0.1:${EXAMPLE_PORT}
   - name: cookiesync
     command: [cookiesync, supervise]
+    ready: .daemonkit/a/com.example.cookiesync/sv.sock
 
 prepare:
   - mkdir -p "$HOME/.cache/example"

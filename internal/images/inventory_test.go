@@ -1,6 +1,7 @@
 package images
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -38,8 +39,8 @@ func validInventory() Inventory {
 		CaptainHook:  &CaptainHook{Version: "1.0.0", URL: "https://example.com/hook.tar.gz", SHA256: digest},
 		Cookiesync:   &Cookiesync{SchemaFingerprint: digest},
 		Services: []Service{
-			{Name: "hooks", Plugin: "hooks@market", Command: []string{"bin/hooks", "serve"}, Env: map[string]string{"URL": "http://127.0.0.1:${PORT}"}},
-			{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}},
+			{Name: "hooks", Plugin: "hooks@market", Command: []string{"bin/hooks", "serve"}, Ready: ".daemonkit/a/com.example.hooks/sv.sock", Env: map[string]string{"URL": "http://127.0.0.1:${PORT}"}},
+			{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}, Ready: ".daemonkit/a/com.example.cookiesync/sv.sock"},
 		},
 		Prepare:   []string{"mkdir -p ~/.cache/example"},
 		Configure: Configure{Env: []string{"PORT"}, Run: []string{"mkdir -p ~/.example"}},
@@ -134,6 +135,34 @@ func TestValidateRejects(t *testing.T) {
 		{"unpinned base image", func(i *Inventory) { i.Image.Base = "ubuntu:24.04" }, `image.base "ubuntu:24.04" is not pinned by @sha256 digest`},
 		{"bad user", func(i *Inventory) { i.Image.User = "Root User" }, `image.user "Root User" is not a Linux user name`},
 		{"apt name", func(i *Inventory) { i.Apt.T64 = []string{"lib asound"} }, `apt.t64: "lib asound" is not a Debian package name`},
+		{"apt payload closure name", func(i *Inventory) { i.Apt.Payload = &AptPayload{Closure: []string{"Libnss3"}} }, `apt.payload.closure: "Libnss3" is not a Debian package name`},
+		{"apt payload without a closure", func(i *Inventory) { i.Apt.Payload = &AptPayload{Resident: []string{"bubblewrap"}} }, "apt.payload.closure names no package, so the payload would carry no closure"},
+		{"apt payload package in both sets", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Resident: []string{"libnss3"}, Closure: []string{"libnss3"}}
+		}, `apt.payload.closure: "libnss3" is also under apt.payload.resident`},
+		{"apt payload system bin", func(i *Inventory) { i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Bins: []string{"uv"}} }, `apt.payload.bins: "uv" is already a system bin`},
+		{"apt payload user link", func(i *Inventory) {
+			i.Links = append(i.Links, "certutil")
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Bins: []string{"certutil"}}
+		}, `apt.payload.bins: "certutil" is already a user link`},
+		{"apt payload font without fc-match", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Fonts: []string{"Noto Color Emoji"}}
+		}, "apt.payload.fonts: proving a family needs fc-match under apt.payload.bins"},
+		{"apt payload font name", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Bins: []string{"fc-match"}, Fonts: []string{"Noto; rm -rf /"}}
+		}, `apt.payload.fonts: "Noto; rm -rf /" is not a font family name`},
+		{"apt payload consumer", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Consumers: []string{"/usr/bin/chrome"}}
+		}, `apt.payload.consumers: "/usr/bin/chrome" is neither a clean path relative to the home directory nor under /opt/cc-remote`},
+		{"apt payload relative projection", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Projections: []string{"usr/share/X11/xkb"}}
+		}, `apt.payload.projections: "usr/share/X11/xkb" is not a clean absolute directory path`},
+		{"apt payload exposed projection", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Projections: []string{"/usr/local/share/icons"}}
+		}, `apt.payload.projections: "/usr/local/share/icons" is under a tree the payload already exposes`},
+		{"apt payload repeated projection", func(i *Inventory) {
+			i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Projections: []string{"/usr/share/themes", "/usr/share/themes"}}
+		}, `apt.payload.projections: "/usr/share/themes" is listed twice`},
 		{"missing digest", func(i *Inventory) { i.Tools[0].SHA256 = "" }, "tools[jq]: set exactly one of sha256 and sha512"},
 		{"two digests", func(i *Inventory) { i.Tools[0].SHA512 = digest + digest }, "tools[jq]: set exactly one of sha256 and sha512"},
 		{"short sha256", func(i *Inventory) { i.Tools[0].SHA256 = "abc" }, "tools[jq]: sha256 is not 64 lowercase hex digits"},
@@ -187,6 +216,10 @@ func TestValidateRejects(t *testing.T) {
 		{"service env undeclared", func(i *Inventory) { i.Configure.Env = nil }, "services[hooks].env: URL references ${PORT}, which configure.env does not declare"},
 		{"service path command", func(i *Inventory) { i.Services[1].Command = []string{"/usr/bin/cookiesync"} }, `services[cookiesync]: command "/usr/bin/cookiesync" is not a bin name on PATH`},
 		{"service unknown plugin", func(i *Inventory) { i.Services[0].Plugin = "other@market" }, `services[hooks]: plugin "other@market" is not under claude.plugins`},
+		{"service without ready", func(i *Inventory) { i.Services[1].Ready = "" }, `services[cookiesync]: ready "" is not a clean socket path relative to the home directory`},
+		{"service absolute ready", func(i *Inventory) { i.Services[1].Ready = "/run/cookiesync/sv.sock" }, `services[cookiesync]: ready "/run/cookiesync/sv.sock" is not a clean socket path relative to the home directory`},
+		{"service escaping ready", func(i *Inventory) { i.Services[0].Ready = "../sv.sock" }, `services[hooks]: ready "../sv.sock" is not a clean socket path relative to the home directory`},
+		{"service unclean ready", func(i *Inventory) { i.Services[0].Ready = ".daemonkit//sv.sock" }, `services[hooks]: ready ".daemonkit//sv.sock" is not a clean socket path relative to the home directory`},
 		{"empty configure step", func(i *Inventory) { i.Configure.Run = []string{" "} }, "configure.run: a step is empty"},
 		{"empty profile prepare step", func(i *Inventory) {
 			i.Profiles["stack"] = Profile{Prepare: []string{""}}
@@ -233,5 +266,28 @@ func TestValidateAcceptsRepeatedArtifactNamesWithDistinctDestinations(t *testing
 	}}
 	if err := inventory.Validate(); err != nil {
 		t.Fatalf("distinct destinations rejected: %v", err)
+	}
+}
+
+func TestLoadAcceptsTheAptPayloadShape(t *testing.T) {
+	inv, err := Load("testdata/apt-payload-shape.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := inv.Apt.Payload
+	if payload == nil {
+		t.Fatal("the fixture loaded without its apt.payload section")
+	}
+	counts := map[string]int{"resident": len(payload.Resident), "closure": len(payload.Closure), "bins": len(payload.Bins), "fonts": len(payload.Fonts), "consumers": len(payload.Consumers)}
+	if want := map[string]int{"resident": 11, "closure": 92, "bins": 6, "fonts": 4, "consumers": 2}; !reflect.DeepEqual(counts, want) {
+		t.Errorf("apt.payload counts = %v, want %v", counts, want)
+	}
+	for _, consumer := range payload.Consumers {
+		if !relative(consumer) {
+			t.Errorf("consumer %q is not home-relative", consumer)
+		}
+	}
+	if links := closure(inv).Links; len(links) != 9 {
+		t.Errorf("the closure exposes %d links, want 6 bins and 3 share trees", len(links))
 	}
 }

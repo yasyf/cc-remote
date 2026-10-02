@@ -130,7 +130,7 @@ exec %s "$@"
 			if err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command("bash", filepath.Join(h.fakes, "plugins.sh"), "install", "stamp")
+			cmd := exec.Command("bash", filepath.Join(h.fakes, "plugins.sh"), "install")
 			cmd.Stdin = strings.NewReader("synthetic-token\nretained-input\n")
 			cmd.Env = append(os.Environ(), "HOME="+h.home, "PATH="+h.fakes+":"+os.Getenv("PATH"), "FAKE_STATE="+filepath.Join(h.fakes, "state.json"), "FAKE_CATALOG="+filepath.Join(h.fakes, "catalog.json"), "FAKE_LOG="+filepath.Join(h.fakes, "calls.log"), "FAKE_SOURCES="+filepath.Join(h.fakes, "sources"), "REAL_GIT="+realGit)
 			done := startArtifactScript(cmd)
@@ -165,7 +165,7 @@ exec %s "$@"
 			if got := exitCode(result.err); got != tt.wantExit {
 				t.Fatalf("install exit=%d, want %d: %s", got, tt.wantExit, result.out)
 			}
-			for _, name := range []string{"captain-installed", "prepared", ".cc-remote/ready"} {
+			for _, name := range []string{"captain-installed", "prepared"} {
 				_, err := os.Stat(filepath.Join(h.home, name))
 				if tt.wantExit != 0 && !os.IsNotExist(err) {
 					t.Errorf("failed install reached %s: %v", name, err)
@@ -174,8 +174,20 @@ exec %s "$@"
 					t.Errorf("successful install omitted %s: %v", name, err)
 				}
 			}
-			if tt.wantExit == 0 && h.version("hook@tools-market") != "1.0.0" {
+			if _, err := os.Stat(filepath.Join(h.home, ".cc-remote", "ready")); !os.IsNotExist(err) {
+				t.Errorf("install wrote the ready stamp, which only publish writes: %v", err)
+			}
+			if tt.wantExit != 0 {
+				return
+			}
+			if h.version("hook@tools-market") != "1.0.0" {
 				t.Error("Claude plugin pin was not installed")
+			}
+			if out, err := h.plugins("publish", digest); err != nil {
+				t.Fatalf("publish after a successful install failed: %v\n%s", err, out)
+			}
+			if stamp, err := os.ReadFile(filepath.Join(h.home, ".cc-remote", "ready")); err != nil || string(stamp) != digest+"\n" {
+				t.Errorf("ready stamp after publish = %q, %v; want %q", stamp, err, digest+"\n")
 			}
 		})
 	}

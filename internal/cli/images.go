@@ -42,7 +42,7 @@ func newImagesRenderCmd() *cobra.Command {
 				return fmt.Errorf("write plugins.sh: %w", err)
 			}
 			if inventory.Image == nil {
-				return os.WriteFile(filepath.Join(out, "provision.sh"), scripts.Provision, 0o600)
+				return os.WriteFile(filepath.Join(out, "provision.sh"), scripts.ProvisionScript, 0o600)
 			}
 			context, err := images.RenderImage(inventory)
 			if err != nil {
