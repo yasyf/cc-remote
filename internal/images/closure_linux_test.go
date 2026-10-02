@@ -856,6 +856,21 @@ func (h *captureHost) liveFonts() {
 	}
 }
 
+func (h *captureHost) resident(t *testing.T) []string {
+	t.Helper()
+	var manifest struct {
+		Resident []string `json:"resident"`
+	}
+	raw, err := os.ReadFile(h.closure + "/closure.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("closure.json: %v\n%s", err, raw)
+	}
+	return manifest.Resident
+}
+
 func (h *captureHost) entries() []string {
 	h.t.Helper()
 	var paths []string
@@ -1120,18 +1135,23 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 				writePluginTestFile(h.t, filepath.Join(h.build, name), append(recorded, extra...), 0o644)
 			}
 		}, check: func(t *testing.T, h *captureHost) {
-			var manifest struct {
-				Resident []string `json:"resident"`
+			if got, want := h.resident(t), []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca-ide"}; !slices.Equal(got, want) {
+				t.Errorf("resident = %v, want %v", got, want)
 			}
-			raw, err := os.ReadFile(h.closure + "/closure.json")
-			if err != nil {
-				t.Fatal(err)
+		}},
+		{name: "a resident seed already on the base keeps its new dependency resident", mutate: func(h *captureHost) {
+			h.dpkg.Packages["bubblewrap"] = &fakePackage{Version: "0.11.0-1", Depends: "libnew2 (>= 1.0)", Files: []string{"/usr/bin/bwrap"}}
+			h.dpkg.Packages["libnew2"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew2.so.2"}}
+			for name, extra := range map[string]string{"packages.before": "ii \tbubblewrap\n", "packages.after": "ii \tbubblewrap\nii \tlibnew2\n"} {
+				recorded, err := os.ReadFile(filepath.Join(h.build, name))
+				if err != nil {
+					h.t.Fatal(err)
+				}
+				writePluginTestFile(h.t, filepath.Join(h.build, name), append(recorded, extra...), 0o644)
 			}
-			if err := json.Unmarshal(raw, &manifest); err != nil {
-				t.Fatalf("closure.json: %v\n%s", err, raw)
-			}
-			if want := []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca-ide"}; !slices.Equal(manifest.Resident, want) {
-				t.Errorf("resident = %v, want %v", manifest.Resident, want)
+		}, check: func(t *testing.T, h *captureHost) {
+			if got, want := h.resident(t), []string{"libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
+				t.Errorf("resident = %v, want %v", got, want)
 			}
 		}},
 		{name: "the closure is captured, sealed and exposed"},

@@ -70,14 +70,13 @@ def partition(seeds, new, base):
     for line in dpkg("-W", "-f", "${Package}\t${Depends}\t${Pre-Depends}\t${Provides}\n", *sorted(new | base)).splitlines():
         pkg, depends, predepends, provides = line.split("\t")
         provided = [re.sub(r"[\s(].*$", "", name.strip()) for name in provides.split(",") if name.strip()]
+        meta[pkg] = (clauses(depends) + clauses(predepends), provided)
         if pkg in base:
             satisfied.update(provided)
-        else:
-            meta[pkg] = (clauses(depends) + clauses(predepends), provided)
     for pkg in sorted(new):
         for provided in meta[pkg][1]:
             providers.setdefault(provided, []).append(pkg)
-    resident, queue = set(), [seed for seed in seeds if seed in new]
+    resident, queue = set(), [seed for seed in seeds if seed in new or seed in base]
     while queue:
         pkg = queue.pop()
         if pkg in resident:
@@ -89,7 +88,7 @@ def partition(seeds, new, base):
             candidates = [c for alt in clause for c in ([alt] if alt in new else providers.get(alt, []))]
             if candidates and not any(c in resident for c in candidates):
                 queue.append(candidates[0])
-    return resident
+    return resident & new
 
 
 def versions(packages):
