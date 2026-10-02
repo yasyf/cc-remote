@@ -103,9 +103,9 @@ runs these lanes concurrently:
 | Lane | Order |
 | --- | --- |
 | Mount | Stream or fetch the payload when one is configured, admit it, and mount it. |
-| Packages | Run the remaining `apt-get` work and verify Debian artifacts on machines provisioned in place. With `apt.payload`, wait for the mount, then install the payload's captured resident packages offline. |
+| Packages | Run the remaining `apt-get` work and verify Debian artifacts on machines provisioned in place. With `apt.payload`, stream or fetch the pinned resident packages archive through the same admission as the payload, extract it once its sha256 matches, and install its captured packages offline without waiting for the mount. |
 | Checkout | Check out the pinned source commit, then run nonempty profile preparation after package and tool installation succeed. |
-| Tools | Wait for the mount, provision system tools in place, install user tools and plugins, then wait for the packages lane before configuring and enrolling in the tailnet. |
+| Tools | Wait for the mount, provision system tools in place, install user tools and plugins, then wait for the packages lane before configuring and enrolling in the tailnet. The mount fails when the payload's manifest names a packages archive other than the pinned one. |
 
 Checkout overlaps installation; profile preparation and configuration start only
 after both installs succeed. Create publishes the

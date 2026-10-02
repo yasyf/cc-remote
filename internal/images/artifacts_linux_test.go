@@ -115,7 +115,11 @@ func TestVerifyLinkChecksOnlySpellingUntilThePublishRunsTheTarget(t *testing.T) 
 }
 
 func library(root, script string) *exec.Cmd {
-	raw, err := assets.FS.ReadFile("artifacts.sh")
+	templates, err := parseFrom(assets.FS, Inventory{}, "artifacts.sh")
+	if err != nil {
+		panic(err)
+	}
+	raw, err := execute(templates, "artifacts.sh", nil)
 	if err != nil {
 		panic(err)
 	}

@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -66,15 +65,15 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 	tests := []struct {
 		name  string
 		clock *tickingClock
-		run   func(s *Session) error
+		run   func(ctx context.Context, s *Session) error
 		err   error
 		want  []map[string]any
 	}{
 		{
 			name:  "one phase that succeeds",
 			clock: at(0, 2, 3.5, 4),
-			run: func(s *Session) error {
-				return s.timed(laneCheckout, "checkout", "ws-1", func() error { return nil })
+			run: func(ctx context.Context, s *Session) error {
+				return s.timed(ctx, laneCheckout, "checkout", "ws-1", func() error { return nil })
 			},
 			want: []map[string]any{
 				{"msg": "phase", "phase": "checkout", "lane": "checkout", "machine": "ws-1", "start": 2.0, "end": 3.5, "seconds": 1.5, "ok": true},
@@ -86,8 +85,8 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 		{
 			name:  "one phase that fails",
 			clock: at(0, 0.25, 1.2504, 2),
-			run: func(s *Session) error {
-				return s.timed(lanePackages, "packages", "ws-1", func() error { return boom })
+			run: func(ctx context.Context, s *Session) error {
+				return s.timed(ctx, lanePackages, "packages", "ws-1", func() error { return boom })
 			},
 			err: boom,
 			want: []map[string]any{
@@ -100,9 +99,9 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 		{
 			name:  "overlapping phases on two lanes",
 			clock: at(0, 1, 2, 5, 7, 9),
-			run: func(s *Session) error {
-				return s.timed(laneMount, "payload.stage", "ws-1", func() error {
-					return s.timed(laneCheckout, "checkout", "ws-1", func() error { return nil })
+			run: func(ctx context.Context, s *Session) error {
+				return s.timed(ctx, laneMount, "payload.stage", "ws-1", func() error {
+					return s.timed(ctx, laneCheckout, "checkout", "ws-1", func() error { return nil })
 				})
 			},
 			want: []map[string]any{
@@ -119,12 +118,12 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var logged bytes.Buffer
 			s := &Session{Log: slog.New(slog.NewJSONHandler(&logged, nil)), Now: tt.clock.now}
-			s.begin()
-			err := tt.run(s)
-			if err != tt.err {
+			ctx := s.begin(context.Background())
+			err := tt.run(ctx, s)
+			if !errors.Is(err, tt.err) {
 				t.Fatalf("timed = %v, want %v unchanged", err, tt.err)
 			}
-			s.summarize("ws-1", err)
+			s.summarize(ctx, "ws-1", err)
 			if got := records(t, &logged); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("records = %v\nwant %v", got, tt.want)
 			}
@@ -138,17 +137,149 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 func TestTheSummaryListsPhasesInStartOrder(t *testing.T) {
 	var logged bytes.Buffer
 	s := &Session{Log: slog.New(slog.NewJSONHandler(&logged, nil)), Now: at(0, 3, 4, 1, 2, 5).now}
-	s.begin()
+	ctx := s.begin(context.Background())
 	for _, phase := range []string{"late", "early"} {
-		if err := s.timed(laneMain, phase, "ws-1", func() error { return nil }); err != nil {
+		if err := s.timed(ctx, laneMain, phase, "ws-1", func() error { return nil }); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.summarize("ws-1", nil)
+	s.summarize(ctx, "ws-1", nil)
 	got := records(t, &logged)
 	line := strings.Split(strings.TrimSpace(logged.String()), "\n")[len(got)-1]
 	if early, late := strings.Index(line, `"early":`), strings.Index(line, `"late":`); early < 0 || late < 0 || early > late {
 		t.Errorf("summary %s does not list early before late", line)
+	}
+}
+
+func TestOperationsOnOneSessionOwnTheirSpansAndExecCounts(t *testing.T) {
+	h := newHarness(t, false)
+	for _, machine := range []string{"ws-1", "ws-2"} {
+		if _, err := h.fake.Create(context.Background(), providers.Spec{Name: machine}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var logged bytes.Buffer
+	h.session.Log = slog.New(slog.NewJSONHandler(&logged, nil))
+	clock := at(0, 10, 1, 2, 11, 12, 3, 13)
+	h.session.Now = clock.now
+	first := h.session.begin(context.Background())
+	second := h.session.begin(context.Background())
+	if err := h.session.timed(first, laneMain, "alpha", "ws-1", func() error {
+		return h.session.exec("ws-1")(first, []string{"true"}, nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.timed(second, lanePackages, "beta", "ws-2", func() error {
+		for range 2 {
+			if _, err := h.session.capture("ws-2")(second, []string{"true"}, nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.session.execute(context.Background(), "ws-1", []string{"true"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.session.summarize(first, "ws-1", nil)
+	h.session.summarize(second, "ws-2", nil)
+	want := []map[string]any{
+		{"msg": "phase", "phase": "alpha", "lane": "main", "machine": "ws-1", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+		{"msg": "phase", "phase": "beta", "lane": "packages", "machine": "ws-2", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+		{"msg": "create phases", "workspace": "ws-1", "seconds": 3.0, "execs": 1.0, "ok": true, "phases": map[string]any{
+			"alpha": map[string]any{"lane": "main", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+		}},
+		{"msg": "create phases", "workspace": "ws-2", "seconds": 3.0, "execs": 2.0, "ok": true, "phases": map[string]any{
+			"beta": map[string]any{"lane": "packages", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+		}},
+	}
+	if got := records(t, &logged); !reflect.DeepEqual(got, want) {
+		t.Errorf("records = %v\nwant %v", got, want)
+	}
+	if len(clock.ticks) != 0 {
+		t.Errorf("%d clock readings left unread", len(clock.ticks))
+	}
+}
+
+type steppingClock struct {
+	mu    sync.Mutex
+	ticks int
+}
+
+func (c *steppingClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ticks++
+	return time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC).Add(time.Duration(c.ticks-1) * time.Second)
+}
+
+func TestOverlappingCreatesOnOneSessionSummarizeOnlyTheirOwnPhases(t *testing.T) {
+	h := newHarness(t, false)
+	var logged bytes.Buffer
+	h.session.Log = slog.New(slog.NewJSONHandler(&logged, nil))
+	h.session.Now = (&steppingClock{}).now
+	parked := h.machine.holdOn(t, "ws-1", prereqsPhase)
+	first := make(chan error, 1)
+	go func() {
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		first <- err
+	}()
+	parked.awaitEntered(t)
+	if _, err := h.session.Create(context.Background(), "ws-2", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	parked.release <- providers.Result{}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	summaries, lines := map[string]map[string]any{}, map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		record := records(t, bytes.NewBufferString(line))[0]
+		if record["msg"] != "create phases" {
+			continue
+		}
+		workspace := record["workspace"].(string)
+		summaries[workspace], lines[workspace] = record, line
+	}
+	if got := slices.Sorted(maps.Keys(summaries)); !slices.Equal(got, []string{"ws-1", "ws-2"}) {
+		t.Fatalf("summaries for %v, want one each for ws-1 and ws-2", got)
+	}
+	spanOf := func(workspace, phase string) (start, end float64) {
+		recorded := summaries[workspace]["phases"].(map[string]any)[phase].(map[string]any)
+		return recorded["start"].(float64), recorded["end"].(float64)
+	}
+	for workspace, summary := range summaries {
+		listed := summary["phases"].(map[string]any)
+		if got, want := slices.Sorted(maps.Keys(listed)), slices.Sorted(maps.Keys(plainLanes)); !slices.Equal(got, want) {
+			t.Errorf("%s lists %v, want %v", workspace, got, want)
+		}
+		last := 0.0
+		for phase := range listed {
+			if n := strings.Count(lines[workspace], `"`+phase+`":`); n != 1 {
+				t.Errorf("%s carries %d %s spans, want its own one", workspace, n, phase)
+			}
+			_, end := spanOf(workspace, phase)
+			last = max(last, end)
+		}
+		if summary["seconds"] != last+2 {
+			t.Errorf("%s ran %v seconds, want %v: its own save and summary readings after its last phase", workspace, summary["seconds"], last+2)
+		}
+		if got, want := summary["execs"], float64(execsOn(h.fake.Calls(), workspace)); got != want {
+			t.Errorf("%s counted %v execs, want the %v made on it", workspace, got, want)
+		}
+		if start, end := spanOf(workspace, "machine.create"); start != 3 || end != 4 {
+			t.Errorf("%s machine.create spans %v..%v, want 3..4 from its own origin", workspace, start, end)
+		}
+		if start, _ := spanOf(workspace, "prerequisites"); start != 6 {
+			t.Errorf("%s prerequisites starts at %v, want 6 from its own origin", workspace, start)
+		}
+	}
+	if _, end := spanOf("ws-2", "prerequisites"); end != 7 {
+		t.Errorf("ws-2 prerequisites ends at %v, want 7", end)
+	}
+	if _, end := spanOf("ws-1", "prerequisites"); end != summaries["ws-2"]["seconds"].(float64)+8 {
+		t.Errorf("ws-1 prerequisites ends at %v, want %v: parked across the whole of ws-2", end, summaries["ws-2"]["seconds"].(float64)+8)
 	}
 }
 
@@ -164,26 +295,28 @@ func execsOn(calls []string, machine string) int {
 
 func newClosureTailnetHarness(t *testing.T) *harness {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "agent.sqfs")
-	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return build(t, true, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+	path, archive := closureFiles(t)
+	return build(t, true, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s, packages: { path: %q, sha256: %s } } }", path, sha, archive, packagesSHA), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+}
+
+var plainLanes = map[string]string{
+	"machine.create": laneMain, "prerequisites": laneMain, "packages": lanePackages,
+	"tools.provision": laneTools, "plugins.stage": laneTools, "tools.install": laneTools,
+	"checkout": laneCheckout, "prepare": laneCheckout, "configure": laneConfigure,
+	"tools.publish": lanePublish, "ssh.target": laneSSH,
 }
 
 func TestEveryCreatePhaseLogsOnceWithItsLaneAndTheSummaryCountsTheExecs(t *testing.T) {
-	plain := map[string]string{
-		"machine.create": laneMain, "prerequisites": laneMain, "packages": lanePackages,
-		"tools.provision": laneTools, "plugins.stage": laneTools, "tools.install": laneTools,
-		"checkout": laneCheckout, "prepare": laneCheckout, "configure": laneConfigure,
-		"tools.publish": lanePublish, "ssh.target": laneSSH,
-	}
+	plain := plainLanes
 	payload := maps.Clone(plain)
 	payload["payload.stage"], payload["payload.mount"] = laneMount, laneMount
 	direct := maps.Clone(plain)
-	direct["payload.url"], direct["payload.fetch"], direct["payload.mount"] = laneMain, laneMount, laneMount
+	direct["payload.url"], direct["payload.fetch"], direct["payload.mount"], direct["loader"], direct["packages.stage"] = laneMain, laneMount, laneMount, laneLoader, lanePackages
 	closure := maps.Clone(payload)
-	closure["loader"] = laneLoader
+	closure["loader"], closure["packages.stage"] = laneLoader, lanePackages
+	directClosure := maps.Clone(closure)
+	delete(directClosure, "packages.stage")
+	directClosure["packages.url"], directClosure["packages.fetch"] = laneMain, lanePackages
 	enrolled := maps.Clone(closure)
 	enrolled["tailnet.enroll"] = laneEnroll
 	tests := []struct {
@@ -203,13 +336,16 @@ func TestEveryCreatePhaseLogsOnceWithItsLaneAndTheSummaryCountsTheExecs(t *testi
 			"checkout": laneCheckout, "prepare": laneCheckout, "configure": laneConfigure,
 			"tools.publish": lanePublish, "ssh.target": laneSSH,
 		}},
-		{"payload", newPayloadHarness, 11, payload},
 		{"direct payload", func(t *testing.T) *harness {
 			h, _ := newDirectPayloadHarness(t, "printf '%s\\n' '"+payloadURL+"'")
 			return h
-		}, 11, direct},
-		{"closure", newClosureHarness, 12, closure},
-		{"closure with a tailnet", newClosureTailnetHarness, 14, enrolled},
+		}, 13, direct},
+		{"closure", newPayloadHarness, 13, closure},
+		{"closure with a direct packages archive", func(t *testing.T) *harness {
+			h, _ := newDirectPackagesHarness(t, "printf '%s\\n' '"+packagesURL+"'")
+			return h
+		}, 13, directClosure},
+		{"closure with a tailnet", newClosureTailnetHarness, 15, enrolled},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

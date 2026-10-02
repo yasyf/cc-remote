@@ -50,9 +50,14 @@ const (
 	mergesPlugins  = "stage-plugins "
 	stagesPayload  = "stage-payload "
 	fetchesPayload = "fetch-payload "
+	stagesDebs     = "stage-packages "
+	fetchesDebs    = "fetch-packages "
 	payloadBytes   = "hsqs squashfs payload bytes"
+	packagesBytes  = "resident packages archive bytes"
+	packagesSHA    = "4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f"
 	urlSentinel    = "X-Amz-Signature=5e11ab1e5e11ab1e5e11ab1e5e11ab1e"
 	payloadURL     = "https://bucket.s3.us-west-2.amazonaws.com/cache-seeds/sources/" + sha + "/tools.sqfs?X-Amz-Algorithm=AWS4-HMAC-SHA256&" + urlSentinel
+	packagesURL    = "https://bucket.s3.us-west-2.amazonaws.com/cache-seeds/sources/" + packagesSHA + "/debs.tar?X-Amz-Algorithm=AWS4-HMAC-SHA256&" + urlSentinel
 	stages         = "plugins.sh.tmp"
 	installs       = "plugins.sh install"
 	publishes      = "plugins.sh publish "
@@ -94,18 +99,24 @@ type scripted struct {
 
 type hold struct {
 	fragment string
+	machine  string
 	entered  chan struct{}
 	release  chan providers.Result
 }
 
 func (m *scripted) hold(t *testing.T, fragment string) *hold {
 	t.Helper()
+	return m.holdOn(t, "", fragment)
+}
+
+func (m *scripted) holdOn(t *testing.T, machine, fragment string) *hold {
+	t.Helper()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.holds == nil {
 		m.holds = map[string]*hold{}
 	}
-	h := &hold{fragment: fragment, entered: make(chan struct{}), release: make(chan providers.Result, 1)}
+	h := &hold{fragment: fragment, machine: machine, entered: make(chan struct{}), release: make(chan providers.Result, 1)}
 	m.holds[fragment] = h
 	t.Cleanup(func() { close(h.release) })
 	return h
@@ -172,7 +183,7 @@ func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Resu
 	missing := m.tailscaleFrom != "" && !m.tailscale && strings.Contains(script, "tailscale")
 	var held *hold
 	for fragment, h := range m.holds {
-		if strings.Contains(script, fragment) {
+		if strings.Contains(script, fragment) && (h.machine == "" || h.machine == id) {
 			held = h
 		}
 	}
@@ -350,18 +361,10 @@ func newImagedHarness(t *testing.T) *harness {
 	return build(t, false, imaged, "{ image: agent-host }", providers.Traits{})
 }
 
-func newPayloadHarness(t *testing.T) *harness {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "agent.sqfs")
-	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return build(t, false, inventory, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
-}
-
 func newDirectPayloadHarness(t *testing.T, script string) (*harness, string) {
 	t.Helper()
-	h := build(t, false, inventory, fmt.Sprintf("{ payload: { url_command: [./payload-url, --expires-in, \"900\"], sha256: %s, size: %d } }", sha, len(payloadBytes)), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+	_, archive := closureFiles(t)
+	h := build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { url_command: [./payload-url, --expires-in, \"900\"], sha256: %s, size: %d, packages: { path: %q, sha256: %s } } }", sha, len(payloadBytes), archive, packagesSHA), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
 	dir := filepath.Dir(h.cfg.Path)
 	recorded := filepath.Join(dir, "recorded")
 	command := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + recorded + ".args\nenv > " + recorded + ".env\n" + script + "\n"
@@ -371,13 +374,35 @@ func newDirectPayloadHarness(t *testing.T, script string) (*harness, string) {
 	return h, recorded
 }
 
-func newClosureHarness(t *testing.T) *harness {
+func closureFiles(t *testing.T) (payload, archive string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "agent.sqfs")
-	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
+	dir := t.TempDir()
+	payload, archive = filepath.Join(dir, "agent.sqfs"), filepath.Join(dir, "agent-debs.tar")
+	for file, content := range map[string]string{payload: payloadBytes, archive: packagesBytes} {
+		if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return payload, archive
+}
+
+func newPayloadHarness(t *testing.T) *harness {
+	t.Helper()
+	path, archive := closureFiles(t)
+	return build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s, packages: { path: %q, sha256: %s } } }", path, sha, archive, packagesSHA), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+}
+
+func newDirectPackagesHarness(t *testing.T, script string) (*harness, string) {
+	t.Helper()
+	path, _ := closureFiles(t)
+	h := build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s, packages: { url_command: [./packages-url], sha256: %s, size: %d } } }", path, sha, packagesSHA, len(packagesBytes)), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+	dir := filepath.Dir(h.cfg.Path)
+	recorded := filepath.Join(dir, "recorded-packages")
+	command := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + recorded + ".args\nenv > " + recorded + ".env\n" + script + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "packages-url"), []byte(command), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+	return h, recorded
 }
 
 func build(t *testing.T, withTailnet bool, tools, machineSpec string, facts providers.Traits) *harness {
@@ -1269,7 +1294,7 @@ func TestResumeRemountsThePayloadOnlyWhenItsDigestChanged(t *testing.T) {
 				}
 				path = moved
 			}
-			machine.Payload = &config.Payload{Path: path, SHA256: tt.sha256}
+			machine.Payload = &config.Payload{Source: config.Source{Path: path, SHA256: tt.sha256}}
 			h.cfg.Profiles["lean"].Machine["fake"] = machine
 			repaid := h.open()
 			if (repaid.Stamp != h.session.Stamp) != tt.remount {
@@ -1977,7 +2002,7 @@ func TestTheClosureLoaderRunsOnceAfterThePackagesAndTheToolInstall(t *testing.T)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newClosureHarness(t)
+			h := newPayloadHarness(t)
 			var creating sync.WaitGroup
 			t.Cleanup(creating.Wait)
 			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
@@ -2004,8 +2029,8 @@ func TestTheClosureLoaderRunsOnceAfterThePackagesAndTheToolInstall(t *testing.T)
 			if err := <-created; err != nil {
 				t.Fatal(err)
 			}
-			h.ordered(0, payloadPhase, packagesPhase+" resident "+sha, loaderPhase, prepares, publishes)
-			h.ordered(0, installs, loaderPhase, configures, publishes)
+			h.ordered(0, stagesDebs+packagesSHA, packagesPhase+" resident "+packagesSHA, loaderPhase, prepares, publishes)
+			h.ordered(0, payloadPhase+sha+" ", installs, loaderPhase, configures, publishes)
 			if h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 || h.machine.ran("ws-1", packagesPhase+" full") != 0 {
 				t.Errorf("the create ran the loader %d times and the resident packages %d times: %q", h.machine.ran("ws-1", loaderPhase), h.machine.ran("ws-1", packagesPhase+" resident"), h.machine.scripts["ws-1"])
 			}
@@ -2013,58 +2038,162 @@ func TestTheClosureLoaderRunsOnceAfterThePackagesAndTheToolInstall(t *testing.T)
 	}
 }
 
-func TestAPayloadWithoutAClosureNeverRunsTheLoader(t *testing.T) {
+func TestOpenRefusesAPayloadWithoutAptPayload(t *testing.T) {
+	h := newPayloadHarness(t)
+	if err := os.WriteFile(h.cfg.Inventory, []byte(inventory), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "profile lean: machine fake mounts a payload, which needs apt.payload in the inventory; only a closure payload is admitted and mounted"
+	if _, err := Open(h.cfg, h.provider, "fake", "lean", h.session.Platform); err == nil || err.Error() != want {
+		t.Errorf("Open = %v, want %q", err, want)
+	}
+	if staged := h.machine.ran("ws-1", stagesDebs) + h.machine.ran("ws-1", fetchesDebs); staged != 0 {
+		t.Errorf("a payload without apt.payload transferred a packages archive %d times", staged)
+	}
+}
+
+func TestTheResidentPackagesInstallWhileThePayloadStreams(t *testing.T) {
 	h := newPayloadHarness(t)
 	var creating sync.WaitGroup
 	t.Cleanup(creating.Wait)
-	mounting, packaging := h.machine.hold(t, payloadPhase), h.machine.hold(t, packagesPhase)
+	streaming, packaging := h.machine.hold(t, stagesPayload), h.machine.hold(t, packagesPhase)
 	created := make(chan error, 1)
 	creating.Go(func() {
 		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
 		created <- err
 	})
-	mounting.awaitEntered(t)
+	streaming.awaitEntered(t)
 	packaging.awaitEntered(t)
+	if mounts := h.machine.ran("ws-1", payloadPhase); mounts != 0 {
+		t.Errorf("the payload mounted %d times while its stream was still held", mounts)
+	}
 	packaging.release <- providers.Result{}
-	mounting.release <- providers.Result{}
+	streaming.release <- providers.Result{}
 	if err := <-created; err != nil {
 		t.Fatal(err)
 	}
-	if h.machine.ran("ws-1", loaderPhase) != 0 {
-		t.Errorf("a payload without apt.payload registered a closure: %q", h.machine.scripts["ws-1"])
+	staged := h.ordered(0, stagesDebs+packagesSHA, packagesPhase+" resident "+packagesSHA, payloadPhase+sha+" ", loaderPhase)
+	if stage := h.machine.scripts["ws-1"][staged[0]]; !strings.HasPrefix(stage, "sudo bash -c ") || !strings.HasSuffix(stage, " "+stagesDebs+packagesSHA) {
+		t.Errorf("the packages archive was staged by %q", stage)
 	}
-	if got, want := h.machine.scripts["ws-1"][h.ordered(0, packagesPhase)[0]], packagesPhase+" resident"; got != want {
-		t.Errorf("the packages lane ran %q, want %q", got, want)
+	if got := h.machine.stdins["ws-1"][staged[0]]; got != packagesBytes {
+		t.Errorf("staged the packages archive from %q, want %q", got, packagesBytes)
+	}
+	if mount := h.machine.scripts["ws-1"][staged[2]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
+		t.Errorf("the payload phase ran as %q, want it to carry the packages pin", mount)
+	}
+	h.ordered(0, stagesPayload+sha, payloadPhase+sha+" ", loaderPhase)
+	if h.machine.ran("ws-1", stagesDebs) != 1 || h.machine.ran("ws-1", fetchesDebs) != 0 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 {
+		t.Errorf("the create ran %q", h.machine.scripts["ws-1"])
 	}
 }
 
-func TestTheResidentPackagesWaitForThePayloadMount(t *testing.T) {
-	h := newClosureHarness(t)
-	var creating sync.WaitGroup
-	t.Cleanup(creating.Wait)
-	mounting, packaging := h.machine.hold(t, payloadPhase), h.machine.hold(t, packagesPhase)
-	created := make(chan error, 1)
-	creating.Go(func() {
-		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
-		created <- err
-	})
-	mounting.awaitEntered(t)
-	packaging.stillParked(t, "while the payload was still mounting")
-	mounting.release <- providers.Result{}
-	packaging.awaitEntered(t)
-	packaging.release <- providers.Result{}
-	if err := <-created; err != nil {
+func TestADirectPackagesArchiveIsFetchedOverStdinWithoutTheURLLeaking(t *testing.T) {
+	h, recorded := newDirectPackagesHarness(t, "printf '%s\\n' '"+packagesURL+"'\nprintf 'presigned %s\\n' '"+packagesURL+"' >&2")
+	var logs, stderr bytes.Buffer
+	h.session.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	h.session.Stderr = &stderr
+	result, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	order := h.ordered(0, payloadPhase, packagesPhase, loaderPhase)
-	if got, want := h.machine.scripts["ws-1"][order[1]], packagesPhase+" resident "+sha; got != want {
-		t.Errorf("the packages lane ran %q, want %q", got, want)
+	order := h.ordered(0, prereqsPhase, fetchesDebs, packagesPhase+" resident "+packagesSHA, loaderPhase, publishes)
+	size := strconv.Itoa(len(packagesBytes))
+	if fetch := h.machine.scripts["ws-1"][order[1]]; !strings.HasPrefix(fetch, "sudo bash -c ") || !strings.HasSuffix(fetch, " "+fetchesDebs+packagesSHA+" "+size) {
+		t.Errorf("the packages archive was fetched by %q", fetch)
+	}
+	if got := h.machine.stdins["ws-1"][order[1]]; got != `url = "`+packagesURL+`"` {
+		t.Errorf("the fetch read %q on stdin, want the curl config carrying the URL", got)
+	}
+	if h.machine.ran("ws-1", stagesDebs) != 0 || h.machine.ran("ws-1", fetchesDebs) != 1 || h.machine.ran("ws-1", stagesPayload) != 1 || h.machine.ran("ws-1", fetchesPayload) != 0 || h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the archive was staged %d times and fetched %d times, the payload was staged %d times and fetched %d times, and the stamp is %q", h.machine.ran("ws-1", stagesDebs), h.machine.ran("ws-1", fetchesDebs), h.machine.ran("ws-1", stagesPayload), h.machine.ran("ws-1", fetchesPayload), h.machine.ready["ws-1"])
+	}
+	for i, script := range h.machine.scripts["ws-1"] {
+		if strings.Contains(script, urlSentinel) || (i != order[1] && strings.Contains(h.machine.stdins["ws-1"][i], urlSentinel)) {
+			t.Errorf("exec %d carries the packages URL outside the fetch's stdin: %q", i, script)
+		}
+	}
+	args, err := os.ReadFile(recorded + ".args")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := packagesSHA + "\n" + size + "\n"; string(args) != want {
+		t.Errorf("the url command ran with %q, want %q", args, want)
+	}
+	env, err := os.ReadFile(recorded + ".env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marshalled, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := os.ReadFile(h.session.State.Workspace("ws-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssh, err := os.ReadFile(h.session.State.SSH("ws-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), `"msg":"fetched the packages archive"`) {
+		t.Errorf("the log lacks the fetch milestone:\n%s", logs.String())
+	}
+	for name, text := range map[string]string{"the url command's environment": string(env), "the log": logs.String(), "stderr": stderr.String(), "the result": string(marshalled), "the workspace record": string(record), "the ssh fragment": string(ssh)} {
+		if strings.Contains(text, urlSentinel) {
+			t.Errorf("%s carries the packages URL", name)
+		}
 	}
 }
 
-func TestAResumeInstallsTheResidentPackagesFromTheNewPayload(t *testing.T) {
-	next := strings.Repeat("ab", 32)
-	h := newClosureHarness(t)
+func TestAFailedPackagesURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
+	h, _ := newDirectPackagesHarness(t, "printf 'aws s3 presign %s failed\\n' '"+packagesURL+"' >&2\nexit 1")
+	var logs, stderr bytes.Buffer
+	h.session.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	h.session.Stderr = &stderr
+	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+	if want := "packages archive url_command ./packages-url: exit status 1"; err == nil || err.Error() != want {
+		t.Fatalf("Create = %v, want %q", err, want)
+	}
+	if stderr.Len() != 0 || len(h.fake.Calls()) != 0 {
+		t.Errorf("the failed url command reached stderr %q or the provider %q", stderr.String(), h.fake.Calls())
+	}
+	if _, ok := h.record("ws-1"); ok {
+		t.Error("the failed create kept its record")
+	}
+	for name, text := range map[string]string{"the error": err.Error(), "the log": logs.String(), "stderr": stderr.String()} {
+		if strings.Contains(text, urlSentinel) {
+			t.Errorf("%s carries the packages URL", name)
+		}
+	}
+}
+
+func TestTheClosureNeedsItsPackagesArchivePin(t *testing.T) {
+	tests := []struct {
+		name     string
+		tools    string
+		packages *config.Source
+		want     string
+	}{
+		{name: "a closure payload without a packages pin", tools: inventory + closureApt, want: "profile lean: machine fake mounts a payload whose inventory declares apt.payload, so it installs the resident packages from the archive its payload build wrote; pin it under payload.packages"},
+		{name: "a packages pin without a closure", tools: inventory, packages: &config.Source{Path: "debs.tar", SHA256: packagesSHA}, want: "profile lean: machine fake mounts a payload, which needs apt.payload in the inventory; only a closure payload is admitted and mounted"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := build(t, false, tt.tools, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+			machine := h.cfg.Profiles["lean"].Machine["fake"]
+			machine.Payload = &config.Payload{Source: config.Source{Path: "agent.sqfs", SHA256: sha}, Packages: tt.packages}
+			h.cfg.Profiles["lean"].Machine["fake"] = machine
+			if _, err := Open(h.cfg, h.provider, "fake", "lean", h.session.Platform); err == nil || err.Error() != tt.want {
+				t.Errorf("Open = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestAResumeInstallsTheResidentPackagesFromTheNewArchive(t *testing.T) {
+	next, nextPackages := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	h := newPayloadHarness(t)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
@@ -2077,12 +2206,53 @@ func TestAResumeInstallsTheResidentPackagesFromTheNewPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	machine := h.cfg.Profiles["lean"].Machine["fake"]
-	machine.Payload = &config.Payload{Path: path, SHA256: next}
+	machine.Payload = &config.Payload{Source: config.Source{Path: path, SHA256: next}, Packages: &config.Source{Path: machine.Payload.Packages.Path, SHA256: nextPackages}}
 	h.cfg.Profiles["lean"].Machine["fake"] = machine
 	resumed := h.open()
 	before := len(h.machine.scripts["ws-1"])
 	if _, err := resumed.Resume(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	h.ordered(before, readies, payloadPhase+next, packagesPhase+" resident "+next, loaderPhase, publishes)
+	h.ordered(before, readies, stagesDebs+nextPackages, packagesPhase+" resident "+nextPackages, loaderPhase, publishes)
+	h.ordered(before, readies, stagesPayload+next, payloadPhase+next+" "+resumed.Scripts.Fingerprint()+" "+nextPackages, loaderPhase, publishes)
+}
+
+func TestAResumeRemountsAndRejectsAPackagesPinTheReadyPayloadWasNotBuiltWith(t *testing.T) {
+	other := strings.Repeat("cd", 32)
+	h := newPayloadHarness(t)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	machine := h.cfg.Profiles["lean"].Machine["fake"]
+	pin := *machine.Payload.Packages
+	pin.SHA256 = other
+	machine.Payload = &config.Payload{Source: machine.Payload.Source, Packages: &pin}
+	h.cfg.Profiles["lean"].Machine["fake"] = machine
+	mispaired := h.open()
+	if mispaired.Stamp == h.session.Stamp {
+		t.Fatalf("pinning another packages archive left the stamp at %s", h.session.Stamp)
+	}
+	rejection := fmt.Sprintf("cc-remote: payload %s/%s has packages %q, want %q", images.PayloadRoot, sha, packagesSHA, other)
+	mounting := h.machine.hold(t, payloadPhase+sha+" "+mispaired.Scripts.Fingerprint()+" "+other)
+	mounting.release <- providers.Result{Stderr: []byte(rejection), ExitCode: 1}
+	before := len(h.machine.scripts["ws-1"])
+	if _, err := mispaired.Resume(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), rejection) {
+		t.Fatalf("Resume = %v, want the mount to reject the packages pin with %q", err, rejection)
+	}
+	if !mounting.ran() {
+		t.Fatalf("the resume trusted the ready stamp instead of mounting against the new packages pin: %q", h.machine.scripts["ws-1"][before:])
+	}
+	h.ordered(before, readies, payloadPhase+sha+" ")
+	if h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the rejected resume moved the ready stamp from %s to %q", h.session.Stamp, h.machine.ready["ws-1"])
+	}
+	for _, script := range h.machine.scripts["ws-1"][before:] {
+		if strings.Contains(script, publishes) || strings.Contains(script, loaderPhase) {
+			t.Errorf("the rejected resume ran %q", script)
+		}
+	}
 }

@@ -59,11 +59,17 @@ func TestHostOperations(t *testing.T) {
 			return scripts.Provision(ctx, exec, PhasePack, fingerprint)
 		}, call{[]string{"sudo", "bash", "-s", "pack", fingerprint}, "provision"}},
 		{"stage payload", func(ctx context.Context, exec Exec) error {
-			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), digest)
-		}, call{[]string{"sudo", "bash", "-c", stagePayload, "stage-payload", digest}, "image"}},
+			return scripts.Stage(ctx, exec, PayloadArtifact, strings.NewReader("image"), digest)
+		}, call{[]string{"sudo", "bash", "-c", PayloadArtifact.stageScript(), "stage-payload", digest}, "image"}},
+		{"stage packages archive", func(ctx context.Context, exec Exec) error {
+			return scripts.Stage(ctx, exec, PackagesArtifact, strings.NewReader("debs"), digest)
+		}, call{[]string{"sudo", "bash", "-c", PackagesArtifact.stageScript(), "stage-packages", digest}, "debs"}},
 		{"fetch payload", func(ctx context.Context, exec Exec) error {
-			return scripts.FetchPayload(ctx, exec, presigned, digest, 1643491328)
-		}, call{[]string{"sudo", "bash", "-c", fetchPayload, "fetch-payload", digest, "1643491328"}, "url = \"" + presignedURL + "\"\n"}},
+			return scripts.Fetch(ctx, exec, PayloadArtifact, presigned, digest, 1643491328)
+		}, call{[]string{"sudo", "bash", "-c", PayloadArtifact.fetchScript(), "fetch-payload", digest, "1643491328"}, "url = \"" + presignedURL + "\"\n"}},
+		{"fetch packages archive", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PackagesArtifact, presigned, digest, 52428800)
+		}, call{[]string{"sudo", "bash", "-c", PackagesArtifact.fetchScript(), "fetch-packages", digest, "52428800"}, "url = \"" + presignedURL + "\"\n"}},
 		{"stage", func(ctx context.Context, exec Exec) error { return scripts.StagePlugins(ctx, exec, "") }, call{[]string{"sh", "-c", stagePlugins}, "plugins"}},
 		{"stage enabling the payload's plugins", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePlugins(ctx, exec, digest)
@@ -151,17 +157,23 @@ func TestHostOperationsRejectBadInput(t *testing.T) {
 		want string
 	}{
 		{"stage payload digest", func(ctx context.Context, exec Exec) error {
-			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), "../"+digest)
+			return scripts.Stage(ctx, exec, PayloadArtifact, strings.NewReader("image"), "../"+digest)
 		}, `stage payload: "../` + digest + `" is not a sha256 digest`},
 		{"stage payload uppercase digest", func(ctx context.Context, exec Exec) error {
-			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), strings.Repeat("A", 64))
+			return scripts.Stage(ctx, exec, PayloadArtifact, strings.NewReader("image"), strings.Repeat("A", 64))
 		}, `stage payload: "` + strings.Repeat("A", 64) + `" is not a sha256 digest`},
+		{"stage packages archive digest", func(ctx context.Context, exec Exec) error {
+			return scripts.Stage(ctx, exec, PackagesArtifact, strings.NewReader("debs"), "../"+digest)
+		}, `stage packages archive: "../` + digest + `" is not a sha256 digest`},
 		{"fetch payload digest", func(ctx context.Context, exec Exec) error {
-			return scripts.FetchPayload(ctx, exec, PayloadURL{}, "../"+digest, 1)
+			return scripts.Fetch(ctx, exec, PayloadArtifact, PayloadURL{}, "../"+digest, 1)
 		}, `fetch payload: "../` + digest + `" is not a sha256 digest`},
 		{"fetch payload size", func(ctx context.Context, exec Exec) error {
-			return scripts.FetchPayload(ctx, exec, PayloadURL{}, digest, 0)
+			return scripts.Fetch(ctx, exec, PayloadArtifact, PayloadURL{}, digest, 0)
 		}, "fetch payload: size 0 is not a byte count"},
+		{"fetch packages archive size", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PackagesArtifact, PayloadURL{}, digest, -1)
+		}, "fetch packages archive: size -1 is not a byte count"},
 		{"stage plugins payload digest", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePlugins(ctx, exec, "../"+digest)
 		}, `stage plugins.sh: payload "../` + digest + `" is not a sha256 digest`},

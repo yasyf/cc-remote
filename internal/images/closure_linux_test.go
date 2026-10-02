@@ -1,6 +1,8 @@
 package images
 
 import (
+	"archive/tar"
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -8,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -236,12 +239,11 @@ fi
 exit "${APT_FAIL:-0}"
 `
 	fakeOnline     = "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$TEST_ROOT/online\"\nexit 1\n"
-	fakeMounted    = "#!/bin/sh\n[ \"$1\" = -q ] && [ -e \"$2/.mounted\" ]\n"
 	fakeDpkgStatus = "#!/bin/sh\n[ \"$1\" = -s ] && grep -qx \"ii \t$2\" \"$TEST_ROOT/installed\"\n"
-	payloadDigest  = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+	packagesDigest = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 )
 
-var fakeClosureMount = strings.Replace(fakeMount, "{schemaVersion: 1,", "{schemaVersion: 2,", 1)
+var fakeClosureMount = strings.Replace(fakeMount, "{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}", "{schemaVersion: 2, tools: $tools, home: $home, arch: $arch, os: $os, packages: env.PACKAGES}", 1)
 
 func scriptInventory() Inventory {
 	return Inventory{
@@ -294,6 +296,92 @@ func writeFakes(t *testing.T, dir string, fakes map[string]string) {
 	for name, content := range fakes {
 		writePluginTestFile(t, filepath.Join(dir, name), []byte(content), 0o700)
 	}
+}
+
+type payloadSandbox struct {
+	root, fakes, store, payloads, closure, dir, loaderConf, fontsConf string
+}
+
+func newPayloadSandbox(t *testing.T, sha string, fakes map[string]string) payloadSandbox {
+	t.Helper()
+	root := t.TempDir()
+	payloads, closure := filepath.Join(root, "payload"), filepath.Join(root, "closure")
+	dir := filepath.Join(payloads, sha)
+	s := payloadSandbox{
+		root:       root,
+		fakes:      t.TempDir(),
+		store:      filepath.Join(root, "store"),
+		payloads:   payloads,
+		closure:    closure,
+		dir:        dir,
+		loaderConf: filepath.Join(root, "etc/ld.so.conf.d/zz-cc-remote-closure.conf"),
+		fontsConf:  filepath.Join(root, "etc/fonts/conf.d/99-cc-remote-closure.conf"),
+	}
+	writeFakes(t, s.fakes, map[string]string{
+		"id":         "#!/bin/sh\necho 0\n",
+		"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
+		"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
+		"mount":      fakeClosureMount,
+		"sprite-env": "#!/bin/sh\nexit 0\n",
+		"ldconfig":   fakeLdconfig,
+	})
+	writeFakes(t, s.fakes, fakes)
+	writePluginTestFile(t, filepath.Join(dir, closure, "closure.json"), []byte("{}"), 0o644)
+	writePluginTestFile(t, filepath.Join(dir, closure, root, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
+	if err := os.MkdirAll(filepath.Join(dir, closure, root, "usr/share/X11"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../xkeyboard-config-2", filepath.Join(dir, closure, root, "usr/share/X11/xkb")); err != nil {
+		t.Fatal(err)
+	}
+	for _, bin := range []string{"certutil", "fc-match"} {
+		writePluginTestFile(t, filepath.Join(dir, closure, "usr/bin", bin), []byte("\x7fELF"), 0o755)
+		if err := os.MkdirAll(filepath.Join(dir, root, "usr/local/bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(closure, "usr/bin", bin), filepath.Join(dir, root, "usr/local/bin", bin)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, share := range closureShares {
+		if err := os.MkdirAll(filepath.Join(dir, closure, "usr/share", share), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, root, "usr/local/share", share)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(closure, "usr/share", share), filepath.Join(dir, root, "usr/local/share", share)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sub := range []string{"usr/local/bin", "usr/local/share", "etc/ld.so.conf.d"} {
+		if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s
+}
+
+func (s payloadSandbox) env() []string {
+	return append(os.Environ(), "PATH="+s.fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+s.root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint", "PACKAGES="+packagesDigest)
+}
+
+func (s payloadSandbox) phase(scripts Scripts, sha string) *exec.Cmd {
+	provision := strings.NewReplacer(
+		"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(s.payloads)+"\n",
+		"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(s.store)+"\n",
+		"closure_root=/opt/cc-remote/closure\n", "closure_root="+quote(s.closure)+"\n",
+		"closure_loader_conf=/etc/ld.so.conf.d/zz-cc-remote-closure.conf\n", "closure_loader_conf="+quote(s.loaderConf)+"\n",
+		"closure_fonts_conf=/etc/fonts/conf.d/99-cc-remote-closure.conf\n", "closure_fonts_conf="+quote(s.fontsConf)+"\n",
+		"expose link required '/opt/cc-remote/closure'\n", "expose link required "+quote(s.closure)+"\n",
+		"'/usr/local/bin/", "'"+s.root+"/usr/local/bin/",
+		"'/usr/local/share/", "'"+s.root+"/usr/local/share/",
+		"closure_project '/usr/share/X11/xkb'\n", "closure_project "+quote(s.root+"/usr/share/X11/xkb")+"\n",
+		` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(s.root, "payload-mount.sh"))+"\n",
+	).Replace(string(scripts.ProvisionScript))
+	cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint", packagesDigest)
+	cmd.Env = s.env()
+	return cmd
 }
 
 func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
@@ -380,22 +468,61 @@ type capturedDebs struct {
 	Debs      []capturedDeb `json:"debs"`
 }
 
-func writeCapturedPayload(t *testing.T, root string, manifest capturedDebs, contents map[string]string, mounted bool) string {
+func packagesArchive(t *testing.T, files map[string][]byte) []byte {
 	t.Helper()
-	payload := filepath.Join(root, "payload", payloadDigest)
-	debs := filepath.Join(payload, "opt/cc-remote/debs")
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		if err := writer.WriteHeader(&tar.Header{Name: "./" + name, Mode: 0o644, Size: int64(len(files[name]))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(files[name]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return archive.Bytes()
+}
+
+func writeCapturedPackages(t *testing.T, root string, manifest capturedDebs, contents map[string]string, corrupt string, admitted bool) string {
+	t.Helper()
+	store := filepath.Join(root, "packages")
+	debs := filepath.Join(store, packagesDigest)
+	if !admitted {
+		return debs
+	}
 	for i, deb := range manifest.Debs {
 		sum := sha256.Sum256([]byte(contents[deb.File]))
 		manifest.Debs[i].SHA256 = hex.EncodeToString(sum[:])
 	}
+	files := map[string][]byte{"debs.json": mustJSON(t, manifest)}
 	for file, content := range contents {
-		writePluginTestFile(t, filepath.Join(debs, file), []byte(content), 0o644)
+		files[file] = []byte(content)
 	}
-	writePluginTestFile(t, filepath.Join(debs, "debs.json"), mustJSON(t, manifest), 0o644)
-	if mounted {
-		writePluginTestFile(t, filepath.Join(payload, ".mounted"), nil, 0o644)
+	if corrupt != "" {
+		files[corrupt] = []byte("tampered")
 	}
+	writePluginTestFile(t, filepath.Join(store, packagesDigest+".tar.admitted"), packagesArchive(t, files), 0o644)
 	return debs
+}
+
+func assertPackagesStoreHolds(t *testing.T, root string, want ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, "packages"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.Name() != ".lock" {
+			names = append(names, entry.Name())
+		}
+	}
+	if !slices.Equal(names, want) {
+		t.Errorf("the packages store holds %q, want %q", names, want)
+	}
 }
 
 func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
@@ -409,7 +536,8 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 		base      string
 		installed string
 		env       []string
-		unmounted bool
+		unstaged  bool
+		garbage   bool
 		corrupt   bool
 		remove    bool
 		apt       string
@@ -423,8 +551,9 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 		{name: "an extra base package fails before apt", base: base + "installed\tvim=2\n", exit: 1, wantErr: drifted + "+vim=2\n"},
 		{name: "a missing base package fails before apt", base: "installed\tbase-files=13\n", exit: 1, wantErr: drifted + "-libc6=2.42-1\n"},
 		{name: "a corrupted deb fails before apt", corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
-		{name: "an unmounted payload fails before apt", unmounted: true, exit: 1, wantErr: "cc-remote: payload " + payloadDigest + " is not mounted at "},
-		{name: "resident without the payload sha256 is a usage error", args: []string{PackagesResident}, exit: 2, wantErr: "provision: packages resident takes the payload sha256"},
+		{name: "an unadmitted packages archive fails before apt", unstaged: true, exit: 1, wantErr: "cc-remote: no packages archive is admitted at "},
+		{name: "an admitted archive that does not extract leaves no tree behind", garbage: true, exit: 2, wantErr: "tar: "},
+		{name: "resident without the archive sha256 is a usage error", args: []string{PackagesResident}, exit: 2, wantErr: "provision: packages resident takes the packages archive sha256"},
 		{name: "a failing apt install propagates its status", env: []string{"APT_FAIL=100"}, apt: install, exit: 100},
 		{name: "a closure package left installed is fatal", installed: "ii \tlibnss3\n", apt: install, exit: 1, wantErr: shadowing + "libnss3 install ok installed 1.0-1\n"},
 		{name: "a failing package listing fails before apt", env: []string{"DPKG_FAIL=1"}, exit: 2},
@@ -448,40 +577,54 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 				"curl":       fakeOnline,
 				"dpkg-query": fakeStatusQuery,
 				"dpkg":       fakeDpkgStatus,
-				"mountpoint": fakeMounted,
 			})
 			contents := map[string]string{"bubblewrap_0.11.0-2_amd64.deb": "bubblewrap deb", "openssh-server_1%3a9.9p1-3_amd64.deb": "openssh-server deb"}
 			captured := []string{"base-files=13", "libc6=2.42-1"}
 			if tt.remove {
 				captured = append(captured, "watchman=2024.1")
 			}
-			debs := writeCapturedPayload(t, root, capturedDebs{
+			var corrupt string
+			if tt.corrupt {
+				corrupt = "openssh-server_1%3a9.9p1-3_amd64.deb"
+			}
+			debs := writeCapturedPackages(t, root, capturedDebs{
 				Artifacts: []capturedDeb{},
 				Base:      captured,
 				Debs: []capturedDeb{
 					{Architecture: "amd64", File: "bubblewrap_0.11.0-2_amd64.deb", Package: "bubblewrap", Version: "0.11.0-2"},
 					{Architecture: "amd64", File: "openssh-server_1%3a9.9p1-3_amd64.deb", Package: "openssh-server", Version: "1:9.9p1-3"},
 				},
-			}, contents, !tt.unmounted)
-			if tt.corrupt {
-				writePluginTestFile(t, filepath.Join(debs, "openssh-server_1%3a9.9p1-3_amd64.deb"), []byte("tampered"), 0o644)
+			}, contents, corrupt, !tt.unstaged)
+			admitted := debs + ".tar.admitted"
+			if tt.garbage {
+				writePluginTestFile(t, admitted, []byte("not a tar archive"), 0o644)
 			}
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
 			writePluginTestFile(t, filepath.Join(root, "base"), []byte(cmp.Or(tt.base, base)), 0o644)
 			provision := strings.NewReplacer(
 				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(filepath.Join(root, "build"))+"\n",
-				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(filepath.Join(root, "payload"))+"\n",
+				"packages_store=/var/lib/cc-remote/packages\n", "packages_store="+quote(filepath.Join(root, "packages"))+"\n",
 				"rm -rf /var/lib/apt/lists/*", ":",
 			).Replace(string(scripts.ProvisionScript))
 			args := tt.args
 			if args == nil {
-				args = []string{PackagesResident, payloadDigest}
+				args = []string{PackagesResident, packagesDigest}
 			}
 			cmd := exec.Command("bash", slices.Concat([]string{"-c", provision, "provision.sh", PhasePackages}, args)...)
 			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
 			out, err := cmd.CombinedOutput()
 			if exitCode(err) != tt.exit || !strings.Contains(string(out), tt.wantErr) {
 				t.Fatalf("packages = %v\n%s\nwant exit %d with %q", err, out, tt.exit, tt.wantErr)
+			}
+			switch {
+			case tt.unstaged:
+			case tt.garbage, len(tt.args) != 0:
+				assertPackagesStoreHolds(t, root, packagesDigest+".tar.admitted")
+			default:
+				assertPackagesStoreHolds(t, root, packagesDigest)
+				if _, err := os.Stat(filepath.Join(debs, "debs.json")); err != nil {
+					t.Errorf("the admitted archive was not extracted: %v", err)
+				}
 			}
 			apt, aptErr := os.ReadFile(filepath.Join(root, "apt"))
 			switch want := strings.ReplaceAll(tt.apt, "@DEBS@", debs); {
@@ -518,8 +661,8 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 		fetches int
 	}{
 		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
-		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, payloadDigest}, copy: "deb", apt: resident + "install -y -qq --no-download @DEBS@/orca-1.4.215.deb\n"},
-		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, payloadDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
+		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "install -y -qq --no-download @DEBS@/orca-1.4.215.deb\n"},
+		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, packagesDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
 		{name: "a deb naming no package is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package", fetches: 1},
 		{name: "a failing dpkg-deb is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=fail"}, exit: 2, wantErr: "dpkg-deb: error: cannot read", fetches: 1},
 	}
@@ -538,19 +681,18 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 				"dpkg-query": fakeStatusQuery,
 				"curl":       "#!/bin/sh\nprintf 'curl\\n' >> \"$TEST_ROOT/fetches\"\n" + strings.TrimPrefix(fakeCurl, "#!/bin/sh\n"),
 				"dpkg-deb":   fakeDpkgDeb,
-				"mountpoint": fakeMounted,
 			})
-			debs := writeCapturedPayload(t, root, capturedDebs{
+			debs := writeCapturedPackages(t, root, capturedDebs{
 				Artifacts: []capturedDeb{{Architecture: "amd64", File: "orca-1.4.215.deb", Package: "orca-ide", Version: "1.4.215"}},
 				Base:      []string{"base-files=13"},
 				Debs:      []capturedDeb{},
-			}, map[string]string{"orca-1.4.215.deb": tt.copy}, true)
+			}, map[string]string{"orca-1.4.215.deb": tt.copy}, "", true)
 			writePluginTestFile(t, ide, []byte("#!/bin/sh\n"), 0o755)
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"), 0o644)
 			writePluginTestFile(t, filepath.Join(root, "base"), []byte("installed\tbase-files=13\n"), 0o644)
 			provision := strings.NewReplacer(
 				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(build)+"\n",
-				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(filepath.Join(root, "payload"))+"\n",
+				"packages_store=/var/lib/cc-remote/packages\n", "packages_store="+quote(filepath.Join(root, "packages"))+"\n",
 				"tool_dir=/opt/cc-remote/tools\n", "tool_dir="+quote(tools)+"\n",
 				"bin_dir=/usr/local/bin\n", "bin_dir="+quote(bins)+"\n",
 				"'/opt/Orca/orca-ide'", quote(ide),
@@ -582,17 +724,17 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	}
 }
 
-func TestAClosurePayloadDeclaresSchemaTwoAndPacksItsDebs(t *testing.T) {
+func TestAClosurePayloadDeclaresSchemaTwoAndPacksItsDebsBesideIt(t *testing.T) {
 	bare := scriptInventory()
 	bare.Apt.Payload = nil
 	tests := []struct {
 		name      string
 		inventory Inventory
-		schema    string
+		manifest  string
 		debs      bool
 	}{
-		{name: "a closure payload", inventory: scriptInventory(), schema: "2", debs: true},
-		{name: "a payload without a closure", inventory: bare, schema: "1"},
+		{name: "a closure payload", inventory: scriptInventory(), manifest: "{schemaVersion: 2, tools: $tools, home: $home, arch: $arch, os: $os, packages: $packages}", debs: true},
+		{name: "a payload without a closure", inventory: bare, manifest: "{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -601,11 +743,14 @@ func TestAClosurePayloadDeclaresSchemaTwoAndPacksItsDebs(t *testing.T) {
 				t.Fatal(err)
 			}
 			script := string(scripts.ProvisionScript)
-			if got := strings.Count(script, "{schemaVersion: "+tt.schema+", tools: $tools, home: $home, arch: $arch, os: $os}"); got != 2 {
-				t.Errorf("the pack writer and the payload check name schemaVersion %s %d times, want 2", tt.schema, got)
+			if got := strings.Count(script, tt.manifest); got != 2 {
+				t.Errorf("the pack writer and the payload check name %s %d times, want 2", tt.manifest, got)
 			}
-			if got := strings.Contains(script, `pack_path required "$debs_dir"`); got != tt.debs {
-				t.Errorf("the pack carries the captured debs: %v, want %v", got, tt.debs)
+			if strings.Contains(script, `pack_path required "$debs_dir"`) {
+				t.Error("the SquashFS carries the captured debs")
+			}
+			if got := strings.Contains(script, `tar -C "$debs_dir" --numeric-owner -cf "$packages_pack" .`); got != tt.debs {
+				t.Errorf("the pack writes the packages archive: %v, want %v", got, tt.debs)
 			}
 		})
 	}
@@ -667,11 +812,19 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 	sum := sha256.Sum256([]byte(image))
 	sha := hex.EncodeToString(sum[:])
 	tests := []struct {
-		name    string
-		foreign func(root, closure, payloads string) error
-		wantErr func(root, closure, dir string) string
+		name     string
+		packages string
+		foreign  func(root, closure, payloads string) error
+		wantErr  func(root, closure, dir string) string
 	}{
 		{name: "the payload's closure is exposed and configured"},
+		{
+			name:     "a payload paired with another packages archive is fatal",
+			packages: strings.Repeat("ab", 32),
+			wantErr: func(_, _, dir string) string {
+				return "cc-remote: payload " + dir + " has packages \"" + packagesDigest + "\", want \"" + strings.Repeat("ab", 32) + "\""
+			},
+		},
 		{
 			name: "an existing projection link is accepted",
 			foreign: func(root, closure, _ string) error {
@@ -754,71 +907,17 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root, fakes := t.TempDir(), t.TempDir()
-			store, payloads, closure := filepath.Join(root, "store"), filepath.Join(root, "payload"), filepath.Join(root, "closure")
-			loaderConf, fontsConf := filepath.Join(root, "etc/ld.so.conf.d/zz-cc-remote-closure.conf"), filepath.Join(root, "etc/fonts/conf.d/99-cc-remote-closure.conf")
-			dir := filepath.Join(payloads, sha)
-			writeFakes(t, fakes, map[string]string{
-				"id":         "#!/bin/sh\necho 0\n",
-				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
-				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
-				"mount":      fakeClosureMount,
-				"sprite-env": "#!/bin/sh\nexit 0\n",
-				"ldconfig":   fakeLdconfig,
-			})
+			sandbox := newPayloadSandbox(t, sha, nil)
+			root, store, payloads, closure, dir := sandbox.root, sandbox.store, sandbox.payloads, sandbox.closure, sandbox.dir
+			loaderConf, fontsConf := sandbox.loaderConf, sandbox.fontsConf
 			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.admitted"), []byte(image), 0o600)
-			writePluginTestFile(t, filepath.Join(dir, closure, "closure.json"), []byte("{}"), 0o644)
-			writePluginTestFile(t, filepath.Join(dir, closure, root, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
-			if err := os.MkdirAll(filepath.Join(dir, closure, root, "usr/share/X11"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("../xkeyboard-config-2", filepath.Join(dir, closure, root, "usr/share/X11/xkb")); err != nil {
-				t.Fatal(err)
-			}
-			for _, bin := range []string{"certutil", "fc-match"} {
-				writePluginTestFile(t, filepath.Join(dir, closure, "usr/bin", bin), []byte("\x7fELF"), 0o755)
-				if err := os.MkdirAll(filepath.Join(dir, root, "usr/local/bin"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(closure, "usr/bin", bin), filepath.Join(dir, root, "usr/local/bin", bin)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for _, share := range closureShares {
-				if err := os.MkdirAll(filepath.Join(dir, closure, "usr/share", share), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, root, "usr/local/share", share)), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(closure, "usr/share", share), filepath.Join(dir, root, "usr/local/share", share)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			for _, sub := range []string{"usr/local/bin", "usr/local/share", "etc/ld.so.conf.d"} {
-				if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if tt.foreign != nil {
 				if err := tt.foreign(root, closure, payloads); err != nil {
 					t.Fatal(err)
 				}
 			}
-			provision := strings.NewReplacer(
-				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
-				"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
-				"closure_root=/opt/cc-remote/closure\n", "closure_root="+quote(closure)+"\n",
-				"closure_loader_conf=/etc/ld.so.conf.d/zz-cc-remote-closure.conf\n", "closure_loader_conf="+quote(loaderConf)+"\n",
-				"closure_fonts_conf=/etc/fonts/conf.d/99-cc-remote-closure.conf\n", "closure_fonts_conf="+quote(fontsConf)+"\n",
-				"expose link required '/opt/cc-remote/closure'\n", "expose link required "+quote(closure)+"\n",
-				"'/usr/local/bin/", "'"+root+"/usr/local/bin/",
-				"'/usr/local/share/", "'"+root+"/usr/local/share/",
-				"closure_project '/usr/share/X11/xkb'\n", "closure_project "+quote(root+"/usr/share/X11/xkb")+"\n",
-				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
-			).Replace(string(scripts.ProvisionScript))
-			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
-			cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
+			cmd := sandbox.phase(scripts, sha)
+			cmd.Args[len(cmd.Args)-1] = cmp.Or(tt.packages, packagesDigest)
 			out, err := cmd.CombinedOutput()
 			if _, err := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(err) {
 				t.Errorf("the payload phase ran ldconfig: %v", err)
@@ -894,7 +993,7 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 					wantCalls = append(wantCalls, "flock 9", "flock "+lock+" ldconfig", "ldconfig")
 				}
 				cmd := exec.Command("sh", filepath.Join(root, "boot.sh"))
-				cmd.Env = append(os.Environ(), "PATH="+bootFakes+":"+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
+				cmd.Env = append(os.Environ(), "PATH="+bootFakes+":"+sandbox.fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("boot helper (registered=%t) failed: %v\n%s", registered, err, out)
 				}
@@ -1473,7 +1572,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var names []string
+			names := make([]string, 0, len(entries))
 			for _, entry := range entries {
 				names = append(names, entry.Name())
 			}
@@ -1764,7 +1863,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	for _, path := range []string{lib + "/libfoo.so.1.0", lib + "/libalias.so.1", lib + "/gio/modules/libgiofoo.so", "/usr/bin/footool", "/usr/share/doc/libfoo1/copyright", "/usr/share/fonts/truetype/x/X.ttf", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme", "/usr/share/mime/packages/freedesktop.org.xml", lib + "/gtk-3.0/3.0.0/immodules/im-x.so", "/usr/share/glib-2.0/schemas/org.x.gschema.xml", "/usr/share/themes/Default/gtk-3.0/gtk.css", "/usr/share/xkeyboard-config-2/rules/evdev"} {
 		bytes += len(h.contents[path])
 	}
-	if want := fmt.Sprintf("cc-remote: captured 6 packages, 18 files, %d bytes into %s\n", bytes, tree); out != want {
+	if want := fmt.Sprintf("cc-remote: captured 6 packages, 18 files, %d bytes into %s\ncc-remote: captured 3 resident debs into %s\n", bytes, tree, h.debs); out != want {
 		t.Errorf("output = %q, want %q", out, want)
 	}
 }
@@ -1895,6 +1994,88 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			}
 			if got := logLines(t, filepath.Join(root, "fc-match.log")); !slices.Equal(got, []string{"fc-match -f %{family} Noto Sans CJK JP"}) {
 				t.Errorf("fc-match calls = %q", got)
+			}
+		})
+	}
+}
+
+func TestPayloadMountSkipsTheRescanOnlyUnderThisBootsMarker(t *testing.T) {
+	image := "hsqs closure payload"
+	sum := sha256.Sum256([]byte(image))
+	sha := hex.EncodeToString(sum[:])
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		marker string
+		hashed bool
+	}{
+		{name: "a marker from this boot skips the rescan", marker: string(boot)},
+		{name: "a marker from another boot rescans the device", marker: "00000000-0000-0000-0000-000000000000\n", hashed: true},
+		{name: "a missing marker rescans the device", hashed: true},
+	}
+	scripts, err := Render(scriptInventory(), "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, helper, opened := strings.Cut(string(scripts.ProvisionScript), "<<'SH'\n")
+	helper, _, closed := strings.Cut(helper, "\nSH\n")
+	if !opened || !closed {
+		t.Fatalf("the provision script writes no boot helper:\n%s", scripts.ProvisionScript)
+	}
+	sha256sum, err := exec.LookPath("sha256sum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			store, payloads := filepath.Join(root, "store"), filepath.Join(root, "payload")
+			stored, dir := filepath.Join(store, sha+".sqfs"), filepath.Join(payloads, sha)
+			writeFakes(t, fakes, map[string]string{
+				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
+				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
+				"mount":      fakeClosureMount,
+				"sha256sum":  "#!/bin/sh\nline=\"$(cat)\"\nprintf '%s\\n' \"$line\" >> \"$TEST_ROOT/hashes\"\nprintf '%s\\n' \"$line\" | exec " + sha256sum + " \"$@\"\n",
+			})
+			writePluginTestFile(t, stored, []byte(image), 0o644)
+			if tt.marker != "" {
+				writePluginTestFile(t, stored+".boot", []byte(tt.marker), 0o644)
+			}
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			env := append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
+			premount := exec.Command(filepath.Join(fakes, "mount"), "-t", "squashfs", "-o", "ro,nosuid,nodev,loop", stored, dir)
+			premount.Env = env
+			if out, err := premount.CombinedOutput(); err != nil {
+				t.Fatalf("premount: %v\n%s", err, out)
+			}
+			if err := os.Remove(filepath.Join(root, "mounts")); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", strings.NewReplacer(
+				"/var/lib/cc-remote/payload/", store+"/",
+				"/opt/cc-remote/payload/", payloads+"/",
+			).Replace(helper))
+			cmd.Env = env
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("payload-mount.sh = %v\n%s", err, out)
+			}
+			var want []string
+			if tt.hashed {
+				want = []string{sha + "  " + filepath.Join(root, "loop0")}
+			}
+			if got := logLines(t, filepath.Join(root, "hashes")); !slices.Equal(got, want) {
+				t.Errorf("hashed %q, want %q", got, want)
+			}
+			if got := logLines(t, filepath.Join(root, "mounts")); got != nil {
+				t.Errorf("remounted %q over the existing mount", got)
+			}
+			if marked, err := os.ReadFile(stored + ".boot"); err != nil || string(marked) != string(boot) {
+				t.Errorf("the boot marker is %q, %v; want this boot's id %q", marked, err, boot)
 			}
 		})
 	}

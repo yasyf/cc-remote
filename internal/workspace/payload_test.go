@@ -63,6 +63,7 @@ func (m *buildMachine) Handle(_ string, cmd []string, stdin []byte) providers.Re
 type downloading struct {
 	*providertest.Fake
 	payload   string
+	packages  string
 	fail      error
 	createErr error
 	leaves    func(name string) map[string]string
@@ -92,7 +93,11 @@ func (d *downloading) Download(ctx context.Context, id, path string, w io.Writer
 	if d.fail != nil {
 		return d.fail
 	}
-	_, err := io.WriteString(w, d.payload)
+	content := d.payload
+	if path == images.PackagesPack {
+		content = d.packages
+	}
+	_, err := io.WriteString(w, content)
 	return err
 }
 
@@ -151,8 +156,8 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 		tokens    int
 		install   string
 	}{
-		{name: "a private marketplace takes the token on the install's stdin", inventory: private, tokens: 1, install: buildToken + "\n"},
-		{name: "public tools read no token", inventory: inventory, install: "\n"},
+		{name: "a private marketplace takes the token on the install's stdin", inventory: private + closureApt, tokens: 1, install: buildToken + "\n"},
+		{name: "public tools read no token", inventory: inventory + closureApt, install: "\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -166,12 +171,12 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 				return buildToken, nil
 			}
 			var out, stderr bytes.Buffer
-			build, err := BuildPayload(t.Context(), cfg, provider, "fake", "lean", token, &out, &stderr)
+			build, err := BuildPayload(t.Context(), cfg, provider, "fake", "lean", token, &out, io.Discard, &stderr)
 			if err != nil {
 				t.Fatal(err)
 			}
 			digest := sha256.Sum256([]byte(provider.payload))
-			want := PayloadBuild{SHA256: hex.EncodeToString(digest[:]), Size: int64(len(provider.payload)), Tools: scripts.Fingerprint(), Machine: provider.created.Name}
+			want := PayloadBuild{SHA256: hex.EncodeToString(digest[:]), Size: int64(len(provider.payload)), Tools: scripts.Fingerprint(), Machine: provider.created.Name, Packages: PackagesBuild{SHA256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}
 			if build != want {
 				t.Errorf("build = %+v, want %+v", build, want)
 			}
@@ -211,7 +216,7 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 			if got := stderr.String(); got != strings.Join(steps, "\n")+"\n" {
 				t.Errorf("stderr = %q", got)
 			}
-			if reads := []string{build.Machine + " " + images.PackPath}; !slices.Equal(provider.reads, reads) {
+			if reads := []string{build.Machine + " " + images.PackPath, build.Machine + " " + images.PackagesPack}; !slices.Equal(provider.reads, reads) {
 				t.Errorf("reads = %q, want %q", provider.reads, reads)
 			}
 			if calls[0] != "create "+build.Machine || calls[len(calls)-1] != "destroy "+build.Machine {
@@ -219,6 +224,59 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 			}
 			if _, err := provider.Get(t.Context(), build.Machine); !errors.Is(err, providers.ErrNotFound) {
 				t.Errorf("Get after the build = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestBuildPayloadWritesTheResidentPackagesArchiveBesideAClosurePayload(t *testing.T) {
+	cfg := payloadConfig(t, "", inventory+closureApt)
+	provider := &downloading{Fake: &providertest.Fake{Handle: (&buildMachine{}).Handle}, payload: "hsqs squashfs payload", packages: "resident packages archive"}
+	token := func(context.Context) (string, error) { return buildToken, nil }
+	var out, packages bytes.Buffer
+	build, err := BuildPayload(t.Context(), cfg, provider, "fake", "lean", token, &out, &packages, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadDigest, packagesDigest := sha256.Sum256([]byte(provider.payload)), sha256.Sum256([]byte(provider.packages))
+	want := PayloadBuild{
+		SHA256:   hex.EncodeToString(payloadDigest[:]),
+		Size:     int64(len(provider.payload)),
+		Tools:    fullScripts(t, cfg).Fingerprint(),
+		Machine:  provider.created.Name,
+		Packages: PackagesBuild{SHA256: hex.EncodeToString(packagesDigest[:]), Size: int64(len(provider.packages))},
+	}
+	if build != want {
+		t.Errorf("build = %+v, want %+v", build, want)
+	}
+	if out.String() != provider.payload || packages.String() != provider.packages {
+		t.Errorf("wrote payload %q and packages %q, want %q and %q", out.String(), packages.String(), provider.payload, provider.packages)
+	}
+	if reads := []string{build.Machine + " " + images.PackPath, build.Machine + " " + images.PackagesPack}; !slices.Equal(provider.reads, reads) {
+		t.Errorf("reads = %q, want %q", provider.reads, reads)
+	}
+}
+
+func TestBuildPayloadPairsThePackagesArchiveWithAClosure(t *testing.T) {
+	tests := []struct {
+		name      string
+		inventory string
+		packages  io.Writer
+		want      string
+	}{
+		{name: "a closure needs a packages archive file", inventory: inventory + closureApt, want: "profile lean's inventory declares apt.payload, so its payload build also writes the resident packages archive; name its file with --packages-out"},
+		{name: "no closure writes no packages archive", inventory: inventory, packages: io.Discard, want: "profile lean: a payload build needs apt.payload in the inventory; only a closure payload is admitted and mounted"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &downloading{Fake: &providertest.Fake{Handle: (&buildMachine{}).Handle}}
+			token := func(context.Context) (string, error) { return buildToken, nil }
+			_, err := BuildPayload(t.Context(), payloadConfig(t, "", tt.inventory), provider, "fake", "lean", token, io.Discard, tt.packages, io.Discard)
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("BuildPayload = %v, want %q", err, tt.want)
+			}
+			if calls := provider.Calls(); len(calls) != 0 {
+				t.Errorf("a refused build reached the provider: %q", calls)
 			}
 		})
 	}
@@ -247,7 +305,7 @@ func TestBuildPayloadRemovesTheMachineWhenAStepFails(t *testing.T) {
 			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, payload: "hsqs", fail: tt.fail}
 			token := func(context.Context) (string, error) { return buildToken, nil }
 			var out bytes.Buffer
-			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private), provider, "fake", "lean", token, &out, io.Discard)
+			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private+closureApt), provider, "fake", "lean", token, &out, io.Discard, io.Discard)
 			switch {
 			case tt.is != nil:
 				if !errors.Is(err, tt.is) {
@@ -333,7 +391,7 @@ func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) 
 			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, payload: "hsqs"}
 			token := func(context.Context) (string, error) { return buildToken, nil }
 			var stderr bytes.Buffer
-			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private), provider, "fake", "lean", token, io.Discard, &stderr)
+			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private+closureApt), provider, "fake", "lean", token, io.Discard, io.Discard, &stderr)
 			name := provider.created.Name
 			if want := "plugins verify: env on " + name + " exited 137: "; err == nil || err.Error() != want {
 				t.Errorf("BuildPayload = %v, want %q", err, want)
@@ -411,7 +469,7 @@ func TestBuildPayloadDiscardsAFailedCreateOnlyWhenItsLabelProvesTheBuildMadeIt(t
 			machine := &buildMachine{}
 			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, createErr: tt.createErr, leaves: tt.leaves}
 			token := func(context.Context) (string, error) { return buildToken, nil }
-			_, err := BuildPayload(t.Context(), payloadConfig(t, "", inventory), provider, "fake", "lean", token, io.Discard, io.Discard)
+			_, err := BuildPayload(t.Context(), payloadConfig(t, "", inventory+closureApt), provider, "fake", "lean", token, io.Discard, io.Discard, io.Discard)
 			if !errors.Is(err, tt.createErr) || !strings.Contains(err.Error(), tt.message) {
 				t.Errorf("BuildPayload = %v, want %v carrying %q", err, tt.createErr, tt.message)
 			}
@@ -431,16 +489,18 @@ func TestBuildPayloadDiscardsAFailedCreateOnlyWhenItsLabelProvesTheBuildMadeIt(t
 
 func TestBuildPayloadRefusesWhatCannotBuildOne(t *testing.T) {
 	tests := []struct {
-		name     string
-		image    string
-		download bool
-		tokenErr error
-		tokens   int
-		want     string
+		name      string
+		image     string
+		inventory string
+		download  bool
+		tokenErr  error
+		tokens    int
+		want      string
 	}{
-		{name: "an imaged profile", image: "agent-host", download: true, want: `profile lean boots fake machines from image "agent-host"; a payload is built on a machine provisioned in place`},
-		{name: "a provider that cannot download", want: "the fake provider cannot download a file from a machine, so it cannot build a payload"},
-		{name: "an unreadable token", download: true, tokenErr: errors.New("no GH_TOKEN or GITHUB_TOKEN"), tokens: 1, want: "no GH_TOKEN or GITHUB_TOKEN"},
+		{name: "an imaged profile", image: "agent-host", inventory: private + closureApt, download: true, want: `profile lean boots fake machines from image "agent-host"; a payload is built on a machine provisioned in place`},
+		{name: "a provider that cannot download", inventory: private + closureApt, want: "the fake provider cannot download a file from a machine, so it cannot build a payload"},
+		{name: "an inventory without apt.payload", inventory: private, download: true, want: "profile lean: a payload build needs apt.payload in the inventory; only a closure payload is admitted and mounted"},
+		{name: "an unreadable token", inventory: private + closureApt, download: true, tokenErr: errors.New("no GH_TOKEN or GITHUB_TOKEN"), tokens: 1, want: "no GH_TOKEN or GITHUB_TOKEN"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -454,7 +514,7 @@ func TestBuildPayloadRefusesWhatCannotBuildOne(t *testing.T) {
 				tokens++
 				return "", tt.tokenErr
 			}
-			_, err := BuildPayload(t.Context(), payloadConfig(t, tt.image, private), provider, "fake", "lean", token, io.Discard, io.Discard)
+			_, err := BuildPayload(t.Context(), payloadConfig(t, tt.image, tt.inventory), provider, "fake", "lean", token, io.Discard, io.Discard, io.Discard)
 			if err == nil || err.Error() != tt.want {
 				t.Errorf("BuildPayload = %v, want %q", err, tt.want)
 			}

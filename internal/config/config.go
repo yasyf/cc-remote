@@ -61,6 +61,11 @@ type Machine struct {
 }
 
 type Payload struct {
+	Source   `yaml:",inline"`
+	Packages *Source `yaml:"packages"`
+}
+
+type Source struct {
 	Path       string   `yaml:"path"`
 	URLCommand []string `yaml:"url_command"`
 	SHA256     string   `yaml:"sha256"`
@@ -228,18 +233,28 @@ func (m Machine) validate() error {
 }
 
 func (p Payload) validate() error {
-	direct := len(p.URLCommand) > 0
+	if err := p.Source.validate("payload", "SquashFS payload"); err != nil {
+		return err
+	}
+	if p.Packages == nil {
+		return nil
+	}
+	return p.Packages.validate("payload.packages", "packages archive")
+}
+
+func (s Source) validate(key, file string) error {
+	direct := len(s.URLCommand) > 0
 	switch {
-	case (p.Path == "") == !direct:
-		return errors.New("payload.path names a local SquashFS file to stream; payload.url_command names a command that prints a private HTTPS URL; set exactly one, relative to this config file")
-	case direct && p.URLCommand[0] == "":
-		return errors.New("payload.url_command needs the command to run as its first element")
-	case direct && p.Size <= 0:
-		return fmt.Errorf("payload.size %d must pin the byte count a direct download has to match", p.Size)
-	case !direct && p.Size != 0:
-		return fmt.Errorf("payload.size %d applies only to a url_command source; a streamed path is hashed as it is read", p.Size)
-	case !digest.MatchString(p.SHA256):
-		return fmt.Errorf("payload.sha256 %q must be the 64 lowercase hex digits of the payload's sha256", p.SHA256)
+	case (s.Path == "") == !direct:
+		return fmt.Errorf("%s.path names a local %s to stream; %s.url_command names a command that prints a private HTTPS URL; set exactly one, relative to this config file", key, file, key)
+	case direct && s.URLCommand[0] == "":
+		return fmt.Errorf("%s.url_command needs the command to run as its first element", key)
+	case direct && s.Size <= 0:
+		return fmt.Errorf("%s.size %d must pin the byte count a direct download has to match", key, s.Size)
+	case !direct && s.Size != 0:
+		return fmt.Errorf("%s.size %d applies only to a url_command source; a streamed path is hashed as it is read", key, s.Size)
+	case !digest.MatchString(s.SHA256):
+		return fmt.Errorf("%s.sha256 %q must be the 64 lowercase hex digits of the %s's sha256", key, s.SHA256, file)
 	}
 	return nil
 }

@@ -19,10 +19,24 @@ type Exec func(ctx context.Context, argv []string, stdin io.Reader) error
 type Capture func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error)
 
 const (
-	PayloadRoot  = "/opt/cc-remote/payload"
-	PayloadStore = "/var/lib/cc-remote/payload"
-	PackPath     = "/var/lib/cc-remote/build/payload.sqfs"
-	ClosurePath  = "/opt/cc-remote/closure"
+	PayloadRoot   = "/opt/cc-remote/payload"
+	PayloadStore  = "/var/lib/cc-remote/payload"
+	PackPath      = "/var/lib/cc-remote/build/payload.sqfs"
+	PackagesPack  = "/var/lib/cc-remote/build/packages.tar"
+	PackagesStore = "/var/lib/cc-remote/packages"
+	ClosurePath   = "/opt/cc-remote/closure"
+)
+
+type TransferArtifact struct {
+	Label  string
+	Name   string
+	Store  string
+	Suffix string
+}
+
+var (
+	PayloadArtifact  = TransferArtifact{Label: "payload", Name: "payload", Store: PayloadStore, Suffix: ".sqfs"}
+	PackagesArtifact = TransferArtifact{Label: "packages", Name: "packages archive", Store: PackagesStore, Suffix: ".tar"}
 )
 
 const (
@@ -44,33 +58,41 @@ mv -f "` + PluginsPath + `.tmp" "` + PluginsPath + `"`
 
 const payloadURLLimit = 8192
 
-const openPayloadStaging = `set -euo pipefail
+func (a TransferArtifact) openStaging() string {
+	return `set -euo pipefail
 digest="$1"
-store=` + PayloadStore + `
+store=` + a.Store + `
 install -d -m 0755 "$store"
-staging="$(mktemp "$store/$digest.sqfs.XXXXXXXX.partial")"
+staging="$(mktemp "$store/$digest` + a.Suffix + `.XXXXXXXX.partial")"
+trap 'rm -f "$staging"' EXIT
 work="$(mktemp -d)"
 trap 'rm -rf "$work"; rm -f "$staging"' EXIT
 `
+}
 
-const admitPayloadStaging = `read -r got _ < "$work/sum"
+func (a TransferArtifact) admitStaging() string {
+	return `read -r got _ < "$work/sum"
 if [ "$got" != "$digest" ]; then
-  echo "cc-remote: the payload has sha256 $got, want $digest" >&2
+  echo "cc-remote: the ` + a.Name + ` has sha256 $got, want $digest" >&2
   exit 1
 fi
-( flock 9; mv -f "$staging" "$store/$digest.sqfs.admitted" ) 9> "$store/.lock"`
+( flock 9; mv -f "$staging" "$store/$digest` + a.Suffix + `.admitted" ) 9> "$store/.lock"`
+}
 
-const stagePayload = openPayloadStaging + `set +e
+func (a TransferArtifact) stageScript() string {
+	return a.openStaging() + `set +e
 cat | tee "$staging" | sha256sum > "$work/sum"
 codes=("${PIPESTATUS[@]}")
 set -e
 if [ "${codes[*]}" != "0 0 0" ]; then
-  echo "cc-remote: the payload stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, sha256sum exit ${codes[2]})" >&2
+  echo "cc-remote: the ` + a.Name + ` stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, sha256sum exit ${codes[2]})" >&2
   exit 1
 fi
-` + admitPayloadStaging
+` + a.admitStaging()
+}
 
-const fetchPayload = openPayloadStaging + `size="$2"
+func (a TransferArtifact) fetchScript() string {
+	return a.openStaging() + `size="$2"
 set +e
 curl -q --config - --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
   --max-filesize "$size" --write-out '%{stderr}%{http_code}' 2> "$work/http" \
@@ -84,19 +106,20 @@ if [ "${codes[*]}" != "0 0 0" ]; then
   if [ "$http" = 403 ]; then
     hint="; a 403 usually means the presigned URL expired"
   fi
-  echo "cc-remote: the payload download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, sha256sum exit ${codes[2]})$hint" >&2
+  echo "cc-remote: the ` + a.Name + ` download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, sha256sum exit ${codes[2]})$hint" >&2
   exit 1
 fi
 if [ "$http" != 200 ]; then
-  echo "cc-remote: the payload URL answered HTTP $http, want 200" >&2
+  echo "cc-remote: the ` + a.Name + ` URL answered HTTP $http, want 200" >&2
   exit 1
 fi
 got="$(stat -c %s "$staging")"
 if [ "$got" != "$size" ]; then
-  echo "cc-remote: the payload download is $got bytes, want $size" >&2
+  echo "cc-remote: the ` + a.Name + ` download is $got bytes, want $size" >&2
   exit 1
 fi
-` + admitPayloadStaging
+` + a.admitStaging()
+}
 
 const enablePayloadPlugins = `settings="$HOME/.claude/settings.json"
 image="$1$settings"
@@ -223,25 +246,25 @@ func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ..
 	return nil
 }
 
-func (s Scripts) StagePayload(ctx context.Context, exec Exec, image io.Reader, digest string) error {
+func (s Scripts) Stage(ctx context.Context, exec Exec, artifact TransferArtifact, stream io.Reader, digest string) error {
 	if !sha256Pattern.MatchString(digest) {
-		return fmt.Errorf("stage payload: %q is not a sha256 digest", digest)
+		return fmt.Errorf("stage %s: %q is not a sha256 digest", artifact.Name, digest)
 	}
-	if err := exec(ctx, []string{"sudo", "bash", "-c", stagePayload, "stage-payload", digest}, image); err != nil {
-		return fmt.Errorf("stage payload %s: %w", digest, err)
+	if err := exec(ctx, []string{"sudo", "bash", "-c", artifact.stageScript(), "stage-" + artifact.Label, digest}, stream); err != nil {
+		return fmt.Errorf("stage %s %s: %w", artifact.Name, digest, err)
 	}
 	return nil
 }
 
-func (s Scripts) FetchPayload(ctx context.Context, exec Exec, source PayloadURL, digest string, size int64) error {
+func (s Scripts) Fetch(ctx context.Context, exec Exec, artifact TransferArtifact, source PayloadURL, digest string, size int64) error {
 	if !sha256Pattern.MatchString(digest) {
-		return fmt.Errorf("fetch payload: %q is not a sha256 digest", digest)
+		return fmt.Errorf("fetch %s: %q is not a sha256 digest", artifact.Name, digest)
 	}
 	if size <= 0 {
-		return fmt.Errorf("fetch payload: size %d is not a byte count", size)
+		return fmt.Errorf("fetch %s: size %d is not a byte count", artifact.Name, size)
 	}
-	if err := exec(ctx, []string{"sudo", "bash", "-c", fetchPayload, "fetch-payload", digest, strconv.FormatInt(size, 10)}, bytes.NewReader(source.curlConfig())); err != nil {
-		return fmt.Errorf("fetch payload %s: %w", digest, err)
+	if err := exec(ctx, []string{"sudo", "bash", "-c", artifact.fetchScript(), "fetch-" + artifact.Label, digest, strconv.FormatInt(size, 10)}, bytes.NewReader(source.curlConfig())); err != nil {
+		return fmt.Errorf("fetch %s %s: %w", artifact.Name, digest, err)
 	}
 	return nil
 }

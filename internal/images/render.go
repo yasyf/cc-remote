@@ -283,13 +283,16 @@ func (s Scripts) Fingerprint() string {
 	return fingerprint(toolDomain, file{"provision.sh", s.ProvisionScript}, file{"plugins.sh", s.Plugins})
 }
 
-func Stamp(scripts Scripts, image *Context, payload string) string {
+func Stamp(scripts Scripts, image *Context, payload, packages string) string {
 	files := []file{{"tools", []byte(scripts.Fingerprint())}}
 	if image != nil {
 		files = append(files, file{"image", []byte(image.Fingerprint())})
 	}
 	if payload != "" {
 		files = append(files, file{"payload", []byte(payload)})
+	}
+	if packages != "" {
+		files = append(files, file{"packages", []byte(packages)})
 	}
 	return fingerprint(stampDomain, files...)
 }
@@ -472,7 +475,8 @@ func linkCalls(a Artifact, toolDir, binDir string, check func(link, target strin
 	for _, arg := range a.Verify {
 		args = append(args, quote(arg))
 	}
-	calls := []string{"verify_pin " + artifactDir(a, toolDir) + " " + quote(digest)}
+	calls := make([]string, 0, 1+2*len(bins))
+	calls = append(calls, "verify_pin "+artifactDir(a, toolDir)+" "+quote(digest))
 	for _, bin := range slices.Sorted(maps.Keys(bins)) {
 		target := quote(bins[bin])
 		if a.Format != Deb {

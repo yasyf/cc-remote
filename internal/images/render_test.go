@@ -411,20 +411,23 @@ func TestStamp(t *testing.T) {
 	scripts := Scripts{ProvisionScript: []byte("A"), Plugins: []byte("BC")}
 	image := Context{Dockerfile: []byte("D"), Provision: []byte("A"), Start: []byte("S")}
 	tools, img := scripts.Fingerprint(), image.Fingerprint()
+	packages := strings.Repeat("cd", 32)
 	tests := []struct {
-		name    string
-		image   *Context
-		payload string
-		framed  string
+		name     string
+		image    *Context
+		payload  string
+		packages string
+		framed   string
 	}{
-		{"tools only", nil, "", "tools 64\n" + tools},
-		{"an image", &image, "", "tools 64\n" + tools + "image 64\n" + img},
-		{"a payload", nil, digest, "tools 64\n" + tools + "payload 64\n" + digest},
+		{"tools only", nil, "", "", "tools 64\n" + tools},
+		{"an image", &image, "", "", "tools 64\n" + tools + "image 64\n" + img},
+		{"a payload", nil, digest, "", "tools 64\n" + tools + "payload 64\n" + digest},
+		{"a payload and its packages archive", nil, digest, packages, "tools 64\n" + tools + "payload 64\n" + digest + "packages 64\n" + packages},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sum := sha256.Sum256([]byte("cc-remote/ready/v1\n" + tt.framed))
-			if got, want := Stamp(scripts, tt.image, tt.payload), hex.EncodeToString(sum[:]); got != want {
+			if got, want := Stamp(scripts, tt.image, tt.payload, tt.packages), hex.EncodeToString(sum[:]); got != want {
 				t.Errorf("Stamp = %s, want %s", got, want)
 			}
 		})
@@ -520,7 +523,7 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		"closure_packages=('libnss3')\n",
 		"  printf '%s\\n' 'bubblewrap'\n",
 		"    deb_seeds=\"$build_dir/seeds\"\n    resident_packages \"${packages[@]}\" > \"$deb_seeds\"\n",
-		"      deb) record_deb \"$download\"; apt-get install -y -qq \"$download\" > /dev/null ;;\n",
+		"      deb) apt-get install -y -qq \"${deb_flags[@]}\" \"$download\" > /dev/null ;;\n",
 		"record_deb() {\n  local package\n  package=\"$(dpkg-deb -f \"$1\" Package)\" || exit\n",
 		"  if [ \"$mode\" = full ]; then\n    installed_packages > \"$build_dir/packages.after\"\n  else\n    listing=\"$(installed_packages)\" || {\n",
 		"  local link_check=spelling\n  verify_pin \"$tool_dir/\"'uv-0.1.0' ",
@@ -528,9 +531,12 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		"  expose link required '/opt/cc-remote/closure'\n  expose copy required '/usr/local/bin/certutil'\n  expose copy optional '/usr/local/share/mime'\n  expose copy optional '/usr/local/share/glib-2.0/schemas'\n  expose copy optional '/usr/local/share/icons'\n",
 		"  closure_link \"$closure_root\" \"$payload$closure_root\"\n  closure_link '/usr/local/bin/certutil' \"$closure_root/\"'usr/bin/certutil'\n  if [ -d \"$closure_root/\"'usr/share/mime' ]; then\n    closure_link '/usr/local/share/mime' \"$closure_root/\"'usr/share/mime'\n  fi\n",
 		"  closure_project '/usr/share/X11/xkb'\n  write_conf \"$closure_loader_conf\"",
-		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\ndone\nif [ -e /var/lib/cc-remote/closure.registered ]; then\n  flock /var/lib/cc-remote/ldconfig.lock ldconfig\nfi\nSH\n",
+		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\n  echo \"$boot\" > \"$image.boot\"\ndone\nif [ -e /var/lib/cc-remote/closure.registered ]; then\n  flock /var/lib/cc-remote/ldconfig.lock ldconfig\nfi\nSH\n",
 		"  pack_path required '/opt/cc-remote/closure'\n  pack_path required '/usr/local/bin/certutil'\n  pack_path optional '/usr/local/share/mime'\n",
-		"  packages) provision_packages \"${2:-}\" ;;\n  loader) provision_loader ;;\n",
+		"  packages) provision_packages \"${2:-}\" \"${3:-}\" ;;\n  loader) provision_loader ;;\n",
+		"  payload) provision_payload \"${2:-}\" \"${3:-}\" \"${4:-}\" ;;\n",
+		"debs_dir=/var/lib/cc-remote/build/resident\npackages_pack=/var/lib/cc-remote/build/packages.tar\npackages_store=/var/lib/cc-remote/packages\n",
+		"  tar -C \"$debs_dir\" --numeric-owner -cf \"$packages_pack\" .\n",
 	} {
 		if !bytes.Contains(with.ProvisionScript, []byte(want)) {
 			t.Errorf("provision.sh with apt.payload lacks\n%s", want)
@@ -627,7 +633,7 @@ func fingerprints(t *testing.T, inventory Inventory) fingerprintSet {
 	if err != nil {
 		t.Fatalf("RenderImage: %v", err)
 	}
-	return fingerprintSet{scripts.Fingerprint(), context.Fingerprint(), Stamp(scripts, nil, digest)}
+	return fingerprintSet{scripts.Fingerprint(), context.Fingerprint(), Stamp(scripts, nil, digest, "")}
 }
 
 func TestRenderImageDockerfile(t *testing.T) {
