@@ -127,15 +127,17 @@ func (f *Fake) Exec(_ context.Context, id string, cmd []string, stdin io.Reader)
 		}
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.record("exec %s %q", id, cmd)
-	if err := f.setState(id, providers.StateRunning); err != nil {
+	err := f.setState(id, providers.StateRunning)
+	handle := f.Handle
+	f.mu.Unlock()
+	if err != nil {
 		return providers.Result{}, err
 	}
-	if f.Handle == nil {
+	if handle == nil {
 		return providers.Result{}, nil
 	}
-	return f.Handle(id, slices.Clone(cmd), input), nil
+	return handle(id, slices.Clone(cmd), input), nil
 }
 
 func (f *Fake) SSHTarget(_ context.Context, id string) (providers.Target, error) {

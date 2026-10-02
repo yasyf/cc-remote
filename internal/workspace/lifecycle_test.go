@@ -1113,6 +1113,8 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 				h.cfg.Profiles["lean"] = profile
 				h.session = h.open()
 			}
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
 			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
 			checkingOut, preparing := h.machine.hold(t, checkout), h.machine.hold(t, prepares)
 			release := func(fragment string) {
@@ -1123,10 +1125,10 @@ func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
 				upstream[fragment].release <- result
 			}
 			created := make(chan error, 1)
-			go func() {
+			creating.Go(func() {
 				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
 				created <- err
-			}()
+			})
 			upstream[packagesPhase].awaitEntered(t)
 			upstream[installs].awaitEntered(t)
 			checkingOut.awaitEntered(t)
