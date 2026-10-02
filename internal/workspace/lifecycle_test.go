@@ -1264,34 +1264,75 @@ func TestTheEnrollmentWaitsForTheToolInstallButNotForThePackages(t *testing.T) {
 }
 
 func TestTheClosureLoaderRunsAfterThePackagesAndTheToolInstallAndGatesConfigure(t *testing.T) {
+	tests := []struct {
+		name          string
+		first, second string
+	}{
+		{name: "the packages finish first", first: packagesPhase, second: installs},
+		{name: "the tool install finishes first", first: installs, second: packagesPhase},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newClosurePayloadHarness(t)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			lanes := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
+			registering, configuring := h.machine.hold(t, loaderPhase), h.machine.hold(t, configures)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			lanes[packagesPhase].awaitEntered(t)
+			lanes[installs].awaitEntered(t)
+			registering.stillParked(t, "while the packages and the tool install were still running")
+			lanes[tt.first].release <- providers.Result{}
+			registering.stillParked(t, "once only "+tt.first+" had finished")
+			lanes[tt.second].release <- providers.Result{}
+			registering.awaitEntered(t)
+			configuring.stillParked(t, "while the closure loader was still running")
+			registering.release <- providers.Result{}
+			configuring.awaitEntered(t)
+			configuring.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, packagesPhase, loaderPhase, configures, publishes)
+			h.ordered(0, installs, loaderPhase, prepares, publishes)
+			if packages := h.machine.scripts["ws-1"]; h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ran("ws-1", "sudo bash -s packages resident") != 1 {
+				t.Errorf("the closure create ran %q; want one resident packages phase and one loader phase", packages)
+			}
+		})
+	}
+}
+
+func TestAResumeRegistersTheClosureAfterItsPackagesAndToolInstall(t *testing.T) {
 	h := newClosurePayloadHarness(t)
-	var creating sync.WaitGroup
-	t.Cleanup(creating.Wait)
-	packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
-	registering, configuring := h.machine.hold(t, loaderPhase), h.machine.hold(t, configures)
-	created := make(chan error, 1)
-	creating.Go(func() {
-		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
-		created <- err
-	})
-	packaging.awaitEntered(t)
-	installing.awaitEntered(t)
-	registering.stillParked(t, "while the packages and the tool install were still running")
-	packaging.release <- providers.Result{}
-	registering.stillParked(t, "once only the packages had finished")
-	installing.release <- providers.Result{}
-	registering.awaitEntered(t)
-	configuring.stillParked(t, "while the closure loader was still running")
-	registering.release <- providers.Result{}
-	configuring.awaitEntered(t)
-	configuring.release <- providers.Result{}
-	if err := <-created; err != nil {
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	h.ordered(0, packagesPhase, loaderPhase, configures, publishes)
-	h.ordered(0, installs, loaderPhase, prepares, publishes)
-	if packages := h.machine.scripts["ws-1"]; h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ran("ws-1", "sudo bash -s packages resident") != 1 {
-		t.Errorf("the closure create ran %q; want one resident packages phase and one loader phase", packages)
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	drifted := h.drift(strings.ReplaceAll(closureInv, "1.8.2", "1.8.3"))
+	before := len(h.machine.scripts["ws-1"])
+	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(before, readies, packagesPhase, loaderPhase, publishes)
+	h.ordered(before, toolsPhase, installs, loaderPhase)
+	var loaders, resident int
+	for _, script := range h.machine.scripts["ws-1"][before:] {
+		if strings.Contains(script, loaderPhase) {
+			loaders++
+		}
+		if strings.Contains(script, "sudo bash -s packages resident") {
+			resident++
+		}
+	}
+	if loaders != 1 || resident != 1 {
+		t.Errorf("the resume ran the loader %d times and the resident packages %d times, want once each: %q", loaders, resident, h.machine.scripts["ws-1"][before:])
 	}
 }
 

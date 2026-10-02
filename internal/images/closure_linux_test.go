@@ -1,10 +1,12 @@
 package images
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +79,12 @@ dir="$(sed -n 's|.*<dir>\(.*\)</dir>.*|\1|p' "$FONTCONFIG_FILE")"
 cachedir="$(sed -n 's|.*<cachedir>\(.*\)</cachedir>.*|\1|p' "$FONTCONFIG_FILE")"
 printf '%s\n' "fc-cache $* uid=$(id -u) conf=$FONTCONFIG_FILE" >> "$TEST_ROOT/fc-cache.log"
 case "$1" in
-  -f) : > "$cachedir/abc-le64.cache-9" ;;
+  -f)
+    : > "$cachedir/abc-le64.cache-9"
+    if [ -n "${FC_TOUCH:-}" ]; then
+      python3 -c 'import os, sys; os.utime(sys.argv[1], ns=(1700000000500000000, 1700000000500000000))' "$dir"
+    fi
+    ;;
   -v)
     if [ -n "${FC_STALE:-}" ]; then
       echo "$dir: caching, new cache contents: 1 fonts, 1 dirs"
@@ -85,6 +92,7 @@ case "$1" in
       find "$dir" -type d | sort | while read -r d; do
         echo "$d: skipping, existing cache is valid: 1 fonts, 0 dirs"
       done
+      echo "$dir: skipping, looped directory detected"
     fi
     echo "$cachedir: not cleaning unwritable cache directory"
     echo "fc-cache: succeeded"
@@ -98,9 +106,24 @@ shift 3
 exec "$@"
 `
 	fakeFlock = `#!/bin/sh
+case "$1" in
+  *[!0-9]*) ;;
+  *) exit 0 ;;
+esac
 printf '%s\n' "flock $*" >> "$TEST_ROOT/calls"
 shift
 exec "$@"
+`
+	fakeServiceStart = `#!/bin/sh
+printf '%s\n' "$*" >> "$TEST_ROOT/sprite-env.log"
+case "$2" in
+  get) test -f "$TEST_ROOT/service" ;;
+  create)
+    : > "$TEST_ROOT/service"
+    command="${7#-n,sh,-c,}"
+    exec sh -c "${command% && exec sleep infinity}"
+    ;;
+esac
 `
 	fakeLdconfig  = "#!/bin/sh\nprintf '%s\\n' \"ldconfig$*\" >> \"$TEST_ROOT/calls\"\n"
 	fakeAptCache  = "#!/bin/sh\nprintf 'Package: libasound2t64\\n'\n"
@@ -117,23 +140,6 @@ if [ "$1" = install ]; then
 fi
 `
 )
-
-func scriptInventory() Inventory {
-	return Inventory{
-		Version: SchemaVersion,
-		Apt: Apt{
-			Install: []string{"openssh-server", "libnss3"},
-			T64:     []string{"libasound2"},
-			Payload: &AptPayload{
-				Resident:  []string{"bubblewrap"},
-				Closure:   []string{"libnss3", "libasound2t64", "fonts-x"},
-				Bins:      []string{"certutil", "fc-match"},
-				Fonts:     []string{"Noto Sans CJK JP"},
-				Consumers: []string{".agent-browser/chrome", "/opt/cc-remote/tools/office/soffice.bin"},
-			},
-		},
-	}
-}
 
 func machineArch(t *testing.T) string {
 	t.Helper()
@@ -250,11 +256,9 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 	sum := sha256.Sum256([]byte(image))
 	sha := hex.EncodeToString(sum[:])
 	tests := []struct {
-		name        string
-		foreign     func(root, closure, payloads string) error
-		loaderConf  func(closure string) string
-		wantErr     func(root, closure, dir string) string
-		fontsAbsent bool
+		name    string
+		foreign func(root, closure, payloads string) error
+		wantErr func(root, closure, dir string) string
 	}{
 		{name: "the payload's closure is exposed and configured"},
 		{
@@ -293,7 +297,6 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			wantErr: func(root, _, _ string) string {
 				return "cc-remote: " + root + "/etc/ld.so.conf.d/zz-cc-remote-closure.conf exists and is not the closure configuration this payload writes"
 			},
-			fontsAbsent: true,
 		},
 	}
 	scripts, err := Render(scriptInventory(), "agents")
@@ -305,13 +308,14 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			root, fakes := t.TempDir(), t.TempDir()
 			store, payloads, closure := filepath.Join(root, "store"), filepath.Join(root, "payload"), filepath.Join(root, "closure")
 			loaderConf, fontsConf := filepath.Join(root, "etc/ld.so.conf.d/zz-cc-remote-closure.conf"), filepath.Join(root, "etc/fonts/conf.d/99-cc-remote-closure.conf")
-			dir := filepath.Join(payloads, sha)
+			dir, lock, helper := filepath.Join(payloads, sha), filepath.Join(root, "ldconfig.lock"), filepath.Join(root, "payload-mount.sh")
 			writeFakes(t, fakes, map[string]string{
 				"id":         "#!/bin/sh\necho 0\n",
 				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
 				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
 				"mount":      fakeMount,
-				"sprite-env": "#!/bin/sh\nexit 0\n",
+				"sprite-env": fakeServiceStart,
+				"flock":      fakeFlock,
 				"ldconfig":   fakeLdconfig,
 			})
 			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
@@ -355,13 +359,17 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				"expose link required '/opt/cc-remote/closure'\n", "expose link required "+quote(closure)+"\n",
 				"'/usr/local/bin/", "'"+root+"/usr/local/bin/",
 				"'/usr/local/share/", "'"+root+"/usr/local/share/",
-				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
+				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(helper)+"\n",
+				"-n,sh,-c,/opt/cc-remote/payload-mount.sh && ", "-n,sh,-c,"+helper+" && ",
+				"/var/lib/cc-remote/payload/", store+"/",
+				"/opt/cc-remote/payload/", payloads+"/",
+				"/var/lib/cc-remote/ldconfig.lock", lock,
 			).Replace(string(scripts.ProvisionScript))
 			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
 			cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
 			out, err := cmd.CombinedOutput()
 			if _, err := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(err) {
-				t.Errorf("the payload phase ran ldconfig: %v", err)
+				t.Errorf("the payload phase or the service it created ran ldconfig: %v", err)
 			}
 			if tt.wantErr != nil {
 				if want := tt.wantErr(root, closure, dir); exitCode(err) != 1 || !strings.Contains(string(out), want) {
@@ -404,20 +412,99 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 					t.Errorf("left %q", leftovers)
 				}
 			}
-			helper, err := os.ReadFile(filepath.Join(root, "payload-mount.sh"))
-			if err != nil || !strings.HasSuffix(string(helper), "done\nldconfig\n") || !strings.Contains(string(helper), "mount -t squashfs -o ro,nosuid,nodev,loop") {
-				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts followed by ldconfig", helper, err)
+			wantCalls := []string{"services get cc-remote-payload", "services create cc-remote-payload --cmd sudo --args -n,sh,-c," + helper + " && exec sleep infinity --duration 1ms --no-stream"}
+			if got := logLines(t, filepath.Join(root, "sprite-env.log")); !slices.Equal(got, wantCalls) {
+				t.Errorf("sprite-env saw %q, want %q", got, wantCalls)
+			}
+			script, err := os.ReadFile(helper)
+			if err != nil || !strings.HasSuffix(string(script), "done\nif [ -n \"$mounted\" ]; then\n  flock "+lock+" ldconfig\nfi\n") || !strings.Contains(string(script), "mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n    mounted=1\n") {
+				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts and a locked ldconfig only after one", script, err)
+			}
+		})
+	}
+}
+
+func TestPayloadMountRegistersTheClosureOnlyWhenItMounts(t *testing.T) {
+	image := "hsqs closure payload"
+	sum := sha256.Sum256([]byte(image))
+	sha := hex.EncodeToString(sum[:])
+	tests := []struct {
+		name      string
+		premount  bool
+		registers bool
+	}{
+		{name: "an image the create already mounted registers nothing", premount: true},
+		{name: "an image mounted at boot registers under the lock", registers: true},
+	}
+	scripts, err := Render(scriptInventory(), "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, helper, opened := strings.Cut(string(scripts.ProvisionScript), "<<'SH'\n")
+	helper, _, closed := strings.Cut(helper, "\nSH\n")
+	if !opened || !closed {
+		t.Fatalf("the provision script writes no boot helper:\n%s", scripts.ProvisionScript)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			store, payloads, lock := filepath.Join(root, "store"), filepath.Join(root, "payload"), filepath.Join(root, "ldconfig.lock")
+			stored, dir := filepath.Join(store, sha+".sqfs"), filepath.Join(payloads, sha)
+			writeFakes(t, fakes, map[string]string{
+				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
+				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
+				"mount":      fakeMount,
+				"flock":      fakeFlock,
+				"ldconfig":   fakeLdconfig,
+			})
+			writePluginTestFile(t, stored, []byte(image), 0o644)
+			env := append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
+			if tt.premount {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				premount := exec.Command(filepath.Join(fakes, "mount"), "-t", "squashfs", "-o", "ro,nosuid,nodev,loop", stored, dir)
+				premount.Env = env
+				if out, err := premount.CombinedOutput(); err != nil {
+					t.Fatalf("premount: %v\n%s", err, out)
+				}
+				if err := os.Remove(filepath.Join(root, "mounts")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh", "-c", strings.NewReplacer(
+				"/var/lib/cc-remote/payload/", store+"/",
+				"/opt/cc-remote/payload/", payloads+"/",
+				"/var/lib/cc-remote/ldconfig.lock", lock,
+			).Replace(helper))
+			cmd.Env = env
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("payload-mount.sh: %v\n%s", err, out)
+			}
+			var mounted, calls []string
+			if !tt.premount {
+				mounted = []string{stored}
+			}
+			if tt.registers {
+				calls = []string{"flock " + lock + " ldconfig", "ldconfig"}
+			}
+			if got := logLines(t, filepath.Join(root, "mounts")); !slices.Equal(got, mounted) {
+				t.Errorf("mounted %q, want %q", got, mounted)
+			}
+			if got := logLines(t, filepath.Join(root, "calls")); !slices.Equal(got, calls) {
+				t.Errorf("calls = %q, want %q", got, calls)
 			}
 		})
 	}
 }
 
 type fakePackage struct {
-	Version  string   `json:"version"`
-	Arch     string   `json:"arch,omitempty"`
-	Depends  string   `json:"depends,omitempty"`
-	Provides string   `json:"provides,omitempty"`
-	Files    []string `json:"files"`
+	Version    string   `json:"version"`
+	Arch       string   `json:"arch,omitempty"`
+	Depends    string   `json:"depends,omitempty"`
+	PreDepends string   `json:"predepends,omitempty"`
+	Provides   string   `json:"provides,omitempty"`
+	Files      []string `json:"files"`
 }
 
 type fakeDpkg struct {
@@ -459,7 +546,7 @@ func newCaptureHost(t *testing.T) *captureHost {
 	lib := h.lib
 	h.dpkg = fakeDpkg{
 		Packages: map[string]*fakePackage{
-			"libfoo1":             {Version: "1.0-1", Depends: "libc6 (>= 2.34)", Files: []string{lib, lib + "/libfoo.so.1.0", lib + "/libfoo.so.1", lib + "/libfoo.so", lib + "/libfoo-env.conf", "/lib/" + arch + "-linux-gnu/libalias.so.1", "/usr/bin/footool", "/usr/share/doc/libfoo1", "/usr/share/doc/libfoo1/copyright", "/usr/share/doc/libfoo1/NEWS.gz", "/usr/share/doc/libfoo1/missing.txt"}},
+			"libfoo1":             {Version: "1.0-1", Depends: "libc6 (>= 2.34)", Files: []string{lib, lib + "/libfoo.so.1.0", lib + "/libfoo.so.1", lib + "/libfoo.so", "/lib/" + arch + "-linux-gnu/libalias.so.1", "/usr/bin/footool", "/usr/share/doc/libfoo1", "/usr/share/doc/libfoo1/copyright", "/usr/share/doc/libfoo1/NEWS.gz", "/usr/share/doc/libfoo1/missing.txt"}},
 			"fonts-x":             {Version: "1.0", Arch: "all", Files: []string{"/usr/share/fonts/truetype/x", "/usr/share/fonts/truetype/x/X.ttf"}},
 			"hicolor-icon-theme":  {Version: "0.18-2", Arch: "all", Files: []string{"/usr/share/icons/hicolor", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme"}},
 			"shared-mime-info":    {Version: "2.4-5", Files: []string{"/usr/share/mime/packages/freedesktop.org.xml"}},
@@ -492,7 +579,6 @@ func newCaptureHost(t *testing.T) *captureHost {
 	h.file("/opt/cc-remote/tools/office/soffice.bin", "\x7fELF soffice", 0o755)
 	h.link(lib+"/libfoo.so.1", "libfoo.so.1.0")
 	h.link(lib+"/libfoo.so", lib+"/libfoo.so.1.0")
-	h.link(lib+"/libfoo-env.conf", "/etc/environment")
 	h.link("/usr/share/doc/libfoo1/NEWS.gz", "../../common-licenses/GPL")
 	h.link("/lib", "usr/lib")
 	h.link("/etc/alternatives/x-cursor-theme", "/usr/share/icons/hicolor/cursor.theme")
@@ -609,8 +695,16 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			}
 		}, wantErr: func(h *captureHost) string { return "cc-remote: " + h.closure + " already exists on the build machine" }},
 		{name: "a setuid file is fatal", mutate: func(h *captureHost) {
-			if err := os.Chmod(filepath.Join(h.host, "usr/bin/footool"), 0o4755); err != nil {
+			path := filepath.Join(h.host, "usr/bin/footool")
+			if err := os.Chmod(path, os.ModeSetuid|0o755); err != nil {
 				t.Fatal(err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&os.ModeSetuid == 0 {
+				t.Fatalf("footool mode = %v, want the setuid bit", info.Mode())
 			}
 		}, wantErr: func(*captureHost) string { return "cc-remote: libfoo1 ships setuid or setgid /usr/bin/footool" }},
 		{name: "a special file is fatal", mutate: func(h *captureHost) {
@@ -621,17 +715,23 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		}, wantErr: func(*captureHost) string {
 			return "cc-remote: libfoo1 ships " + lib + "/libfoo.fifo, which is neither a regular file nor a symlink"
 		}},
-		{name: "an unowned absolute symlink leaving the closure is fatal", mutate: func(h *captureHost) {
+		{name: "an absolute symlink leaving the closure is fatal", mutate: func(h *captureHost) {
 			h.link(lib+"/libstray.so", "/opt/stray/lib.so")
 			h.dpkg.Packages["libfoo1"].Files = append(h.dpkg.Packages["libfoo1"].Files, lib+"/libstray.so")
 		}, wantErr: func(*captureHost) string {
-			return "cc-remote: symlink " + lib + "/libstray.so -> /opt/stray/lib.so leaves the closure and no pre-existing package owns its target (None)"
+			return "cc-remote: libfoo1 symlink " + lib + "/libstray.so -> /opt/stray/lib.so leaves the closure"
 		}},
 		{name: "an absolute symlink into a resident package is fatal", mutate: func(h *captureHost) {
 			h.link(lib+"/libsshd.so", "/usr/sbin/sshd")
 			h.dpkg.Packages["libfoo1"].Files = append(h.dpkg.Packages["libfoo1"].Files, lib+"/libsshd.so")
 		}, wantErr: func(*captureHost) string {
-			return "cc-remote: symlink " + lib + "/libsshd.so -> /usr/sbin/sshd leaves the closure and no pre-existing package owns its target (['openssh-server'])"
+			return "cc-remote: libfoo1 symlink " + lib + "/libsshd.so -> /usr/sbin/sshd leaves the closure"
+		}},
+		{name: "an absolute symlink into a pre-existing package is fatal", mutate: func(h *captureHost) {
+			h.link(lib+"/libfoo-env.conf", "/etc/environment")
+			h.dpkg.Packages["libfoo1"].Files = append(h.dpkg.Packages["libfoo1"].Files, lib+"/libfoo-env.conf")
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: libfoo1 symlink " + lib + "/libfoo-env.conf -> /etc/environment leaves the closure"
 		}},
 		{name: "a relative symlink escaping the closure is fatal", mutate: func(h *captureHost) {
 			if err := os.Remove(filepath.Join(h.host, "usr/share/doc/libfoo1/NEWS.gz")); err != nil {
@@ -668,6 +768,9 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		}, wantErr: func(*captureHost) string { return "cc-remote: no module cache was generated under " + lib + "/gtk-3.0" }},
 		{name: "a stale font cache is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_STALE=1"} }, wantErr: func(h *captureHost) string {
 			return "cc-remote: the font cache is not valid for every closure font directory: ['" + h.closure + "/usr/share/fonts: caching, new cache contents: 1 fonts, 1 dirs']"
+		}},
+		{name: "a font directory whose mtime gained nanoseconds after normalisation is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_TOUCH=1"} }, wantErr: func(h *captureHost) string {
+			return "cc-remote: squashfs stores whole seconds, so the font cache would go stale for ['" + h.closure + "/usr/share/fonts']"
 		}},
 		{name: "an unresolved consumer library is fatal", mutate: func(h *captureHost) { h.env = []string{"LDSO_MISSING=libmissing.so.9"} }, wantErr: func(*captureHost) string {
 			return "cc-remote: /home/u/.agent-browser/chrome cannot load libmissing.so.9"
@@ -746,7 +849,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 			t.Errorf("%s mode = %v, %v; want %v", path, info.Mode(), err, want)
 		}
 	}
-	for path, want := range map[string]string{lib + "/libfoo.so.1": "libfoo.so.1.0", lib + "/libfoo.so": "libfoo.so.1.0", lib + "/libfoo-env.conf": "/etc/environment", "/usr/share/doc/libfoo1/NEWS.gz": "../../common-licenses/GPL"} {
+	for path, want := range map[string]string{lib + "/libfoo.so.1": "libfoo.so.1.0", lib + "/libfoo.so": "libfoo.so.1.0", "/usr/share/doc/libfoo1/NEWS.gz": "../../common-licenses/GPL"} {
 		if got, err := os.Readlink(closure + path); err != nil || got != want {
 			t.Errorf("%s -> %q, %v; want %q", path, got, err, want)
 		}
@@ -822,8 +925,8 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		t.Errorf("links = %v, want %v", manifest.Links, wantLinks)
 	case !reflect.DeepEqual(manifest.OS, map[string]string{"VERSION": "26.04 LTS (Resolute Raccoon)", "VERSION_ID": "26.04"}) || manifest.Libc6 != "2.42-1ubuntu1":
 		t.Errorf("os = %v, libc6 = %q", manifest.OS, manifest.Libc6)
-	case len(manifest.Files) != 13:
-		t.Errorf("files = %d entries, want 13:\n%s", len(manifest.Files), raw)
+	case len(manifest.Files) != 12:
+		t.Errorf("files = %d entries, want 12:\n%s", len(manifest.Files), raw)
 	}
 	sum := sha256.Sum256([]byte(h.contents["/usr/bin/footool"]))
 	wantFile := map[string]string{"path": "/usr/bin/footool", "package": "libfoo1", "sha256": hex.EncodeToString(sum[:]), "mode": "0755"}
@@ -868,7 +971,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	for _, path := range []string{lib + "/libfoo.so.1.0", lib + "/libalias.so.1", "/usr/bin/footool", "/usr/share/doc/libfoo1/copyright", "/usr/share/fonts/truetype/x/X.ttf", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme", "/usr/share/mime/packages/freedesktop.org.xml", lib + "/gtk-3.0/3.0.0/immodules/im-x.so"} {
 		bytes += len(h.contents[path])
 	}
-	if want := fmt.Sprintf("cc-remote: captured 5 packages, 13 files, %d bytes into %s\n", bytes, closure); out != want {
+	if want := fmt.Sprintf("cc-remote: captured 5 packages, 12 files, %d bytes into %s\n", bytes, closure); out != want {
 		t.Errorf("output = %q, want %q", out, want)
 	}
 }
@@ -973,6 +1076,98 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			}
 			if got := logLines(t, filepath.Join(root, "fc-match.log")); !slices.Equal(got, []string{"fc-match -f %{family} Noto Sans CJK JP"}) {
 				t.Errorf("fc-match calls = %q", got)
+			}
+		})
+	}
+}
+
+func TestCapturePartitionFollowsTheFirstCandidate(t *testing.T) {
+	tests := []struct {
+		name        string
+		seeds       []string
+		packages    map[string]*fakePackage
+		wantClosure []string
+	}{
+		{
+			name:        "the first of two new alternatives stays resident",
+			seeds:       []string{"seed"},
+			packages:    map[string]*fakePackage{"seed": {Version: "1", Depends: "liba | libb"}, "liba": {Version: "1"}, "libb": {Version: "1"}},
+			wantClosure: []string{"libb"},
+		},
+		{
+			name:        "a virtual dependency takes its first provider in sorted order",
+			seeds:       []string{"seed"},
+			packages:    map[string]*fakePackage{"seed": {Version: "1", Depends: "virt"}, "provz": {Version: "1", Provides: "virt"}, "prova": {Version: "1", Provides: "virt"}},
+			wantClosure: []string{"provz"},
+		},
+		{
+			name:        "a new alternative outranks the providers of a later virtual one",
+			seeds:       []string{"seed"},
+			packages:    map[string]*fakePackage{"seed": {Version: "1", Depends: "libq | virt"}, "libq": {Version: "1"}, "provb": {Version: "1", Provides: "virt"}},
+			wantClosure: []string{"provb"},
+		},
+		{
+			name:        "a clause a resident package already satisfies expands nothing",
+			seeds:       []string{"seed", "liby"},
+			packages:    map[string]*fakePackage{"seed": {Version: "1", Depends: "libx | liby"}, "libx": {Version: "1"}, "liby": {Version: "1"}},
+			wantClosure: []string{"libx"},
+		},
+		{
+			name:        "pre-depends expand like depends and pre-existing packages expand nothing",
+			seeds:       []string{"seed"},
+			packages:    map[string]*fakePackage{"seed": {Version: "1", Depends: "libc6 (>= 2.34)", PreDepends: "libp (>= 1)"}, "libp": {Version: "1"}, "libz": {Version: "1"}},
+			wantClosure: []string{"libz"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newCaptureHost(t)
+			h.payload.Closure = nil
+			h.dpkg.Packages = maps.Clone(tt.packages)
+			h.dpkg.Packages["libc6"] = &fakePackage{Version: "2.42-1ubuntu1"}
+			after := "ii \tlibc6\n"
+			for _, name := range slices.Sorted(maps.Keys(tt.packages)) {
+				after += "ii \t" + name + "\n"
+			}
+			writePluginTestFile(t, filepath.Join(h.build, "packages.before"), []byte("ii \tlibc6\n"), 0o644)
+			writePluginTestFile(t, filepath.Join(h.build, "packages.after"), []byte(after), 0o644)
+			writePluginTestFile(t, filepath.Join(h.build, "seeds"), []byte(strings.Join(tt.seeds, "\n")+"\n"), 0o644)
+			out, err := h.run()
+			want := "cc-remote: apt.payload.closure differs from the measured partition: resident or absent [], undeclared ['" + strings.Join(tt.wantClosure, "', '") + "']"
+			if exitCode(err) != 1 || !strings.Contains(out, want) {
+				t.Fatalf("capture = %v\n%s\nwant exit 1 with %q", err, out, want)
+			}
+			if _, err := os.Lstat(h.closure); !os.IsNotExist(err) {
+				t.Errorf("a refused partition created %s: %v", h.closure, err)
+			}
+		})
+	}
+}
+
+func TestRenderedScriptsParse(t *testing.T) {
+	withPayload := scriptInventory()
+	withoutPayload := withPayload
+	withoutPayload.Apt.Payload = nil
+	for name, inventory := range map[string]Inventory{"with a payload": withPayload, "without a payload": withoutPayload} {
+		t.Run(name, func(t *testing.T) {
+			scripts, err := Render(inventory, "agents")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, helper, opened := strings.Cut(string(scripts.ProvisionScript), "<<'SH'\n")
+			helper, _, closed := strings.Cut(helper, "\nSH\n")
+			if !opened || !closed {
+				t.Fatalf("the provision script writes no boot helper:\n%s", scripts.ProvisionScript)
+			}
+			for _, script := range []struct {
+				name, shell string
+				data        []byte
+			}{{"provision.sh", "bash", scripts.ProvisionScript}, {"plugins.sh", "bash", scripts.Plugins}, {"payload-mount.sh", "sh", []byte(helper)}} {
+				cmd := exec.Command(script.shell, "-n")
+				cmd.Stdin = bytes.NewReader(script.data)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Errorf("%s does not parse under %s -n: %v\n%s", script.name, script.shell, err, out)
+				}
 			}
 		})
 	}

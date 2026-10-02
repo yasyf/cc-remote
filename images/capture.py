@@ -159,8 +159,8 @@ def check_exposures(payload, captured):
             fatal(f"{link['path']} already exists on the build machine")
 
 
-def capture_files(paths_by_package, captured, new):
-    files, absolute = [], []
+def capture_files(paths_by_package, captured):
+    files = []
     for package, paths in paths_by_package.items():
         for path in paths:
             source = hostpath(path)
@@ -176,10 +176,9 @@ def capture_files(paths_by_package, captured, new):
             if stat.S_ISLNK(info.st_mode):
                 target = os.readlink(source)
                 if os.path.isabs(target):
-                    if canonical(target) in captured:
-                        target = os.path.relpath(canonical(target), os.path.dirname(canonical(path)))
-                    else:
-                        absolute.append((path, target))
+                    if canonical(target) not in captured:
+                        fatal(f"{package} symlink {path} -> {target} leaves the closure")
+                    target = os.path.relpath(canonical(target), os.path.dirname(canonical(path)))
                 elif not os.path.normpath(os.path.join(os.path.dirname(dest), target)).startswith(root + "/"):
                     fatal(f"{package} symlink {path} -> {target} escapes the closure")
                 os.symlink(target, dest)
@@ -198,11 +197,6 @@ def capture_files(paths_by_package, captured, new):
             else:
                 fatal(f"{package} ships {path}, which is neither a regular file nor a symlink")
             files.append(entry)
-    owned = owners([target for _, target in absolute] + [canonical(target) for _, target in absolute])
-    for path, target in absolute:
-        owner = owned.get(target) or owned.get(canonical(target))
-        if not owner or set(owner) & new:
-            fatal(f"symlink {path} -> {target} leaves the closure and no pre-existing package owns its target ({owner})")
     return files
 
 
@@ -269,7 +263,7 @@ def seal_fonts(generated):
     directory(cache)
     if not os.path.isdir(fonts):
         return
-    for d, _, _ in os.walk(fonts):
+    for d, _, _ in os.walk(root):
         info = os.lstat(d)
         os.utime(d, (int(info.st_atime), int(info.st_mtime)))
     built = run(["fc-cache", "-f"], FONTCONFIG_FILE=conf)
@@ -282,9 +276,12 @@ def seal_fonts(generated):
     if proof.returncode != 0:
         fatal(f"unprivileged fc-cache -v exited {proof.returncode}: {proof.stderr.strip()}")
     scanned = [line for line in proof.stdout.splitlines() if line.startswith(fonts + ":") or line.startswith(fonts + "/")]
-    stale = [line for line in scanned if "skipping, existing cache is valid" not in line]
+    stale = [line for line in scanned if not re.search(r": skipping, (existing cache is valid|looped directory detected)", line)]
     if not scanned or stale:
         fatal(f"the font cache is not valid for every closure font directory: {stale or 'no directory was scanned'}")
+    fractional = sorted({d for d in (line.split(": ", 1)[0] for line in scanned) if os.stat(d).st_mtime_ns % 1_000_000_000})
+    if fractional:
+        fatal(f"squashfs stores whole seconds, so the font cache would go stale for {fractional}")
     for path in walk("/var/cache/fontconfig", root):
         generated[path] = "fontconfig"
 
@@ -336,7 +333,7 @@ def capture():
     os.makedirs(root)
     if os.path.realpath(root) != root:
         fatal(f"{root} resolves to {os.path.realpath(root)}, so consumers would not find the same paths")
-    files = capture_files(paths_by_package, captured, new)
+    files = capture_files(paths_by_package, captured)
     generated = generated_paths(captured)
     capture_generated(generated)
     capture_cursor_theme(generated)

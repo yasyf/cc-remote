@@ -724,8 +724,8 @@ run_configure() {
   cookiesync install
 {{- end}}
 }
-
 {{- with .Closure}}
+
 verify_loader() {
   local missing
   missing="$(ld.so --list "$1" | awk '$2 == "=>" && $3 == "not" && $4 == "found" { print $1 }')" || exit
@@ -755,8 +755,8 @@ verify_closure_bin() {
   fi
   verify_loader "$path"
 }
+{{- end}}
 
-{{end -}}
 verify_system() {
   :
 {{- range .System}}

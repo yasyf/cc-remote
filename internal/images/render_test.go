@@ -355,6 +355,23 @@ func TestRenderProvisionWithoutOptionalSections(t *testing.T) {
 	}
 }
 
+func scriptInventory() Inventory {
+	return Inventory{
+		Version: SchemaVersion,
+		Apt: Apt{
+			Install: []string{"openssh-server", "libnss3"},
+			T64:     []string{"libasound2"},
+			Payload: &AptPayload{
+				Resident:  []string{"bubblewrap"},
+				Closure:   []string{"libnss3", "libasound2t64", "fonts-x"},
+				Bins:      []string{"certutil", "fc-match"},
+				Fonts:     []string{"Noto Sans CJK JP"},
+				Consumers: []string{".agent-browser/chrome", "/opt/cc-remote/tools/office/soffice.bin"},
+			},
+		},
+	}
+}
+
 func TestRenderExposesAndActivatesTheClosure(t *testing.T) {
 	scripts, err := Render(scriptInventory(), "agents")
 	if err != nil {
@@ -371,6 +388,9 @@ func TestRenderExposesAndActivatesTheClosure(t *testing.T) {
 		`closure_link '/usr/local/bin/certutil' "$closure_root/"'usr/bin/certutil'`,
 		`write_conf "$closure_loader_conf" "$closure_root/usr/lib/$(uname -m)-linux-gnu"`,
 		"flock \"$closure_lock\" ldconfig",
+		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n    mounted=1\n",
+		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$payload\"",
+		"done\nif [ -n \"$mounted\" ]; then\n  flock /var/lib/cc-remote/ldconfig.lock ldconfig\nfi\nSH\n",
 	} {
 		if !strings.Contains(provision, want) {
 			t.Errorf("provision.sh lacks\n%s", want)
@@ -381,6 +401,8 @@ func TestRenderExposesAndActivatesTheClosure(t *testing.T) {
 	}
 	plugins := string(scripts.Plugins)
 	for _, want := range []string{
+		"}\n\nverify_loader() {",
+		"}\n\nverify_system() {",
 		"verify_closure_bin 'certutil'",
 		"verify_closure_bin 'fc-match'",
 		`verify_loader "$HOME/"'.agent-browser/chrome'`,
@@ -402,17 +424,22 @@ func TestRenderWithoutAPayloadNeverMentionsTheClosure(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for name, data := range map[string][]byte{"provision.sh": plain.ProvisionScript, "plugins.sh": plain.Plugins} {
-		if bytes.Contains(data, []byte("closure")) {
-			t.Errorf("a payload-free inventory's %s mentions the closure", name)
+		for _, absent := range []string{"closure", "nosuid", "ldconfig", "mounted", "verify_loader", "verify_font"} {
+			if bytes.Contains(data, []byte(absent)) {
+				t.Errorf("a payload-free inventory's %s mentions %q", name, absent)
+			}
 		}
+	}
+	if !bytes.Contains(plain.ProvisionScript, []byte("mount -t squashfs -o ro,loop \"$image\" \"$dir\"\n  fi\ndone\nSH\n")) || !bytes.Contains(plain.Plugins, []byte("}\n\nverify_system() {")) {
+		t.Errorf("a payload-free inventory's scripts are not shaped like today's:\n%s\n%s", plain.ProvisionScript, plain.Plugins)
 	}
 	bare := Inventory{Version: SchemaVersion, Apt: Apt{Install: withPayload.Apt.Install, T64: withPayload.Apt.T64}}
 	baseline, err := Render(bare, "agents")
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !bytes.Equal(plain.ProvisionScript, baseline.ProvisionScript) {
-		t.Errorf("dropping apt.payload did not leave provision.sh byte-identical to today")
+	if !bytes.Equal(plain.ProvisionScript, baseline.ProvisionScript) || !bytes.Equal(plain.Plugins, baseline.Plugins) {
+		t.Errorf("dropping apt.payload did not leave both scripts byte-identical to a payload-free inventory's")
 	}
 }
 

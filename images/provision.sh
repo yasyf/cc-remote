@@ -268,6 +268,9 @@ verify() {
 }
 exec 9> /var/lib/cc-remote/payload/.lock
 flock 9
+{{- if .Closure}}
+mounted=
+{{- end}}
 for image in /var/lib/cc-remote/payload/*.sqfs; do
   if [ ! -e "$image" ]; then
     continue
@@ -280,11 +283,16 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
     verify "$sha256" "$device"
   else
     verify "$sha256" "$image"
-    mount -t squashfs -o ro,nosuid,nodev,loop "$image" "$dir"
+    mount -t squashfs -o ro{{if .Closure}},nosuid,nodev{{end}},loop "$image" "$dir"
+{{- if .Closure}}
+    mounted=1
+{{- end}}
   fi
 done
 {{- if .Closure}}
-ldconfig
+if [ -n "$mounted" ]; then
+  flock /var/lib/cc-remote/ldconfig.lock ldconfig
+fi
 {{- end}}
 SH
   mkdir -p "$payload"
@@ -301,7 +309,7 @@ SH
       device="$(findmnt -no SOURCE "$payload")"
       verify_payload "$sha256" "$device"
     else
-      mount -t squashfs -o ro,nosuid,nodev,loop "$image" "$payload"
+      mount -t squashfs -o ro{{if .Closure}},nosuid,nodev{{end}},loop "$image" "$payload"
     fi
   ) 9> "$payload_store/.lock"
   if ! jq -se 'length == 1 and (.[0] | type == "object")' "$payload/cc-remote-payload.json" > /dev/null; then
