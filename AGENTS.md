@@ -12,6 +12,17 @@ Read `docs/orca-workspaces.md` for the native composer flow and
 must use the same config and lifecycle binary. Preserve resource and workspace
 ownership.
 
+Existing agent sessions are protected, including Claude and Codex sessions, the
+child agents and workflows a session started, Orca, terminal hosts and
+pseudo-terminals, and their supervisors. A scope change, an amended brief, a
+review finding, a call budget, or cleanup never authorizes stopping,
+interrupting, signalling, or restarting any of them, whether by `TaskStop`,
+`kill`, a process-group signal, or relaunch. Deliver new instructions
+cooperatively, by messaging the running agent, queuing a follow-up stage, or
+resuming the same workflow run once it has ended, so the sessions and their work
+survive. A disposable child process the task itself started may be ended only
+after verifying its exact identity, and never by group.
+
 ## Repository Structure
 
 ```text
