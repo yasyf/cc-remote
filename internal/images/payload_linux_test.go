@@ -33,6 +33,11 @@ touch "$6/.mounted"
 `
 )
 
+var stockSettings = map[string]any{
+	"permissions": map[string]any{"allow": []any{"Bash(git status:*)"}},
+	"hooks":       map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "true"}}}}},
+}
+
 func payloadInventory() Inventory {
 	return Inventory{
 		Version: SchemaVersion,
@@ -145,11 +150,72 @@ func TestPluginsInstallExposesThePayload(t *testing.T) {
 	}
 }
 
-func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
-	stock := map[string]any{
-		"permissions": map[string]any{"allow": []any{"Bash(git status:*)"}},
-		"hooks":       map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "true"}}}}},
+func TestPluginsInstallOverStockSettingsNeedsThePayloadMerge(t *testing.T) {
+	pins := map[string]any{"hook@tools-market": true}
+	tests := []struct {
+		name        string
+		merge       bool
+		wantErr     string
+		absentCalls []string
+	}{
+		{name: "without the merge", wantErr: "plugins: the installed, enabled and loadable plugins differ from the pins", absentCalls: []string{"claude plugin install", "claude plugin update"}},
+		{name: "after the merge", merge: true, absentCalls: []string{"claude plugin install", "claude plugin update", "claude plugin marketplace update"}},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installed := fakeState{
+				Marketplaces: []map[string]any{{"name": "tools-market", "source": "directory", "path": "HOME/" + payloadMarket, "key": "dir:tools-market", "snapshot": map[string]string{"hook": "1.0.0"}}},
+				Plugins:      []map[string]any{installedPlugin("hook@tools-market", "1.0.0")},
+			}
+			h := newPluginsHost(t, payloadInventory(), marketplaceCatalog("0.7.17"), installed, stockSettings)
+			settings := filepath.Join(h.home, ".claude", "settings.json")
+			if err := os.Chmod(settings, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			payload := filepath.Join(t.TempDir(), digest)
+			writePayload(t, payload, h.home, "")
+			writePluginTestFile(t, filepath.Join(payload, settings), mustJSON(t, map[string]any{"enabledPlugins": pins}), 0o644)
+			writePluginTestFile(t, filepath.Join(payload, h.home, ".claude/plugins/installed_plugins.json"), mustJSON(t, map[string]any{
+				"version": 2,
+				"plugins": map[string]any{"hook@tools-market": []any{map[string]any{"scope": "user", "installPath": filepath.Join(h.home, payloadCache), "version": "1.0.0"}}},
+			}), 0o644)
+			writePluginTestFile(t, filepath.Join(h.fakes, "curl"), []byte(failingCurl), 0o700)
+			writePluginTestFile(t, filepath.Join(h.home, ".local/share/captain-hook/host/version.json"), []byte(installedHooks), 0o600)
+			if tt.merge {
+				if out, err := h.run("sh", "-c", enablePayloadPlugins, "enable-payload-plugins", payload); err != nil {
+					t.Fatalf("enable payload plugins: %v\n%s", err, out)
+				}
+			}
+			out, err := h.plugins("install", payload)
+			calls := h.calls()
+			for _, absent := range tt.absentCalls {
+				if slices.ContainsFunc(calls, func(call string) bool { return strings.HasPrefix(call, absent) }) {
+					t.Errorf("calls include %q:\n%s", absent, strings.Join(calls, "\n"))
+				}
+			}
+			if tt.wantErr != "" {
+				if exitCode(err) != 1 || !strings.Contains(out, tt.wantErr) {
+					t.Fatalf("install = %v\n%s\nwant exit 1 with %q", err, out, tt.wantErr)
+				}
+				if got, err := os.ReadFile(settings); err != nil || string(got) != string(mustJSON(t, stockSettings)) {
+					t.Errorf("settings = %q, %v; want the stock file untouched", got, err)
+				}
+				h.unready()
+				return
+			}
+			if err != nil {
+				t.Fatalf("install failed: %v\n%s\ncalls:\n%s", err, out, strings.Join(calls, "\n"))
+			}
+			got := h.settings()
+			want := map[string]any{"permissions": stockSettings["permissions"], "hooks": stockSettings["hooks"], "enabledPlugins": pins}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("settings = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 	hooks := []byte(`{"hooks":{}}`)
 	userFile := func(user, _ string) string { return user }
 	imageFile := func(_, image string) string { return image }
@@ -162,7 +228,7 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 	}{
 		{
 			name: "stock settings gain only the image's enabled plugins",
-			user: mustJSON(t, stock),
+			user: mustJSON(t, stockSettings),
 			image: mustJSON(t, map[string]any{
 				"enabledPlugins":         map[string]any{"a@m": true, "b@m": true},
 				"permissions":            map[string]any{"allow": []any{"Bash(*)"}},
@@ -170,8 +236,8 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 				"env":                    map[string]any{"IMAGE": "1"},
 			}),
 			want: map[string]any{
-				"permissions":    stock["permissions"],
-				"hooks":          stock["hooks"],
+				"permissions":    stockSettings["permissions"],
+				"hooks":          stockSettings["hooks"],
 				"enabledPlugins": map[string]any{"a@m": true, "b@m": true},
 			},
 		},
@@ -188,7 +254,7 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 			want:  map[string]any{"hooks": map[string]any{}, "enabledPlugins": map[string]any{}},
 		},
 		{name: "without user settings nothing is written", image: []byte(`{"enabledPlugins":{"a@m":true}}`)},
-		{name: "an image without settings leaves the user's file byte-identical", user: mustJSON(t, stock)},
+		{name: "an image without settings leaves the user's file byte-identical", user: mustJSON(t, stockSettings)},
 		{name: "a null user file is refused", user: []byte("null"), image: hooks, refuses: userFile},
 		{name: "a user file with two documents is refused", user: []byte("{}{}"), image: hooks, refuses: userFile},
 		{name: "a user file whose enabledPlugins is false is refused", user: []byte(`{"enabledPlugins":false}`), image: hooks, refuses: userFile},

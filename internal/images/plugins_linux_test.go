@@ -1,6 +1,7 @@
 package images
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +105,8 @@ elif args[:3] == ["plugin", "marketplace", "remove"]:
     declared.get("extraKnownMarketplaces", {}).pop(args[3], None)
     save_settings(declared)
 elif args == ["plugin", "list", "--json"]:
-    print(json.dumps(state["plugins"]))
+    enabled = settings().get("enabledPlugins", {})
+    print(json.dumps([dict(p, enabled=enabled.get(p["id"]) is True) for p in state["plugins"]]))
     tail_path = os.path.join(os.path.dirname(state_path), "plugin-list-tail")
     if os.path.exists(tail_path):
         mode, skip, faults = open(tail_path).read().split()
@@ -136,8 +138,12 @@ elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
             tool.write("#!/bin/sh\n")
         os.chmod(os.path.join(root, "bin", name), 0o755)
     state["plugins"] = [p for p in state["plugins"] if p["id"] != args[2]]
-    state["plugins"].append({"id": args[2], "version": version, "enabled": True, "errors": [], "installPath": root})
+    state["plugins"].append({"id": args[2], "version": version, "errors": [], "installPath": root})
     save()
+    if args[1] == "install":
+        declared = settings()
+        declared.setdefault("enabledPlugins", {})[args[2]] = True
+        save_settings(declared)
 elif args == ["auto-update"]:
     declared = settings().get("extraKnownMarketplaces", {})
     for source in state["marketplaces"]:
@@ -364,6 +370,7 @@ var (
 		"source":     map[string]any{"source": "github", "repo": "anthropics/claude-plugins-official", "ref": "main"},
 		"autoUpdate": false,
 	}
+	enabledPins = map[string]any{"hook@tools-market": true, "datadog@claude-plugins-official": true}
 )
 
 func marketplaceCatalog(official string) map[string]any {
@@ -374,8 +381,8 @@ func marketplaceCatalog(official string) map[string]any {
 	}
 }
 
-func healthyPlugin(id, version string) map[string]any {
-	return map[string]any{"id": id, "version": version, "enabled": true, "errors": []any{}}
+func installedPlugin(id, version string) map[string]any {
+	return map[string]any{"id": id, "version": version, "errors": []any{}}
 }
 
 func registered(officialRef any, officialVersion string) fakeState {
@@ -389,7 +396,7 @@ func registered(officialRef any, officialVersion string) fakeState {
 			{"name": "tools-market", "source": "directory", "path": "HOME/.local/share/cc-remote/marketplaces/tools-market", "key": "dir:tools-market", "snapshot": map[string]string{"hook": "1.0.0"}},
 			official,
 		},
-		Plugins: []map[string]any{healthyPlugin("hook@tools-market", "1.0.0"), healthyPlugin("datadog@claude-plugins-official", officialVersion)},
+		Plugins: []map[string]any{installedPlugin("hook@tools-market", "1.0.0"), installedPlugin("datadog@claude-plugins-official", officialVersion)},
 	}
 }
 
@@ -421,6 +428,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "official added without a ref",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered(nil, "0.7.17"),
+			settings:     map[string]any{"enabledPlugins": enabledPins},
 			wantCalls: []string{
 				"claude plugin marketplace remove claude-plugins-official",
 				"claude plugin marketplace add anthropics/claude-plugins-official#main",
@@ -431,21 +439,21 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "official already pinned",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "pinned official with auto-update turned on",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
+			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": map[string]any{"source": declaredOfficial["source"], "autoUpdate": true}}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
 		{
 			name:         "settings and a stale temp file at 0644",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.17"),
-			settings:     map[string]any{"env": keptEnv, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
 			loose:        true,
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove"},
 		},
@@ -457,6 +465,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				state.Marketplaces[0] = map[string]any{"name": "tools-market", "source": "github", "repo": "owner/tools-market", "ref": "main", "key": "github:owner/tools-market#main", "snapshot": map[string]string{"hook": "1.0.0"}}
 				return state
 			}(),
+			settings: map[string]any{"enabledPlugins": enabledPins},
 			wantCalls: []string{
 				"claude plugin marketplace remove tools-market",
 				"claude plugin marketplace add HOME/.local/share/cc-remote/marketplaces/tools-market",
@@ -468,6 +477,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			name:         "pinned official refreshed by update",
 			marketplaces: []Marketplace{toolsRef, officialBranch},
 			state:        registered("main", "0.7.16"),
+			settings:     map[string]any{"enabledPlugins": enabledPins},
 			wantCalls: []string{
 				"claude plugin marketplace update claude-plugins-official",
 				"claude plugin update datadog@claude-plugins-official",
@@ -537,6 +547,9 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			}
 			if got := h.checkedOut("tools-market"); got != commit {
 				t.Errorf("tools-market checkout = %q, want %s", got, commit)
+			}
+			if got := h.settings()["enabledPlugins"]; !reflect.DeepEqual(got, enabledPins) {
+				t.Errorf("settings enable %v, want every pin enabled as %v", got, enabledPins)
 			}
 			if tt.settings != nil {
 				if got := h.settings()["env"]; !reflect.DeepEqual(got, tt.settings["env"]) {
@@ -694,9 +707,11 @@ func TestPluginsFailClosedOnMarketplaceReads(t *testing.T) {
 }
 
 func TestPluginsFailClosedOnPluginReads(t *testing.T) {
+	enabled := map[string]any{"enabledPlugins": enabledPins}
 	tests := []struct {
 		name     string
 		state    fakeState
+		settings map[string]any
 		phase    string
 		tail     string
 		wantCode int
@@ -705,15 +720,15 @@ func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 		{name: "plugin list exits non-zero", phase: "verify", tail: "exit 0 9", wantCode: 42},
 		{name: "plugin list prints trailing garbage", phase: "verify", tail: "garbage 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
 		{name: "plugin list prints a second document", phase: "verify", tail: "extra 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
-		{name: "install snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 0 1", wantCode: 42},
-		{name: "post-install check read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 1 1", wantCode: 42},
-		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 2 1", wantCode: 42},
+		{name: "install snapshot read exits non-zero", state: registered("main", "0.7.16"), settings: enabled, phase: "install", tail: "exit 0 1", wantCode: 42},
+		{name: "post-install check read exits non-zero", state: registered("main", "0.7.16"), settings: enabled, phase: "install", tail: "exit 1 1", wantCode: 42},
+		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), settings: enabled, phase: "install", tail: "exit 2 1", wantCode: 42},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			inventory := marketplaceInventory([]Marketplace{toolsRef, officialBranch})
 			inventory.Claude.Plugins[1].Bins = []string{"bin/datadog"}
-			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), tt.state, nil)
+			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), tt.state, tt.settings)
 			if tt.phase == "verify" {
 				if out, err := h.plugins("install"); err != nil {
 					t.Fatalf("install failed: %v\n%s", err, out)
@@ -872,19 +887,29 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 
 func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
-	for _, tt := range []struct{ fail, payload bool }{{false, false}, {true, false}, {false, true}} {
-		fail, payload := tt.fail, tt.payload
-		t.Run(fmt.Sprintf("fail=%t payload=%t", fail, payload), func(t *testing.T) {
+	for _, tt := range []struct{ fail, payload, plugins bool }{{false, false, false}, {true, false, false}, {false, true, false}, {false, false, true}} {
+		fail, payload, plugins := tt.fail, tt.payload, tt.plugins
+		t.Run(fmt.Sprintf("fail=%t payload=%t plugins=%t", fail, payload, plugins), func(t *testing.T) {
 			names := []string{"first", "second", "existing", "third", "fourth", "cookiesync"}
 			inventory := Inventory{
 				Version:    SchemaVersion,
 				Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
 				Cookiesync: &Cookiesync{SchemaFingerprint: digest},
 			}
+			var state fakeState
+			executables := map[string]string{}
 			for _, name := range names {
-				inventory.Services = append(inventory.Services, Service{Name: name, Command: []string{"cookiesync", "supervise"}})
+				service := Service{Name: name, Command: []string{"cookiesync", "supervise"}}
+				if plugins && name != "cookiesync" {
+					service = Service{Name: name, Plugin: name + "@tools-market", Command: []string{"bin/" + name, "supervise"}}
+					plugin := installedPlugin(service.Plugin, "1.0.0")
+					plugin["installPath"] = filepath.Join("/plugins", name)
+					state.Plugins = append(state.Plugins, plugin)
+					executables[name] = filepath.Join("/plugins", name, "bin", name)
+				}
+				inventory.Services = append(inventory.Services, service)
 			}
-			host := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			host := newPluginsHost(t, inventory, nil, state, nil)
 			starts := make(chan string, len(names))
 			release := make(chan struct{})
 			cookieRelease := make(chan struct{})
@@ -996,7 +1021,8 @@ except urllib.error.HTTPError:
 				}
 			}
 			cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "configure")
-			cmd.Env = append(os.Environ(), "HOME="+host.home, "XDG_CONFIG_HOME="+filepath.Join(host.home, ".config"), "PATH="+host.fakes+":"+os.Getenv("PATH"), "TEST_SERVICE_API="+server.URL)
+			cmd.Env = append(os.Environ(), "HOME="+host.home, "XDG_CONFIG_HOME="+filepath.Join(host.home, ".config"), "PATH="+host.fakes+":"+os.Getenv("PATH"), "TEST_SERVICE_API="+server.URL,
+				"FAKE_STATE="+filepath.Join(host.fakes, "state.json"), "FAKE_CATALOG="+filepath.Join(host.fakes, "catalog.json"), "FAKE_LOG="+filepath.Join(host.fakes, "calls.log"))
 			cmd.Stdin = strings.NewReader("retained-input\n")
 			done := startArtifactScript(cmd)
 			for range 4 {
@@ -1051,6 +1077,19 @@ except urllib.error.HTTPError:
 			for _, name := range wantCreates {
 				if !finished[name] {
 					t.Errorf("Configure returned before create completed: %s", name)
+				}
+			}
+			wantLists := 0
+			if plugins {
+				wantLists = 1
+			}
+			if got := countCall(host.calls(), "claude plugin list --json"); got != wantLists {
+				t.Errorf("configure read the plugin list %d times, want %d", got, wantLists)
+			}
+			for _, name := range names {
+				want := "exec " + quote(cmp.Or(executables[name], filepath.Join(host.fakes, "cookiesync"))) + " 'supervise'\n"
+				if recipe, err := os.ReadFile(filepath.Join(host.home, ".cc-remote", "services", name)); err != nil || string(recipe) != want {
+					t.Errorf("service %s recipe = %q, %v; want %q", name, recipe, err, want)
 				}
 			}
 		})

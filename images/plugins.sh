@@ -37,12 +37,6 @@ claude_json() {
   printf '%s\n' "$output"
 }
 
-plugin_root() {
-  local plugins
-  plugins="$(claude_json plugin list --json)" || exit
-  plugin_path "$plugins" "$1"
-}
-
 plugin_path() {
   jq -er --arg id "$2" '.[] | select(.id == $id) | .installPath' <<< "$1"
 }
@@ -508,6 +502,13 @@ run_configure() {
 {{- end}}
 {{- if .Services}}
   local executable
+{{- range .Services}}
+{{- if .Plugin}}
+  local plugins
+  plugins="$(claude_json plugin list --json)" || exit
+{{- break}}
+{{- end}}
+{{- end}}
   write_supervisor{{range .Services}} {{q .Name}}{{end}}
 {{- range .Services}}
   executable={{executable .}}

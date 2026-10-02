@@ -175,13 +175,20 @@ The allowlist uses the following exposure rules for entries in the inventory:
 | `/opt/uv/python` and `$HOME/.local/share/uv/python` | Link each whole root. The user Python root is the only optional tree. |
 | Pinned `ref` marketplace checkouts, public or private | Link each checkout. |
 | Branch marketplace checkouts and every plugin cache version, public or private | Copy into writable directories. |
-| Claude's `installed_plugins.json`, `known_marketplaces.json`, and `settings.json` | Copy as regular files. |
+| Claude's `installed_plugins.json`, `known_marketplaces.json`, and `settings.json` | Copy as regular files; pack `settings.json` when the inventory pins Claude plugins or declares a branch marketplace. |
 | Codex runtime and configuration | Link `$HOME/.cache/codex-runtimes/codex-primary-runtime`; copy `$HOME/.codex/config.toml` and `$HOME/.codex/plugins/cache/openai-primary-runtime`. |
 | Captain Hook version directory | Keep a real directory; link its children except `.lock`. |
 
 Exposure replaces links into older payloads, including child links in an existing
 Captain Hook version directory, and leaves other existing paths, including
 copies, to the installer.
+
+Before installing plugins on create or resume with a payload, cc-remote merges
+the payload's `enabledPlugins` into an existing `~/.claude/settings.json`,
+preserving every other user setting. The merge rejects either file unless it
+contains exactly one JSON object with `enabledPlugins` absent or an object.
+If no user settings file exists, exposure copies the payload's file.
+
 Plugin caches are writable because plugins build runtime files
 and Claude writes `.in_use` there. The allowlist excludes owner state: agent
 authentication and sessions, plugin data, daemon locks, cc-remote workspace state,

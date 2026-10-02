@@ -121,7 +121,7 @@ func TestRenderPluginsServicesAndEnv(t *testing.T) {
 	for _, want := range []string{
 		`  require_env 'PORT'`,
 		`  claude_env 'DOMAIN' "example.com"`,
-		`  executable="$(plugin_root 'hooks@market')/"'bin/hooks'`,
+		`  executable="$(plugin_path "$plugins" 'hooks@market')/"'bin/hooks'`,
 		`  service 'hooks' env "URL=http://127.0.0.1:${PORT}" "$executable" 'serve'`,
 		`  executable="$(command -v 'cookiesync')"`,
 		`  checkout 'market' 'owner/market' '` + commit + `' public`,
@@ -233,6 +233,45 @@ func TestHomeTreesForBranchMarketplacesWithoutPlugins(t *testing.T) {
 	}
 	if got := homeTrees(inventory, nil); !slices.Equal(got, want) {
 		t.Errorf("homeTrees = %v, want %v", got, want)
+	}
+}
+
+func TestRenderPacksClaudeSettings(t *testing.T) {
+	ref := Marketplace{Name: "market", GitHub: "owner/market", Ref: commit}
+	branch := Marketplace{Name: "official", GitHub: "owner/official", Branch: "main"}
+	tests := []struct {
+		name         string
+		marketplaces []Marketplace
+		plugins      []Plugin
+		want         int
+	}{
+		{"plugins with ref marketplaces only", []Marketplace{ref}, []Plugin{{ID: "hooks@market", Version: "1.0.0"}}, 1},
+		{"plugins with a branch marketplace", []Marketplace{ref, branch}, []Plugin{{ID: "hooks@market", Version: "1.0.0"}, {ID: "docs@official", Version: "2.0.0"}}, 1},
+		{"branch marketplace without plugins", []Marketplace{branch}, nil, 1},
+		{"ref marketplace without plugins", []Marketplace{ref}, nil, 0},
+	}
+	const (
+		expose    = `    expose copy required "$HOME/"'.claude/settings.json'` + "\n"
+		pack      = `  pack_path required "$user_home/"'.claude/settings.json'` + "\n"
+		packKnown = `  pack_path required "$user_home/"'.claude/plugins/known_marketplaces.json'` + "\n"
+	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inventory := Inventory{Version: SchemaVersion, Claude: Claude{Marketplaces: tt.marketplaces, Plugins: tt.plugins}}
+			scripts, err := Render(inventory, "agents")
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if !bytes.Contains(scripts.ProvisionScript, []byte(packKnown)) {
+				t.Fatalf("provision.sh lacks %q", packKnown)
+			}
+			if got := bytes.Count(scripts.Plugins, []byte(expose)); got != tt.want {
+				t.Errorf("plugins.sh exposes settings.json %d times, want %d", got, tt.want)
+			}
+			if got := bytes.Count(scripts.ProvisionScript, []byte(pack)); got != tt.want {
+				t.Errorf("provision.sh packs settings.json %d times, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

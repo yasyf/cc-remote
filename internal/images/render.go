@@ -375,7 +375,7 @@ func verifyCalls(a Artifact, toolDir, binDir string) []string {
 
 func serviceExecutable(s Service) string {
 	if s.Plugin != "" {
-		return `"$(plugin_root ` + quote(s.Plugin) + `)/"` + quote(s.Command[0])
+		return `"$(plugin_path "$plugins" ` + quote(s.Plugin) + `)/"` + quote(s.Command[0])
 	}
 	return `"$(command -v ` + quote(s.Command[0]) + `)"`
 }

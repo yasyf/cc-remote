@@ -63,7 +63,10 @@ existing mount's loop device against its SHA-256. It checks the manifest against
 the tools fingerprint, home directory, architecture, and OS version, then exposes
 the mounted trees. Any missing required tree fails creation.
 Artifact directories and pinned marketplaces use links into the read-only mount;
-plugin caches and configuration use writable copies. The `cc-remote-payload`
+plugin caches and configuration use writable copies. Before installing plugins
+on create or resume with a payload, cc-remote merges the payload's `enabledPlugins`
+into existing Claude settings, preserving every other user setting.
+The `cc-remote-payload`
 service checks stored payloads, or the loop devices behind existing mounts,
 against their digests and remounts the files at boot, before dependent inventory
 services.

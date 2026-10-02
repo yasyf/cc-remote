@@ -56,7 +56,9 @@ func TestVerificationUsesCurrentMetadataOnEveryInvocation(t *testing.T) {
 			case "version":
 				state.Plugins[0]["version"] = "9.0.0"
 			case "disabled":
-				state.Plugins[0]["enabled"] = false
+				settings := h.settings()
+				settings["enabledPlugins"].(map[string]any)[state.Plugins[0]["id"].(string)] = false
+				writePluginTestFile(t, filepath.Join(h.home, ".claude", "settings.json"), mustJSON(t, settings), 0o600)
 			case "errors":
 				state.Plugins[0]["errors"] = []string{"unloadable"}
 			case "path":
