@@ -75,6 +75,18 @@ read_amount() {
   fi
 }
 
+read_kmsg() {
+  local status
+  for _ in 1 2 3; do
+    status=0
+    kmsg="$(timeout 2 cat "$root/dev/kmsg" 2> /dev/null)" || status=$?
+    if [ "$status" = 0 ] || [ "$status" = 124 ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 cgroup="$(sed -n 's/^0:://p' "$root/proc/self/cgroup")"
 dir="$hierarchy${cgroup%/}"
 while [ ! -e "$dir/memory.current" ] && [ "$dir" != "$hierarchy" ]; do
@@ -82,8 +94,8 @@ while [ ! -e "$dir/memory.current" ] && [ "$dir" != "$hierarchy" ]; do
 done
 events="$(cat "$dir/memory.events" 2> /dev/null)" || events=""
 oom=null
-if [ -r "$root/dev/kmsg" ]; then
-  oom="$({ dd if="$root/dev/kmsg" iflag=nonblock bs=8192 2> /dev/null || true; } \
+if read_kmsg; then
+  oom="$(printf '%s\n' "$kmsg" \
     | sed -n 's/^[0-9]*,[0-9]*,[0-9]*,[^;]*;//p' \
     | { grep -F -e oom-kill -e 'Out of memory' -e 'Killed process' || true; } \
     | tail -n 20 \

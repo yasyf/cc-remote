@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -42,6 +44,7 @@ func TestDiagnoseMemoryReadsTheCgroupTheKernelLogAndTheProgress(t *testing.T) {
 	tests := []struct {
 		name  string
 		files [][2]string
+		kmsg  func(t *testing.T, path string)
 		want  string
 	}{
 		{
@@ -99,12 +102,33 @@ func TestDiagnoseMemoryReadsTheCgroupTheKernelLogAndTheProgress(t *testing.T) {
 			want: `{"cgroup":"/sys/fs/cgroup/build","memory.current":4096,"memory.max":8192,"memory.peak":8192,` +
 				`"memory.events":{"low":0,"high":0,"max":0,"oom":0,"oom_kill":0,"oom_group_kill":0},"oom":[],"progress":null}`,
 		},
+		{
+			name: "a kernel log that never ends, like the device, is read until it goes quiet",
+			files: [][2]string{
+				{"proc/self/cgroup", "0::/build\n"},
+				{"sys/fs/cgroup/build/memory.current", "4096\n"},
+			},
+			kmsg: endlessKernelLog("6,1,1,-;eth0: link up\n3,2,2,-;" + killed + "\n"),
+			want: `{"cgroup":"/sys/fs/cgroup/build","memory.current":4096,"memory.max":null,"memory.peak":null,"memory.events":null,"oom":["` + killed + `"],"progress":null}`,
+		},
+		{
+			name: "a kernel log that passes the read test but cannot be read is null, not empty",
+			files: [][2]string{
+				{"proc/self/cgroup", "0::/build\n"},
+				{"sys/fs/cgroup/build/memory.current", "4096\n"},
+			},
+			kmsg: unreadableKernelLog,
+			want: `{"cgroup":"/sys/fs/cgroup/build","memory.current":4096,"memory.max":null,"memory.peak":null,"memory.events":null,"oom":null,"progress":null}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			for _, file := range tt.files {
 				writePluginTestFile(t, filepath.Join(root, file[0]), []byte(file[1]), 0o644)
+			}
+			if tt.kmsg != nil {
+				tt.kmsg(t, filepath.Join(root, "dev/kmsg"))
 			}
 			capture := func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
 				if want := []string{"sudo", "bash", "-s"}; !slices.Equal(argv, want) {
@@ -131,5 +155,32 @@ func TestDiagnoseMemoryReadsTheCgroupTheKernelLogAndTheProgress(t *testing.T) {
 				t.Errorf("evidence = %s\nwant       %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func endlessKernelLog(records string) func(*testing.T, string) {
+	return func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writer, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = writer.Close() })
+		if _, err := writer.WriteString(records); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func unreadableKernelLog(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -249,7 +249,14 @@ func (s *Session) exec(machine string) images.Exec {
 
 func (s *Session) capture(machine string) images.Capture {
 	return func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
-		return s.execute(ctx, machine, argv, stdin)
+		result, err := s.Provider.Exec(ctx, machine, argv, stdin)
+		if err != nil {
+			return nil, err
+		}
+		if result.ExitCode != 0 {
+			return nil, fmt.Errorf("%s on %s exited %d", argv[0], machine, result.ExitCode)
+		}
+		return result.Stdout, nil
 	}
 }
 

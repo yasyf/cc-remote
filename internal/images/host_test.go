@@ -84,7 +84,7 @@ func TestHostOperations(t *testing.T) {
 }
 
 func TestDiagnoseMemoryReturnsCompactEvidence(t *testing.T) {
-	failed := errors.New("sudo on m exited 1: sudo: a password is required")
+	failed := errors.New("sudo on m exited 1")
 	tests := []struct {
 		name    string
 		out     string
@@ -93,7 +93,7 @@ func TestDiagnoseMemoryReturnsCompactEvidence(t *testing.T) {
 		message string
 	}{
 		{name: "evidence", out: "{\"cgroup\": \"/sys/fs/cgroup\",\n  \"oom\": []}\n", want: `{"cgroup":"/sys/fs/cgroup","oom":[]}`},
-		{name: "a failed run", out: "{}", err: failed, message: "diagnose memory: sudo on m exited 1: sudo: a password is required"},
+		{name: "a failed run", out: "{}", err: failed, message: "diagnose memory: sudo on m exited 1"},
 		{name: "output that is not JSON", out: "api_key: hunter2\n", message: "diagnose memory: the evidence is not JSON: invalid character 'a' looking for beginning of value"},
 		{name: "no output", message: "diagnose memory: the evidence is not JSON: unexpected end of JSON input"},
 	}

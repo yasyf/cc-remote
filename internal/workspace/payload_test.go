@@ -294,6 +294,7 @@ func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) 
 		evidence  = `{"cgroup":"/sys/fs/cgroup/build","memory.current":734003200,"memory.max":1073741824,"memory.peak":1073741824,"memory.events":{"oom":1,"oom_kill":1},"oom":["Out of memory: Killed process 812 (node)"],"progress":"font:0"}`
 		verifyOut = "model: secret-config\n"
 		strayOut  = "api_key: hunter2\n"
+		strayErr  = "Authorization: Bearer s3cret\n"
 	)
 	tests := []struct {
 		name      string
@@ -304,16 +305,16 @@ func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) 
 	}{
 		{
 			name:      "the evidence is logged once",
-			diagnosis: providers.Result{Stdout: []byte(evidence + "\n")},
+			diagnosis: providers.Result{Stdout: []byte(evidence + "\n"), Stderr: []byte(strayErr)},
 			message:   logged,
 			evidence:  evidence,
 		},
 		{
-			name:      "a failing diagnostic is logged and still removes the machine",
-			diagnosis: providers.Result{Stderr: []byte("sudo: a password is required\n"), ExitCode: 1},
+			name:      "a failing diagnostic is logged without its output and still removes the machine",
+			diagnosis: providers.Result{Stdout: []byte(strayOut), Stderr: []byte(strayErr), ExitCode: 1},
 			message:   unlogged,
 			err: func(machine string) string {
-				return "diagnose memory: sudo on " + machine + " exited 1: sudo: a password is required"
+				return "diagnose memory: sudo on " + machine + " exited 1"
 			},
 		},
 		{
@@ -331,7 +332,8 @@ func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) 
 			machine := &buildMachine{failing: "plugins verify", failure: providers.Result{Stdout: []byte(verifyOut), ExitCode: 137}, diagnosis: tt.diagnosis}
 			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, payload: "hsqs"}
 			token := func(context.Context) (string, error) { return buildToken, nil }
-			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private), provider, "fake", "lean", token, io.Discard, io.Discard)
+			var stderr bytes.Buffer
+			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private), provider, "fake", "lean", token, io.Discard, &stderr)
 			name := provider.created.Name
 			if want := "plugins verify: env on " + name + " exited 137: "; err == nil || err.Error() != want {
 				t.Errorf("BuildPayload = %v, want %q", err, want)
@@ -349,9 +351,9 @@ func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) 
 			if _, err := provider.Get(t.Context(), name); !errors.Is(err, providers.ErrNotFound) {
 				t.Errorf("Get after the failed build = %v, want ErrNotFound", err)
 			}
-			for _, leaked := range []string{"secret-config", "hunter2"} {
-				if strings.Contains(logs.String(), leaked) || strings.Contains(fmt.Sprint(err), leaked) {
-					t.Errorf("%q left the machine: error %v, logs %s", leaked, err, logs)
+			for _, leaked := range []string{"secret-config", "hunter2", "s3cret"} {
+				if strings.Contains(logs.String(), leaked) || strings.Contains(stderr.String(), leaked) || strings.Contains(fmt.Sprint(err), leaked) {
+					t.Errorf("%q left the machine: error %v, logs %s, stderr %q", leaked, err, logs, stderr.String())
 				}
 			}
 			var records []logRecord
