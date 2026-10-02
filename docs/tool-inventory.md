@@ -88,7 +88,7 @@ contents and does not run the tool or its `verify` arguments.
 | --- | --- |
 | `claude.marketplaces[]` | `name`, `github` as `owner/repo`, exactly one of `ref` or `branch`, and optional `private` for `ref` only. |
 | `claude.plugins[]` | `id` as `name@marketplace`, `version`, and optional `bins` relative to the plugin root. |
-| `services[]` | `name`, argument-vector `command`, optional `plugin`, and optional `env` map. A plugin service's command is relative to that plugin's root. |
+| `services[]` | `name`, argument-vector `command`, `ready` as the home-relative path of the control socket that must accept a connection before configuration continues, optional `plugin`, and optional `env` map. A plugin service's command is relative to that plugin's root. |
 
 A `ref` marketplace uses a 40-character commit that cc-remote fetches into its
 own checkout for directory registration; Python tools cannot install from a

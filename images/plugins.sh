@@ -404,13 +404,36 @@ start_services() {
     fi
     for name in "$@"; do
       if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
-        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --no-stream
+        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream
       fi
     done
     drain_artifacts
   else
     "$state_dir/start.sh"
   fi
+}
+
+service_ready() {
+  if command -v sprite-env > /dev/null && [ "$(sprite-env services get "cc-remote-$1" 2> /dev/null | jq -r '.state.status')" != running ]; then
+    return 1
+  fi
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$2" 2> /dev/null
+}
+
+await_services() {
+  local attempts="$1" i=0
+  shift
+  while [ "$#" -gt 0 ]; do
+    until service_ready "$1" "$2"; do
+      i=$((i + 1))
+      if [ "$i" -ge "$attempts" ]; then
+        echo "cc-remote: service $1 is not ready after $((attempts / 10))s: it must be running and $2 must accept a connection; its log is $state_dir/services/$1.log" >&2
+        exit 1
+      fi
+      sleep 0.1
+    done
+    shift 2
+  done
 }
 
 run_install() {
@@ -515,6 +538,7 @@ run_configure() {
   service {{q .Name}}{{if .Env}} env{{range $key, $value := .Env}} {{expand (printf "%s=%s" $key $value)}}{{end}}{{end}} "$executable"{{range slice .Command 1}} {{q .}}{{end}}
 {{- end}}
   start_services{{range .Services}} {{q .Name}}{{end}}
+  await_services {{.ReadyAttempts}}{{range .Services}} {{q .Name}} {{home .Ready}}{{end}}
 {{- end}}
 {{- if .Cookiesync}}
   cookiesync install

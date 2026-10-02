@@ -179,14 +179,17 @@ cookiesync:
 services:
   - name: capt-hookd
     command: [capt-hookd, supervise]
+    ready: .daemonkit/a/com.example.capt-hookd/sv.sock
   - name: example-plugin
     plugin: example-plugin@example-marketplace
     command: [bin/example-plugin, serve]
+    ready: .daemonkit/a/com.example.plugin/sv.sock
     env:
       EXAMPLE_PORT: ${EXAMPLE_PORT}
       EXAMPLE_URL: http://127.0.0.1:${EXAMPLE_PORT}
   - name: cookiesync
     command: [cookiesync, supervise]
+    ready: .daemonkit/a/com.example.cookiesync/sv.sock
 
 prepare:
   - mkdir -p "$HOME/.cache/example"

@@ -154,5 +154,7 @@ chmod 700 "$HOME/.ssh"
 touch "$HOME/.ssh/authorized_keys"
 grep -qxF "$key" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$key" >> "$HOME/.ssh/authorized_keys"
 chmod 600 "$HOME/.ssh/authorized_keys"
-sprite-env services get sshd >/dev/null 2>&1 || sprite-env services create sshd --cmd sudo --args "sh,-c,mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e" --no-stream >&2
+sprite-env services get sshd >/dev/null 2>&1 || sprite-env services create sshd --cmd sudo --args "sh,-c,mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e" --duration 1ms --no-stream >&2
+i=0
+until ssh-keyscan -T 1 -t ed25519 127.0.0.1 2>/dev/null | grep -q .; do i=$((i + 1)); test "$i" -lt 60 || { echo "cc-remote: sshd did not accept a connection on port 22 within 30s" >&2; exit 1; }; sleep 0.5; done
 cat /etc/ssh/ssh_host_ed25519_key.pub`

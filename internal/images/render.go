@@ -61,22 +61,26 @@ type tree struct {
 	Path        string
 }
 
+var readyAttempts = 300
+
 type view struct {
 	Inventory
-	Tools       []Artifact
-	Prepare     []string
-	SystemTrees []tree
-	HomeTrees   []tree
+	Tools         []Artifact
+	Prepare       []string
+	SystemTrees   []tree
+	HomeTrees     []tree
+	ReadyAttempts int
 }
 
 func newView(inv Inventory, profile string) view {
 	tools := slices.Concat(inv.Tools, inv.Profiles[profile].Tools)
 	return view{
-		Inventory:   inv,
-		Tools:       tools,
-		Prepare:     slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
-		SystemTrees: systemTrees(inv),
-		HomeTrees:   homeTrees(inv, tools),
+		Inventory:     inv,
+		Tools:         tools,
+		Prepare:       slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
+		SystemTrees:   systemTrees(inv),
+		HomeTrees:     homeTrees(inv, tools),
+		ReadyAttempts: readyAttempts,
 	}
 }
 

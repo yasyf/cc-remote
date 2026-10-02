@@ -150,6 +150,7 @@ type Service struct {
 	Name    string            `yaml:"name"`
 	Plugin  string            `yaml:"plugin"`
 	Command []string          `yaml:"command"`
+	Ready   string            `yaml:"ready"`
 	Env     map[string]string `yaml:"env"`
 }
 
@@ -643,6 +644,8 @@ func (inv Inventory) validateServices() error {
 			return fmt.Errorf("%s: command %q is not a clean path relative to the plugin root", where, service.Command[0])
 		case service.Plugin != "" && !slices.ContainsFunc(inv.Claude.Plugins, func(p Plugin) bool { return p.ID == service.Plugin }):
 			return fmt.Errorf("%s: plugin %q is not under claude.plugins", where, service.Plugin)
+		case !relative(service.Ready):
+			return fmt.Errorf("%s: ready %q is not a clean socket path relative to the home directory", where, service.Ready)
 		}
 		for _, key := range slices.Sorted(maps.Keys(service.Env)) {
 			if err := inv.validateEnv(where+".env", key, service.Env[key]); err != nil {

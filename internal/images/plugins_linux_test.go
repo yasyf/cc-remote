@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const fakeClaude = `#!/usr/bin/env python3
@@ -193,7 +195,10 @@ if [ -f "$XDG_CONFIG_HOME/synckit/state.json" ]; then
   state=present
 fi
 echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
-[ "$2" != get ]
+case "$2" in
+  get) [ -f "${FAKE_LOG%/*}/services/$3" ] && printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")" ;;
+  create) mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3" ;;
+esac
 `
 
 type fakeState struct {
@@ -221,7 +226,7 @@ func marketplaceInventory(marketplaces []Marketplace) Inventory {
 }
 
 func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, state fakeState, settings map[string]any) pluginsHost {
-	h := pluginsHost{t: t, home: t.TempDir(), fakes: t.TempDir()}
+	h := pluginsHost{t: t, home: shortHome(t), fakes: t.TempDir()}
 	scripts, err := Render(inventory, "agents")
 	if err != nil {
 		t.Fatal(err)
@@ -238,12 +243,13 @@ func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, s
 		}
 	}
 	files := map[string][]byte{
-		"claude":     []byte(fakeClaude),
-		"git":        []byte(fakeGit),
-		"sprite-env": []byte(fakeSynckitReader),
-		"cookiesync": []byte(fakeSynckitReader),
-		"plugins.sh": scripts.Plugins,
-		"state.json": mustJSON(t, state),
+		"claude":         []byte(fakeClaude),
+		"git":            []byte(fakeGit),
+		"sprite-env":     []byte(fakeSynckitReader),
+		"cookiesync":     []byte(fakeSynckitReader),
+		"plugins.sh":     scripts.Plugins,
+		"state.json":     mustJSON(t, state),
+		"service-status": []byte("running\n"),
 	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(h.fakes, name), data, 0o700); err != nil {
@@ -262,13 +268,46 @@ func newPluginsHost(t *testing.T, inventory Inventory, catalog map[string]any, s
 	return h
 }
 
+func shortHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.MkdirTemp("", "h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	return home
+}
+
+func listenReady(t *testing.T, home, rel string) *net.UnixListener {
+	t.Helper()
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return listener
+}
+
 func (h pluginsHost) setCatalog(catalog map[string]any) {
 	if err := os.WriteFile(filepath.Join(h.fakes, "catalog.json"), mustJSON(h.t, catalog), 0o600); err != nil {
 		h.t.Fatal(err)
 	}
 }
 
-func (h pluginsHost) run(name string, args ...string) (string, error) {
+func (h pluginsHost) command(name string, args ...string) *exec.Cmd {
 	git, err := exec.LookPath("git")
 	if err != nil {
 		h.t.Fatal(err)
@@ -285,7 +324,11 @@ func (h pluginsHost) run(name string, args ...string) (string, error) {
 		"FAKE_SOURCES="+filepath.Join(h.fakes, "sources"),
 		"REAL_GIT="+git,
 	)
-	out, err := cmd.CombinedOutput()
+	return cmd
+}
+
+func (h pluginsHost) run(name string, args ...string) (string, error) {
+	out, err := h.command(name, args...).CombinedOutput()
 	return string(out), err
 }
 
@@ -805,7 +848,7 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 		Version:    SchemaVersion,
 		Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
 		Cookiesync: &Cookiesync{SchemaFingerprint: digest},
-		Services:   []Service{{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}}},
+		Services:   []Service{{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}, Ready: ".s/cookiesync"}},
 		Configure:  Configure{Run: []string{"cookiesync check"}},
 	}
 	pinned := `{"schema":{"identity":"synckit-state-v1","version":1,"fingerprint":"` + digest + `"}}`
@@ -824,6 +867,7 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			listenReady(t, h.home, ".s/cookiesync")
 			state := filepath.Join(h.home, ".config", "synckit", "state.json")
 			if tt.existing != "" {
 				if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
@@ -877,6 +921,133 @@ func TestPluginsConfigureWritesSynckitStateBeforeServices(t *testing.T) {
 	}
 }
 
+func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
+	inventory := Inventory{
+		Version:    SchemaVersion,
+		Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
+		Cookiesync: &Cookiesync{SchemaFingerprint: digest},
+		Services: []Service{
+			{Name: "capt", Command: []string{"cookiesync", "supervise"}, Ready: ".s/capt"},
+			{Name: "cookiesync", Command: []string{"cookiesync", "supervise"}, Ready: ".s/cookiesync"},
+		},
+	}
+	tests := []struct {
+		name      string
+		status    string
+		existing  bool
+		namespace bool
+		sockets   string
+		attempts  int
+		wantErr   bool
+	}{
+		{name: "every socket accepts", status: "running", sockets: "listening", attempts: 300},
+		{name: "install waits for the last socket", status: "running", sockets: "late", attempts: 300},
+		{name: "a stale socket file is not ready", status: "running", sockets: "stale", attempts: 10, wantErr: true},
+		{name: "a running service without a socket is not ready", status: "running", sockets: "none", attempts: 10, wantErr: true},
+		{name: "a stopped service behind a listening socket is not ready", status: "stopped", sockets: "listening", attempts: 10, wantErr: true},
+		{name: "an existing service is gated but never created", status: "running", existing: true, sockets: "listening", attempts: 300},
+		{name: "the namespace branch is gated on sockets alone", namespace: true, sockets: "listening", attempts: 300},
+		{name: "the namespace branch fails closed without a socket", namespace: true, sockets: "none", attempts: 10, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			readyAttempts = tt.attempts
+			t.Cleanup(func() { readyAttempts = 300 })
+			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			writePluginTestFile(t, filepath.Join(h.fakes, "service-status"), []byte(tt.status+"\n"), 0o600)
+			writePluginTestFile(t, filepath.Join(h.fakes, "nohup"), []byte("#!/bin/sh\necho \"nohup $*\" >> \"$FAKE_LOG\"\n"), 0o700)
+			if tt.namespace {
+				if err := os.Remove(filepath.Join(h.fakes, "sprite-env")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, service := range inventory.Services {
+				if tt.existing {
+					writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-"+service.Name), nil, 0o600)
+				}
+				switch {
+				case tt.sockets == "listening", tt.sockets == "late" && service.Name == "cookiesync":
+					listenReady(t, h.home, service.Ready)
+				case tt.sockets == "stale":
+					listener := listenReady(t, h.home, service.Ready)
+					listener.SetUnlinkOnClose(false)
+					if err := listener.Close(); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			var out string
+			var err error
+			if tt.sockets == "late" {
+				done := startArtifactScript(h.command("bash", filepath.Join(h.fakes, "plugins.sh"), "configure"))
+				deadline := time.Now().Add(10 * time.Second)
+				for countCall(h.calls(), "sprite-env services get cc-remote-capt state=present") < 3 {
+					select {
+					case result := <-done:
+						t.Fatalf("configure exited before the capt socket listened: %v %s", result.err, result.out)
+					default:
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("configure never polled the capt service")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if countCall(h.calls(), "cookiesync install state=present") != 0 {
+					t.Error("cookiesync install ran before every socket accepted")
+				}
+				listenReady(t, h.home, ".s/capt")
+				result := <-done
+				out, err = string(result.out), result.err
+			} else {
+				out, err = h.plugins("configure")
+			}
+			calls := h.calls()
+			installs := countCall(calls, "cookiesync install state=present")
+			creates, mutations, spriteEnv := 0, 0, 0
+			for _, call := range calls {
+				switch {
+				case strings.HasPrefix(call, "sprite-env services create "):
+					creates++
+				case strings.HasPrefix(call, "sprite-env services start "), strings.HasPrefix(call, "sprite-env services restart "):
+					mutations++
+				}
+				if strings.HasPrefix(call, "sprite-env ") {
+					spriteEnv++
+				}
+			}
+			if tt.wantErr {
+				want := "cc-remote: service capt is not ready after 1s: it must be running and " + filepath.Join(h.home, ".s", "capt") + " must accept a connection; its log is " + filepath.Join(h.home, ".cc-remote", "services", "capt.log")
+				if exitCode(err) != 1 || !strings.Contains(out, want) {
+					t.Fatalf("configure = %v\n%s\nwant exit 1 with %q", err, out, want)
+				}
+				if installs != 0 {
+					t.Errorf("cookiesync install ran %d times although a service never became ready:\n%s", installs, strings.Join(calls, "\n"))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("configure failed: %v\n%s", err, out)
+			}
+			wantCreates := 2
+			if tt.existing || tt.namespace {
+				wantCreates = 0
+			}
+			if installs != 1 || creates != wantCreates || mutations != 0 {
+				t.Errorf("installs=%d creates=%d start/restart=%d, want 1 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
+			}
+			if tt.existing && countCall(calls, "sprite-env services get cc-remote-capt state=present") != 2 {
+				t.Errorf("the existing capt service was not gated through sprite-env:\n%s", strings.Join(calls, "\n"))
+			}
+			if tt.namespace {
+				launched := countCall(calls, "nohup setsid HOME/.cc-remote/supervise.py capt") + countCall(calls, "nohup setsid HOME/.cc-remote/supervise.py cookiesync")
+				if spriteEnv != 0 || launched != 2 {
+					t.Errorf("namespace configure made %d sprite-env calls and launched %d supervisors, want 0 and 2:\n%s", spriteEnv, launched, strings.Join(calls, "\n"))
+				}
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -899,9 +1070,9 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 			var state fakeState
 			executables := map[string]string{}
 			for _, name := range names {
-				service := Service{Name: name, Command: []string{"cookiesync", "supervise"}}
+				service := Service{Name: name, Command: []string{"cookiesync", "supervise"}, Ready: ".s/" + name}
 				if plugins && name != "cookiesync" {
-					service = Service{Name: name, Plugin: name + "@tools-market", Command: []string{"bin/" + name, "supervise"}}
+					service = Service{Name: name, Plugin: name + "@tools-market", Command: []string{"bin/" + name, "supervise"}, Ready: ".s/" + name}
 					plugin := installedPlugin(service.Plugin, "1.0.0")
 					plugin["installPath"] = filepath.Join("/plugins", name)
 					state.Plugins = append(state.Plugins, plugin)
@@ -910,6 +1081,9 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 				inventory.Services = append(inventory.Services, service)
 			}
 			host := newPluginsHost(t, inventory, nil, state, nil)
+			for _, name := range names {
+				listenReady(t, host.home, ".s/"+name)
+			}
 			starts := make(chan string, len(names))
 			release := make(chan struct{})
 			cookieRelease := make(chan struct{})
@@ -967,8 +1141,12 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 				if call.Args[1] == "get" {
 					lock.Lock()
 					gets = append(gets, name)
+					created := finished[name]
 					lock.Unlock()
-					if name != "cc-remote-existing" && (!payload || name != "cc-remote-payload") {
+					switch {
+					case created || name == "cc-remote-existing":
+						fmt.Fprintln(w, `{"state":{"status":"running"}}`)
+					case !payload || name != "cc-remote-payload":
 						w.WriteHeader(http.StatusNotFound)
 					}
 					return
@@ -977,7 +1155,7 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 				if payload {
 					want = append(want, "--needs", "cc-remote-payload")
 				}
-				want = append(want, "--no-stream")
+				want = append(want, "--duration", "1ms", "--no-stream")
 				if !slices.Equal(call.Args, want) || call.Input != "" {
 					t.Errorf("service create = %v input=%q, want %v with empty stdin", call.Args, call.Input, want)
 				}
@@ -1011,7 +1189,7 @@ args = sys.argv[1:]
 request = {"program": os.path.basename(sys.argv[0]), "args": args, "input": sys.stdin.read() if args[:2] == ["services", "create"] else ""}
 try:
     with urllib.request.urlopen(os.environ["TEST_SERVICE_API"], json.dumps(request).encode()) as response:
-        response.read()
+        sys.stdout.write(response.read().decode())
 except urllib.error.HTTPError:
     sys.exit(7)
 `
@@ -1059,8 +1237,11 @@ except urllib.error.HTTPError:
 			for _, name := range names {
 				wantGets = append(wantGets, "cc-remote-"+name)
 			}
+			if !fail {
+				wantGets = slices.Concat(wantGets, wantGets[1:])
+			}
 			if !slices.Equal(gets, wantGets) {
-				t.Errorf("get order = %v, want %v", gets, wantGets)
+				t.Errorf("get order = %v, want the existence checks then one readiness check per service: %v", gets, wantGets)
 			}
 			wantCreates := []string{"cc-remote-first", "cc-remote-second", "cc-remote-third", "cc-remote-fourth"}
 			if !fail {

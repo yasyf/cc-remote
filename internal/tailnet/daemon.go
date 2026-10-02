@@ -99,7 +99,7 @@ func (d Daemon) Launcher() string {
 func (d Daemon) start() string {
 	switch d.Supervisor {
 	case SpriteEnv:
-		return `sprite-env services get tailscaled >/dev/null 2>&1 || sprite-env services create tailscaled --cmd "` + launcherPath + `" --no-stream >&2`
+		return `sprite-env services get tailscaled >/dev/null 2>&1 || sprite-env services create tailscaled --cmd "` + launcherPath + `" --duration 1ms --no-stream >&2`
 	case Setsid:
 		return `nohup setsid "` + launcherPath + `" >> "` + logPath + `" 2>&1 < /dev/null &`
 	}

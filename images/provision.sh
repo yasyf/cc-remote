@@ -213,7 +213,7 @@ SH
     exit 1
   fi
   if ! sprite-env services get cc-remote-payload > /dev/null 2>&1; then
-    queue_artifact sprite-env services create cc-remote-payload --cmd sudo --args "-n,sh,-c,/opt/cc-remote/payload-mount.sh && exec sleep infinity" --no-stream
+    queue_artifact sprite-env services create cc-remote-payload --cmd sudo --args "-n,sh,-c,/opt/cc-remote/payload-mount.sh && exec sleep infinity" --duration 1ms --no-stream
   fi
 {{- range .SystemTrees}}
   expose {{.Kind}} {{.Requirement}} {{q .Path}}

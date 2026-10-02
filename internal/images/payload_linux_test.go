@@ -31,6 +31,13 @@ jq -n --arg tools "$FINGERPRINT" --arg home "$(getent passwd "$SUDO_USER" | cut 
   '{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}' > "$6/cc-remote-payload.json"
 touch "$6/.mounted"
 `
+	fakeSpriteEnv = `#!/bin/sh
+printf '%s\n' "$*" >> "$TEST_ROOT/sprite-env.log"
+case "$2" in
+  get) test -f "$TEST_ROOT/service" ;;
+  create) printf '%s\n' "$@" > "$TEST_ROOT/create.argv" && : > "$TEST_ROOT/service" ;;
+esac
+`
 )
 
 var stockSettings = map[string]any{
@@ -475,4 +482,55 @@ func logLines(t *testing.T, path string) []string {
 		t.Fatal(err)
 	}
 	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+func TestProvisionPayloadRegistersTheRemountService(t *testing.T) {
+	image := "hsqs verified payload"
+	sum := sha256.Sum256([]byte(image))
+	sha := hex.EncodeToString(sum[:])
+	wantCreate := []string{"services", "create", "cc-remote-payload", "--cmd", "sudo", "--args", "-n,sh,-c,/opt/cc-remote/payload-mount.sh && exec sleep infinity", "--duration", "1ms", "--no-stream"}
+	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, existing := range []bool{true, false} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			store, payloads := filepath.Join(root, "store"), filepath.Join(root, "payload")
+			for name, content := range map[string]string{
+				"id":         "#!/bin/sh\necho 0\n",
+				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
+				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
+				"mount":      fakeMount,
+				"sprite-env": fakeSpriteEnv,
+			} {
+				writePluginTestFile(t, filepath.Join(fakes, name), []byte(content), 0o700)
+			}
+			if existing {
+				writePluginTestFile(t, filepath.Join(root, "service"), nil, 0o600)
+			}
+			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
+			provision := strings.NewReplacer(
+				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
+				"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
+				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
+			).Replace(string(scripts.ProvisionScript))
+			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
+			cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("payload failed: %v\n%s", err, out)
+			}
+			calls := logLines(t, filepath.Join(root, "sprite-env.log"))
+			created := logLines(t, filepath.Join(root, "create.argv"))
+			if existing {
+				if !slices.Equal(calls, []string{"services get cc-remote-payload"}) || created != nil {
+					t.Errorf("sprite-env saw %q and created %q, want one existence check and no create", calls, created)
+				}
+				return
+			}
+			if len(calls) != 2 || calls[0] != "services get cc-remote-payload" || !slices.Equal(created, wantCreate) {
+				t.Errorf("sprite-env saw %q and created %q, want the existence check then %q", calls, created, wantCreate)
+			}
+		})
+	}
 }
