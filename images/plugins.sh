@@ -414,6 +414,9 @@ run_install() {
 {{- range .Links}}
   ln -sfn "$system_bin_dir/"{{q .}} "$bin_dir/"{{q .}}
 {{- end}}
+{{- with .CodexRuntime}}
+  queue_artifact install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
+{{- end}}
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
   checkout {{q .Name}} {{q .GitHub}} {{q .Ref}} {{if .Private}}private{{else}}public{{end}}
@@ -434,9 +437,7 @@ run_install() {
   install_uv_launcher {{q .}} {{q $.Python.Version}} {{spec $tool}}{{range $tool.Args}} {{q .}}{{end}}
 {{- end}}
 {{- end}}
-{{- with .CodexRuntime}}
-  install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
-{{- end}}
+  drain_artifacts
 {{- with .CaptainHook}}
   install_captain_hook {{q .Version}} {{q .URL}} {{q .SHA256}}
 {{- end}}
