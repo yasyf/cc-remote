@@ -425,6 +425,9 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 		if err := s.mountPayload(ctx, machine, run); err != nil {
 			return err
 		}
+		if err := s.Scripts.EnablePayloadPlugins(ctx, run, s.payload.SHA256); err != nil {
+			return err
+		}
 		payload = s.payload.SHA256
 	}
 	if s.inPlace() {

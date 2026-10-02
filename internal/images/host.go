@@ -34,6 +34,17 @@ mv -f "` + PluginsPath + `.tmp" "` + PluginsPath + `"`
 
 const stagePayload = "install -d -m 0755 " + PayloadStore + " && cat > " + PayloadStore + "/$1.sqfs.partial"
 
+const enablePayloadPlugins = `set -eu
+settings="$HOME/.claude/settings.json"
+image="$1$settings"
+if [ ! -f "$settings" ] || [ ! -f "$image" ]; then
+  exit 0
+fi
+umask 077
+edited="$(mktemp "$settings.XXXXXX")"
+jq --slurpfile image "$image" '.enabledPlugins = (.enabledPlugins // {}) + ($image[0].enabledPlugins // {})' "$settings" > "$edited"
+mv "$edited" "$settings"`
+
 func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ...string) error {
 	sudo := []string{"sudo"}
 	if phase == PhasePayload {
@@ -53,6 +64,16 @@ func (s Scripts) StagePayload(ctx context.Context, exec Exec, image io.Reader, d
 	}
 	if err := exec(ctx, []string{"sudo", "sh", "-c", stagePayload, "stage-payload", digest}, image); err != nil {
 		return fmt.Errorf("stage payload %s: %w", digest, err)
+	}
+	return nil
+}
+
+func (s Scripts) EnablePayloadPlugins(ctx context.Context, exec Exec, digest string) error {
+	if !sha256Pattern.MatchString(digest) {
+		return fmt.Errorf("enable payload plugins: %q is not a sha256 digest", digest)
+	}
+	if err := exec(ctx, []string{"sh", "-c", enablePayloadPlugins, "enable-payload-plugins", PayloadRoot + "/" + digest}, nil); err != nil {
+		return fmt.Errorf("enable payload plugins %s: %w", digest, err)
 	}
 	return nil
 }

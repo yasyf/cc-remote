@@ -3,10 +3,12 @@ package images
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -138,6 +140,107 @@ func TestPluginsInstallExposesThePayload(t *testing.T) {
 				t.Errorf("exposed the missing optional %s: %q, %v", payloadPython, python, err)
 			case tt.omit != payloadPython && (err != nil || python != filepath.Join(payload, h.home, payloadPython)):
 				t.Errorf("%s links to %q, %v; want the payload copy", payloadPython, python, err)
+			}
+		})
+	}
+}
+
+func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
+	stock := map[string]any{
+		"permissions": map[string]any{"allow": []any{"Bash(git status:*)"}},
+		"hooks":       map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "true"}}}}},
+	}
+	tests := []struct {
+		name  string
+		user  map[string]any
+		image map[string]any
+		want  map[string]any
+	}{
+		{
+			name: "stock settings gain only the image's enabled plugins",
+			user: stock,
+			image: map[string]any{
+				"enabledPlugins":         map[string]any{"a@m": true, "b@m": true},
+				"permissions":            map[string]any{"allow": []any{"Bash(*)"}},
+				"extraKnownMarketplaces": map[string]any{"m": map[string]any{"source": map[string]any{"source": "github", "repo": "owner/m"}}},
+				"env":                    map[string]any{"IMAGE": "1"},
+			},
+			want: map[string]any{
+				"permissions":    stock["permissions"],
+				"hooks":          stock["hooks"],
+				"enabledPlugins": map[string]any{"a@m": true, "b@m": true},
+			},
+		},
+		{
+			name:  "image flags win and other user flags stay",
+			user:  map[string]any{"enabledPlugins": map[string]any{"a@m": false, "c@m": true}},
+			image: map[string]any{"enabledPlugins": map[string]any{"a@m": true}},
+			want:  map[string]any{"enabledPlugins": map[string]any{"a@m": true, "c@m": true}},
+		},
+		{
+			name:  "without user settings nothing is written",
+			image: map[string]any{"enabledPlugins": map[string]any{"a@m": true}},
+		},
+		{
+			name: "an image without settings leaves the user's file byte-identical",
+			user: stock,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, home := t.TempDir(), t.TempDir()
+			settings := filepath.Join(home, ".claude", "settings.json")
+			var before []byte
+			var mode os.FileMode
+			if tt.user != nil {
+				before = mustJSON(t, tt.user)
+				writePluginTestFile(t, settings, before, 0o644)
+				info, err := os.Stat(settings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mode = info.Mode().Perm()
+			}
+			if tt.image != nil {
+				writePluginTestFile(t, filepath.Join(payload, settings), mustJSON(t, tt.image), 0o644)
+			}
+			cmd := exec.Command("sh", "-c", enablePayloadPlugins, "enable-payload-plugins", payload)
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("enable payload plugins: %v\n%s", err, out)
+			}
+			if leftovers, err := filepath.Glob(settings + ".*"); err != nil || len(leftovers) != 0 {
+				t.Errorf("left %q, %v beside the settings", leftovers, err)
+			}
+			after, err := os.ReadFile(settings)
+			if tt.user == nil {
+				if !os.IsNotExist(err) {
+					t.Errorf("wrote settings %q, %v; want none", after, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.image == nil {
+				if string(after) != string(before) || info.Mode().Perm() != mode {
+					t.Errorf("settings became %q mode %v, want the untouched %q mode %v", after, info.Mode().Perm(), before, mode)
+				}
+				return
+			}
+			var got map[string]any
+			if err := json.Unmarshal(after, &got); err != nil {
+				t.Fatalf("decode %q: %v", after, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("settings = %v, want %v", got, tt.want)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("settings mode = %v, want 0600", info.Mode().Perm())
 			}
 		})
 	}

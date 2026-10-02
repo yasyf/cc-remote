@@ -44,6 +44,7 @@ const (
 	packagesPhase = "sudo bash -s packages"
 	toolsPhase    = "sudo bash -s tools"
 	payloadPhase  = "sudo --preserve-env=PATH bash -s payload "
+	mergesPlugins = "enable-payload-plugins "
 	stagesPayload = "stage-payload "
 	payloadBytes  = "hsqs squashfs payload bytes"
 	stages        = "plugins.sh.tmp"
@@ -477,8 +478,8 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	h.ordered(0, prereqsPhase, toolsPhase)
 	toolsLane := h.ordered(0, toolsPhase, stages, installs, configures, freshens, enrolls, publishes)
 	source := h.ordered(0, checkout, prepares, publishes)
-	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", publishes) != 1 || h.machine.ran("ws-1", prereqsPhase) != 1 {
-		t.Errorf("a fresh create renewed identity, checked a ready stamp, mounted a payload, or ran its prerequisites or publish other than once: %q", h.machine.scripts["ws-1"])
+	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", publishes) != 1 || h.machine.ran("ws-1", prereqsPhase) != 1 {
+		t.Errorf("a fresh create renewed identity, checked a ready stamp, mounted a payload, merged its plugins, or ran its prerequisites or publish other than once: %q", h.machine.scripts["ws-1"])
 	}
 	if got := h.machine.stdins["ws-1"][toolsLane[2]]; got != "" {
 		t.Errorf("the tool install read %q on stdin although no private marketplace needs a token", got)
@@ -905,7 +906,7 @@ func TestAPayloadIsStagedAndMountedBeforeTheToolsAndHandedToTheInstall(t *testin
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	order := h.ordered(0, stagesPayload, payloadPhase, toolsPhase, stages, installs, configures, publishes)
+	order := h.ordered(0, stagesPayload, payloadPhase, mergesPlugins, toolsPhase, stages, installs, configures, publishes)
 	h.ordered(0, prereqsPhase, stagesPayload)
 	h.ordered(0, packagesPhase, publishes)
 	h.ordered(0, checkout, prepares, publishes)
@@ -918,11 +919,14 @@ func TestAPayloadIsStagedAndMountedBeforeTheToolsAndHandedToTheInstall(t *testin
 	if mount := h.machine.scripts["ws-1"][order[1]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint() {
 		t.Errorf("the payload phase ran as %q", mount)
 	}
-	if install := h.machine.scripts["ws-1"][order[4]]; !strings.HasSuffix(install, installs+" "+images.PayloadRoot+"/"+sha) {
+	if merge := h.machine.scripts["ws-1"][order[2]]; !strings.HasPrefix(merge, "sh -c ") || !strings.HasSuffix(merge, " "+mergesPlugins+images.PayloadRoot+"/"+sha) {
+		t.Errorf("the plugin flags were merged by %q; want the user's shell with the payload directory as its argument", merge)
+	}
+	if install := h.machine.scripts["ws-1"][order[5]]; !strings.HasSuffix(install, installs+" "+images.PayloadRoot+"/"+sha) {
 		t.Errorf("the install ran as %q; want the payload directory as its argument", install)
 	}
-	if h.machine.ran("ws-1", stagesPayload) != 1 || h.machine.ran("ws-1", payloadPhase) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
-		t.Errorf("the payload was staged %d times and mounted %d times, and the stamp is %q", h.machine.ran("ws-1", stagesPayload), h.machine.ran("ws-1", payloadPhase), h.machine.ready["ws-1"])
+	if h.machine.ran("ws-1", stagesPayload) != 1 || h.machine.ran("ws-1", payloadPhase) != 1 || h.machine.ran("ws-1", mergesPlugins) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the payload was staged %d times, mounted %d times, and merged %d times, and the stamp is %q", h.machine.ran("ws-1", stagesPayload), h.machine.ran("ws-1", payloadPhase), h.machine.ran("ws-1", mergesPlugins), h.machine.ready["ws-1"])
 	}
 	for i, script := range h.machine.scripts["ws-1"] {
 		if strings.Contains(script, token) || strings.Contains(script, payloadBytes) {
@@ -939,7 +943,7 @@ func TestAMissingPayloadFileFailsTheCreateBeforeAnythingIsPublished(t *testing.T
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !errors.Is(err, fs.ErrNotExist) || !strings.HasPrefix(err.Error(), "open payload: ") {
 		t.Fatalf("Create = %v", err)
 	}
-	if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
+	if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
 		t.Errorf("a create without its payload file ran %q", h.machine.scripts["ws-1"])
 	}
 	if _, ok := h.record("ws-1"); ok {
@@ -999,7 +1003,7 @@ func TestAPayloadPathMustResolveToARegularFile(t *testing.T) {
 			if want := tt.refused(path, info); err == nil || err.Error() != want {
 				t.Fatalf("Create = %v, want %q", err, want)
 			}
-			if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
+			if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
 				t.Errorf("a create with a non-regular payload ran %q", h.machine.scripts["ws-1"])
 			}
 			if _, ok := h.record("ws-1"); ok {
@@ -1054,13 +1058,13 @@ func TestResumeRemountsThePayloadOnlyWhenItsDigestChanged(t *testing.T) {
 			}
 			if !tt.remount {
 				for _, script := range h.machine.scripts["ws-1"][before:] {
-					if strings.Contains(script, stagesPayload) || strings.Contains(script, payloadPhase) || strings.Contains(script, publishes) {
+					if strings.Contains(script, stagesPayload) || strings.Contains(script, payloadPhase) || strings.Contains(script, mergesPlugins) || strings.Contains(script, publishes) {
 						t.Errorf("a resume at the ready stamp ran %q", script)
 					}
 				}
 				return
 			}
-			order := h.ordered(before, readies, prereqsPhase, stagesPayload+tt.sha256, payloadPhase+tt.sha256, toolsPhase, installs+" "+images.PayloadRoot+"/"+tt.sha256, publishes, prepares, configures)
+			order := h.ordered(before, readies, prereqsPhase, stagesPayload+tt.sha256, payloadPhase+tt.sha256, mergesPlugins+images.PayloadRoot+"/"+tt.sha256, toolsPhase, installs+" "+images.PayloadRoot+"/"+tt.sha256, publishes, prepares, configures)
 			if staged := h.machine.stdins["ws-1"][order[2]]; staged != payloadBytes {
 				t.Errorf("the staging read %q on stdin, want the payload file", staged)
 			}

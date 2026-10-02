@@ -47,6 +47,9 @@ func TestHostOperations(t *testing.T) {
 		{"stage payload", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), digest)
 		}, call{[]string{"sudo", "sh", "-c", "install -d -m 0755 /var/lib/cc-remote/payload && cat > /var/lib/cc-remote/payload/$1.sqfs.partial", "stage-payload", digest}, "image"}},
+		{"enable payload plugins", func(ctx context.Context, exec Exec) error {
+			return scripts.EnablePayloadPlugins(ctx, exec, digest)
+		}, call{[]string{"sh", "-c", enablePayloadPlugins, "enable-payload-plugins", "/opt/cc-remote/payload/" + digest}, ""}},
 		{"stage", scripts.StagePlugins, call{[]string{"sh", "-c", stagePlugins}, "plugins"}},
 		{"install", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "token", "") }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install"}, "token\n"}},
 		{"install without token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "") }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install"}, "\n"}},
@@ -88,6 +91,9 @@ func TestHostOperationsRejectBadInput(t *testing.T) {
 		{"stage payload uppercase digest", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), strings.Repeat("A", 64))
 		}, `stage payload: "` + strings.Repeat("A", 64) + `" is not a sha256 digest`},
+		{"enable payload plugins digest", func(ctx context.Context, exec Exec) error {
+			return scripts.EnablePayloadPlugins(ctx, exec, "../"+digest)
+		}, `enable payload plugins: "../` + digest + `" is not a sha256 digest`},
 		{"multi-line token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "a\nb", digest) }, "plugins install: the GitHub token spans lines"},
 		{"carriage-return token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "a\rb", "") }, "plugins install: the GitHub token spans lines"},
 		{"install payload", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "latest") }, `plugins install: payload "latest" is not a sha256 digest`},
