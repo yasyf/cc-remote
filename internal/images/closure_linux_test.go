@@ -188,7 +188,8 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 		{name: "no mode installs everything and records the transaction", apt: full, records: true},
 		{name: "full installs everything and records the transaction", mode: []string{PackagesFull}, apt: full, records: true},
 		{name: "resident leaves the closure to the payload", mode: []string{PackagesResident}, apt: resident},
-		{name: "a closure package left installed in resident mode is fatal", mode: []string{PackagesResident}, installed: "ii \tlibnss3\n", apt: resident, exit: 1, wantErr: "cc-remote: the resident install left closure packages installed: libnss3; their system copies would shadow the payload, so move them to apt.payload.resident"},
+		{name: "a repeat resident run on a valid payload machine passes", mode: []string{PackagesResident}, installed: "ii \tbubblewrap\nii \tca-certificates\nii \topenssh-server\n", apt: resident},
+		{name: "a closure package left installed in resident mode is fatal", mode: []string{PackagesResident}, installed: "ii \tlibnss3\nii \tlibasound2t64\n", apt: resident, exit: 1, wantErr: "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\nlibasound2t64 install ok installed 1.0-1\nlibnss3 install ok installed 1.0-1\n"},
 		{name: "an unknown mode is a usage error", mode: []string{"bundle"}, exit: 2, wantErr: "provision: packages takes full or resident, not bundle"},
 	}
 	scripts, err := Render(scriptInventory(), "agents")
@@ -203,7 +204,7 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 				"id":         "#!/bin/sh\necho 0\n",
 				"apt-get":    fakeInstaller,
 				"apt-cache":  fakeAptCache,
-				"dpkg-query": "#!/bin/sh\ncat \"$TEST_ROOT/installed\"\n",
+				"dpkg-query": "#!/bin/sh\ncase \"$3\" in\n  *'${Status}'*) shift 3; for p in \"$@\"; do printf '%s install ok installed 1.0-1\\n' \"$p\"; done ;;\n  *) cat \"$TEST_ROOT/installed\" ;;\nesac\n",
 			})
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
 			provision := strings.NewReplacer(

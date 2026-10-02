@@ -92,8 +92,8 @@ resident_packages() {
 }
 
 provision_packages() {
-  local mode="${1:-full}" status package shadowed=""
-  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages
+  local mode="${1:-full}" status package
+  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=()
   case "$mode" in
     full | resident) ;;
     *)
@@ -148,11 +148,12 @@ provision_packages() {
   if [ "$mode" = resident ]; then
     while IFS=$'\t' read -r status package; do
       if [ "${status#ii}" != "$status" ] && closure_package "$package"; then
-        shadowed="$shadowed $package"
+        shadowed+=("$package")
       fi
     done < <(installed_packages)
-    if [ -n "$shadowed" ]; then
-      echo "cc-remote: the resident install left closure packages installed:$shadowed; their system copies would shadow the payload, so move them to apt.payload.resident" >&2
+    if [ "${#shadowed[@]}" -gt 0 ]; then
+      echo "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:" >&2
+      dpkg-query -W -f '${Package} ${Status} ${Version}\n' "${shadowed[@]}" >&2
       exit 1
     fi
   fi
