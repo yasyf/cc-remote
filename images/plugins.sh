@@ -138,8 +138,8 @@ prepare_runner() {
       exit 1
     fi
   else
-    mkdir -p "$dir" && install -m 0755 "$stage/binrun" "$dir/binrun" \
-      || { echo "cc-remote: cannot install binrun ${pin[1]} at $dir" >&2; exit 1; }
+    mkdir -p "$dir" || { echo "cc-remote: cannot create $dir" >&2; exit 1; }
+    install -m 0755 "$stage/binrun" "$dir/binrun" || { echo "cc-remote: cannot install binrun ${pin[1]} at $dir" >&2; exit 1; }
   fi
   rm -rf "$stage"
   printf '%s\n' "$dir/binrun"
