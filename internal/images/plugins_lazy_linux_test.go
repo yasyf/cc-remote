@@ -331,6 +331,13 @@ func lazyPluginHost(t *testing.T, plugin, launcher string, layout lazyLayout) pl
 	if err := os.Rename(source, filepath.Join(h.fakes, "sources/tools-market")); err != nil {
 		t.Fatal(err)
 	}
+	cache := filepath.Join(h.home, ".claude/plugins/cache/tools-market", plugin, "1.0.0")
+	if err := os.MkdirAll(filepath.Dir(cache), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(h.fakes, "plugins", plugin), cache); err != nil {
+		t.Fatal(err)
+	}
 	writePluginTestFile(t, filepath.Join(h.fakes, "binrun"), []byte(fakeBinrun), 0o755)
 	return h
 }
