@@ -427,11 +427,11 @@ timeout = float(timeout)
 supervised = shutil.which("sprite-env") is not None
 
 
-def running(name):
-    status = subprocess.run(["sprite-env", "services", "get", "cc-remote-" + name], capture_output=True, text=True).stdout
+def running(name, remaining):
     try:
+        status = subprocess.run(["sprite-env", "services", "get", "cc-remote-" + name], capture_output=True, text=True, timeout=remaining).stdout
         return json.loads(status)["state"]["status"] == "running"
-    except (ValueError, KeyError, TypeError):
+    except (subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
         return False
 
 
@@ -454,7 +454,7 @@ for name, path in zip(pairs[::2], pairs[1::2]):
         if remaining <= 0:
             print(f"cc-remote: service {name} did not become ready in {time.monotonic() - start:.1f}s (deadline {timeout:g}s): it must be running and {path} must accept a connection; its log is {log_dir}/{name}.log", file=sys.stderr)
             sys.exit(1)
-        if (not supervised or running(name)) and accepts(path, remaining):
+        if (not supervised or running(name, remaining)) and accepts(path, remaining):
             break
         time.sleep(0.1)
 PY

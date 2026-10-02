@@ -162,7 +162,13 @@ import time
 
 deadline = 30.0
 start = time.monotonic()
-while not subprocess.run(["ssh-keyscan", "-T", "1", "-t", "ed25519", "127.0.0.1"], capture_output=True).stdout.strip():
+while True:
+    try:
+        answer = subprocess.run(["ssh-keyscan", "-T", "1", "-t", "ed25519", "127.0.0.1"], capture_output=True, timeout=max(deadline - (time.monotonic() - start), 2)).stdout
+    except subprocess.TimeoutExpired:
+        answer = b""
+    if answer.strip():
+        break
     elapsed = time.monotonic() - start
     if elapsed >= deadline:
         print(f"cc-remote: sshd did not accept a connection on port 22 in {elapsed:.1f}s (deadline {deadline:g}s)", file=sys.stderr)

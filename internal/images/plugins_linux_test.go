@@ -198,7 +198,7 @@ if [ -f "$XDG_CONFIG_HOME/synckit/state.json" ]; then
 fi
 echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
 case "$2" in
-  get) [ -f "${FAKE_LOG%/*}/services/$3" ] && printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")" ;;
+  get) if [ -f "${FAKE_LOG%/*}/services/$3" ]; then [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")"; fi ;;
   create) mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3" ;;
 esac
 `
@@ -968,6 +968,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 		status    string
 		existing  bool
 		namespace bool
+		stall     bool
 		sockets   string
 		timeout   time.Duration
 		wantErr   bool
@@ -978,6 +979,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 		{name: "a running service without a socket is not ready", status: "running", sockets: "none", timeout: time.Second, wantErr: true},
 		{name: "a listener with a full accept backlog is not ready", status: "running", sockets: "backlog", timeout: time.Second, wantErr: true},
 		{name: "a stopped service behind a listening socket is not ready", status: "stopped", sockets: "listening", timeout: time.Second, wantErr: true},
+		{name: "a stalled sprite-env status read is not ready", status: "running", stall: true, sockets: "listening", timeout: time.Second, wantErr: true},
 		{name: "an existing service is gated but never created", status: "running", existing: true, sockets: "listening", timeout: 30 * time.Second},
 		{name: "the namespace branch is gated on sockets alone", namespace: true, sockets: "listening", timeout: 30 * time.Second},
 		{name: "the namespace branch fails closed without a socket", namespace: true, sockets: "none", timeout: time.Second, wantErr: true},
@@ -992,6 +994,9 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
 			writePluginTestFile(t, filepath.Join(h.fakes, "service-status"), []byte(tt.status+"\n"), 0o600)
 			writePluginTestFile(t, filepath.Join(h.fakes, "nohup"), []byte("#!/bin/sh\necho \"nohup $*\" >> \"$FAKE_LOG\"\n"), 0o700)
+			if tt.stall {
+				writePluginTestFile(t, filepath.Join(h.fakes, "stall-get"), nil, 0o600)
+			}
 			if tt.namespace {
 				if err := os.Remove(filepath.Join(h.fakes, "sprite-env")); err != nil {
 					t.Fatal(err)
