@@ -150,21 +150,25 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 		"permissions": map[string]any{"allow": []any{"Bash(git status:*)"}},
 		"hooks":       map[string]any{"Stop": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "true"}}}}},
 	}
+	hooks := []byte(`{"hooks":{}}`)
+	userFile := func(user, _ string) string { return user }
+	imageFile := func(_, image string) string { return image }
 	tests := []struct {
-		name  string
-		user  map[string]any
-		image map[string]any
-		want  map[string]any
+		name    string
+		user    []byte
+		image   []byte
+		want    map[string]any
+		refuses func(user, image string) string
 	}{
 		{
 			name: "stock settings gain only the image's enabled plugins",
-			user: stock,
-			image: map[string]any{
+			user: mustJSON(t, stock),
+			image: mustJSON(t, map[string]any{
 				"enabledPlugins":         map[string]any{"a@m": true, "b@m": true},
 				"permissions":            map[string]any{"allow": []any{"Bash(*)"}},
 				"extraKnownMarketplaces": map[string]any{"m": map[string]any{"source": map[string]any{"source": "github", "repo": "owner/m"}}},
 				"env":                    map[string]any{"IMAGE": "1"},
-			},
+			}),
 			want: map[string]any{
 				"permissions":    stock["permissions"],
 				"hooks":          stock["hooks"],
@@ -173,41 +177,55 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 		},
 		{
 			name:  "image flags win and other user flags stay",
-			user:  map[string]any{"enabledPlugins": map[string]any{"a@m": false, "c@m": true}},
-			image: map[string]any{"enabledPlugins": map[string]any{"a@m": true}},
+			user:  []byte(`{"enabledPlugins":{"a@m":false,"c@m":true}}`),
+			image: []byte(`{"enabledPlugins":{"a@m":true}}`),
 			want:  map[string]any{"enabledPlugins": map[string]any{"a@m": true, "c@m": true}},
 		},
 		{
-			name:  "without user settings nothing is written",
-			image: map[string]any{"enabledPlugins": map[string]any{"a@m": true}},
+			name:  "an image without enabledPlugins adds an empty map",
+			user:  hooks,
+			image: hooks,
+			want:  map[string]any{"hooks": map[string]any{}, "enabledPlugins": map[string]any{}},
 		},
-		{
-			name: "an image without settings leaves the user's file byte-identical",
-			user: stock,
-		},
+		{name: "without user settings nothing is written", image: []byte(`{"enabledPlugins":{"a@m":true}}`)},
+		{name: "an image without settings leaves the user's file byte-identical", user: mustJSON(t, stock)},
+		{name: "a null user file is refused", user: []byte("null"), image: hooks, refuses: userFile},
+		{name: "a user file with two documents is refused", user: []byte("{}{}"), image: hooks, refuses: userFile},
+		{name: "a user file whose enabledPlugins is false is refused", user: []byte(`{"enabledPlugins":false}`), image: hooks, refuses: userFile},
+		{name: "a user file whose enabledPlugins is null is refused", user: []byte(`{"enabledPlugins":null}`), image: hooks, refuses: userFile},
+		{name: "a user file whose enabledPlugins is an array is refused", user: []byte(`{"enabledPlugins":[]}`), image: hooks, refuses: userFile},
+		{name: "an empty user file is refused", user: []byte{}, image: hooks, refuses: userFile},
+		{name: "a user file with a syntax error is refused", user: []byte("{"), image: hooks, refuses: userFile},
+		{name: "an image whose enabledPlugins is null is refused", user: hooks, image: []byte(`{"enabledPlugins":null}`), refuses: imageFile},
+		{name: "an image with two documents is refused", user: hooks, image: []byte(`{"enabledPlugins":{"a@m":true}}{"enabledPlugins":{"b@m":true}}`), refuses: imageFile},
+		{name: "an image array is refused", user: hooks, image: []byte("[]"), refuses: imageFile},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			payload, home := t.TempDir(), t.TempDir()
 			settings := filepath.Join(home, ".claude", "settings.json")
-			var before []byte
-			var mode os.FileMode
+			image := filepath.Join(payload, settings)
 			if tt.user != nil {
-				before = mustJSON(t, tt.user)
-				writePluginTestFile(t, settings, before, 0o644)
-				info, err := os.Stat(settings)
-				if err != nil {
+				writePluginTestFile(t, settings, tt.user, 0o644)
+				if err := os.Chmod(settings, 0o644); err != nil {
 					t.Fatal(err)
 				}
-				mode = info.Mode().Perm()
 			}
 			if tt.image != nil {
-				writePluginTestFile(t, filepath.Join(payload, settings), mustJSON(t, tt.image), 0o644)
+				writePluginTestFile(t, image, tt.image, 0o644)
 			}
 			cmd := exec.Command("sh", "-c", enablePayloadPlugins, "enable-payload-plugins", payload)
 			cmd.Env = append(os.Environ(), "HOME="+home)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("enable payload plugins: %v\n%s", err, out)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if tt.refuses != nil {
+				want := "cc-remote: " + tt.refuses(settings, image) + " is not one JSON object whose enabledPlugins, when present, is an object"
+				if exitCode(err) != 1 || !strings.Contains(stderr.String(), want) {
+					t.Errorf("enable payload plugins = %v\n%s\nwant exit 1 with %q", err, stderr.String(), want)
+				}
+			} else if err != nil {
+				t.Fatalf("enable payload plugins: %v\n%s", err, stderr.String())
 			}
 			if leftovers, err := filepath.Glob(settings + ".*"); err != nil || len(leftovers) != 0 {
 				t.Errorf("left %q, %v beside the settings", leftovers, err)
@@ -226,9 +244,9 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tt.image == nil {
-				if string(after) != string(before) || info.Mode().Perm() != mode {
-					t.Errorf("settings became %q mode %v, want the untouched %q mode %v", after, info.Mode().Perm(), before, mode)
+			if tt.image == nil || tt.refuses != nil {
+				if string(after) != string(tt.user) || info.Mode().Perm() != 0o644 {
+					t.Errorf("settings became %q mode %v, want the untouched %q mode 0644", after, info.Mode().Perm(), tt.user)
 				}
 				return
 			}

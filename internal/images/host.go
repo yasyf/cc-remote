@@ -40,8 +40,15 @@ image="$1$settings"
 if [ ! -f "$settings" ] || [ ! -f "$image" ]; then
   exit 0
 fi
+for file in "$settings" "$image"; do
+  if ! jq -se 'length == 1 and (.[0] | type == "object" and ((has("enabledPlugins") | not) or (.enabledPlugins | type == "object")))' "$file" > /dev/null 2>&1; then
+    echo "cc-remote: $file is not one JSON object whose enabledPlugins, when present, is an object" >&2
+    exit 1
+  fi
+done
 umask 077
 edited="$(mktemp "$settings.XXXXXX")"
+trap 'rm -f "$edited"' EXIT
 jq --slurpfile image "$image" '.enabledPlugins = (.enabledPlugins // {}) + ($image[0].enabledPlugins // {})' "$settings" > "$edited"
 mv "$edited" "$settings"`
 
