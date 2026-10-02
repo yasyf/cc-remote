@@ -12,7 +12,7 @@ bin_dir="$HOME/.local/bin"
 system_tool_dir=/opt/cc-remote/tools
 system_bin_dir=/usr/local/bin
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
 export PATH="$bin_dir:$PATH"
 
 {{template "artifacts.sh"}}
@@ -390,8 +390,9 @@ run_install() {
   IFS= read -r github_token
   mkdir -p "$bin_dir"
 {{- range .Tools}}
-  {{install . "tool_dir" "bin_dir"}}
+  queue_artifact {{install . "tool_dir" "bin_dir"}}
 {{- end}}
+  drain_artifacts
 {{- range .Links}}
   ln -sfn "$system_bin_dir/"{{q .}} "$bin_dir/"{{q .}}
 {{- end}}

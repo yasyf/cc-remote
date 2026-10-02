@@ -9,9 +9,11 @@ fetch() {
 
 install_artifact() {
   local name="$1" version="$2" url="$3" algorithm="$4" digest="$5" format="$6" dir="$7" links="$8"
-  local download="$tmp_dir/$name-$version.$format"
+  local staging download
   shift 8
   if [ "$format" = deb ] || [ "$(cat "$dir/.cc-remote-digest" 2> /dev/null)" != "$digest" ]; then
+    staging="$(mktemp -d "$tmp_dir/artifact.XXXXXX")"
+    download="$staging/$name-$version.$format"
     fetch "$url" "$download" "$algorithm" "$digest"
     rm -rf "$dir"
     mkdir -p "$dir"
@@ -26,7 +28,7 @@ install_artifact() {
       zip) unzip -q "$download" -d "$dir" ;;
       deb) apt-get install -y -qq "$download" > /dev/null ;;
     esac
-    rm -f "$download"
+    rm -rf "$staging"
     printf '%s\n' "$digest" > "$dir/.cc-remote-digest"
   fi
   mkdir -p "$links"
@@ -68,4 +70,39 @@ verify_bin() {
   if [ "$#" -gt 0 ]; then
     "$bin" "$@" > /dev/null
   fi
+}
+
+artifact_pids=()
+artifact_status=0
+
+wait_artifact() {
+  local pid="${artifact_pids[0]}" status
+  artifact_pids=("${artifact_pids[@]:1}")
+  if wait "$pid"; then
+    return 0
+  else
+    status=$?
+    if [ "$artifact_status" -eq 0 ]; then
+      artifact_status="$status"
+    fi
+    return "$status"
+  fi
+}
+
+drain_artifacts() {
+  while [ "${#artifact_pids[@]}" -gt 0 ]; do
+    wait_artifact || :
+  done
+  return "$artifact_status"
+}
+
+queue_artifact() {
+  if [ "${#artifact_pids[@]}" -eq 4 ]; then
+    if ! wait_artifact; then
+      drain_artifacts
+      return
+    fi
+  fi
+  "$@" < /dev/null &
+  artifact_pids+=("$!")
 }

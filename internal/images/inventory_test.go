@@ -225,3 +225,13 @@ func TestValidateRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateAcceptsRepeatedArtifactNamesWithDistinctDestinations(t *testing.T) {
+	inventory := Inventory{Version: SchemaVersion, Tools: []Artifact{
+		{Name: "tool", Version: "1.0", URL: "https://example.com/first", SHA256: digest, Format: Binary, Dest: ".tools/first", Bins: map[string]string{"first": "tool"}},
+		{Name: "tool", Version: "1.0", URL: "https://example.com/second", SHA256: digest, Format: Binary, Dest: ".tools/second", Bins: map[string]string{"second": "tool"}},
+	}}
+	if err := inventory.Validate(); err != nil {
+		t.Fatalf("distinct destinations rejected: %v", err)
+	}
+}

@@ -10,7 +10,7 @@ fi
 tool_dir=/opt/cc-remote/tools
 bin_dir=/usr/local/bin
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
 
 {{template "artifacts.sh"}}
 t64() {
@@ -36,8 +36,14 @@ fi
 {{- end}}
 {{range .System}}
 echo {{q (printf "--- Installing %s %s" .Name .Version)}}
+{{- if eq .Format "deb"}}
+drain_artifacts
 {{install . "tool_dir" "bin_dir"}}
+{{- else}}
+queue_artifact {{install . "tool_dir" "bin_dir"}}
 {{- end}}
+{{- end}}
+drain_artifacts
 rm -rf /var/lib/apt/lists/*
 {{- range .Python.System}}
 
