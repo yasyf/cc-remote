@@ -17,6 +17,7 @@ closure_root=/opt/cc-remote/closure
 closure_loader_conf=/etc/ld.so.conf.d/zz-cc-remote-closure.conf
 closure_fonts_conf=/etc/fonts/conf.d/99-cc-remote-closure.conf
 closure_lock=/var/lib/cc-remote/ldconfig.lock
+closure_registered=/var/lib/cc-remote/closure.registered
 build_dir=/var/lib/cc-remote/build
 closure_packages=({{range $i, $name := .Closure}}{{if $i}} {{end}}{{q $name}}{{end}})
 {{- end}}
@@ -92,7 +93,7 @@ resident_packages() {
 }
 
 provision_packages() {
-  local mode="${1:-full}" status package
+  local mode="${1:-full}" listing status package
   local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=()
   case "$mode" in
     full | resident) ;;
@@ -110,10 +111,9 @@ provision_packages() {
     apt-get install -y -qq --no-install-recommends "${packages[@]}" > /dev/null
   else
     install -d -m 0755 "$build_dir"
-    resident_packages "${packages[@]}" > "$build_dir/seeds"
+    resident_packages "${packages[@]}"{{range $.System}}{{if eq .Format "deb"}} {{q .Name}}{{end}}{{end}} > "$build_dir/seeds"
     installed_packages > "$build_dir/packages.before"
     apt-get install -y -qq --no-install-recommends "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
-    installed_packages > "$build_dir/packages.after"
   fi
 {{- else}}
 
@@ -145,12 +145,23 @@ provision_packages() {
 {{- end}}
 {{- end}}
 {{- with .Closure}}
-  if [ "$mode" = resident ]; then
+  if [ "$mode" = full ]; then
+    installed_packages > "$build_dir/packages.after"
+  else
+    listing="$(installed_packages)" || {
+      echo "cc-remote: cannot list the installed packages" >&2
+      exit 1
+    }
     while IFS=$'\t' read -r status package; do
-      if [ "${status#ii}" != "$status" ] && closure_package "$package"; then
-        shadowed+=("$package")
-      fi
-    done < <(installed_packages)
+      case "${status:1:1}" in
+        n | c) ;;
+        *)
+          if closure_package "$package"; then
+            shadowed+=("$package")
+          fi
+          ;;
+      esac
+    done <<< "$listing"
     if [ "${#shadowed[@]}" -gt 0 ]; then
       echo "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:" >&2
       dpkg-query -W -f '${Package} ${Status} ${Version}\n' "${shadowed[@]}" >&2
@@ -166,6 +177,7 @@ provision_packages() {
 provision_loader() {
   install -d -m 0755 "$(dirname "$closure_lock")"
   flock "$closure_lock" ldconfig
+  : > "$closure_registered"
 }
 
 closure_link() {
@@ -176,14 +188,15 @@ closure_link() {
 }
 
 closure_project() {
-  local target="$closure_root$1" resolved
+  local target="$closure_root$1" closure resolved
   if [ ! -d "$target" ]; then
     echo "cc-remote: the closure has no directory $1 to project" >&2
     exit 1
   fi
+  closure="$(realpath -e "$closure_root")"
   resolved="$(realpath -e "$target")"
   case "$resolved" in
-    "$(realpath -e "$closure_root")"/*) ;;
+    "$closure"/*) ;;
     *)
       echo "cc-remote: $1 resolves to $resolved, outside the closure, so the payload cannot project it" >&2
       exit 1
@@ -260,6 +273,9 @@ provision_tools() {
 {{json .}}
 JSON
 {{- end}}
+{{- if .Closure}}
+  local link_check=spelling
+{{- end}}
 {{- range .System}}
 {{- if ne .Format "deb"}}
 {{- range verify . "tool_dir" "bin_dir"}}
@@ -270,7 +286,7 @@ JSON
 {{- range .Python.System}}
 {{- $tool := .}}
 {{- range .Bins}}
-  verify_bin {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
+  verify_bin {{q .}}{{if not $.Closure}}{{range $tool.Verify}} {{q .}}{{end}}{{end}}
 {{- end}}
 {{- end}}
 }
@@ -328,8 +344,9 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
   fi
 done
 {{- if .Closure}}
-install -d -m 0755 /var/lib/cc-remote
-flock /var/lib/cc-remote/ldconfig.lock ldconfig
+if [ -e /var/lib/cc-remote/closure.registered ]; then
+  flock /var/lib/cc-remote/ldconfig.lock ldconfig
+fi
 {{- end}}
 SH
   mkdir -p "$payload"

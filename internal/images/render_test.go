@@ -437,7 +437,10 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 
 func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 	plain := validInventory()
+	plain.Python.System[0].Verify = []string{"--version"}
 	payload := validInventory()
+	payload.Python.System[0].Verify = []string{"--version"}
+	payload.System = append(payload.System, Artifact{Name: "orca", Version: "1.4.215", URL: "https://example.com/orca.deb", SHA512: digest + digest, Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}})
 	payload.Apt.Payload = &AptPayload{Resident: []string{"bubblewrap"}, Closure: []string{"libnss3"}, Bins: []string{"certutil"}, Projections: []string{"/usr/share/X11/xkb"}}
 	for name, inv := range map[string]Inventory{"plain": plain, "image": payload} {
 		scripts, err := Render(inv, "agents")
@@ -462,6 +465,9 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 			if !bytes.Contains(scripts.ProvisionScript, []byte("mount -t squashfs -o ro,loop ")) || !bytes.Contains(scripts.ProvisionScript, []byte("  packages) provision_packages ;;\n")) {
 				t.Errorf("an inventory without apt.payload changed the payload mount or the packages phase")
 			}
+			if !bytes.Contains(scripts.ProvisionScript, []byte("  verify_bin 'cc-transcript' '--version'\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  local link_check=spelling\n  verify_user\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  verify_system\n  verify_user_links\n  mkdir -p \"$state_dir\"\n")) {
+				t.Errorf("an inventory without apt.payload deferred its executable probes")
+			}
 		}
 	}
 	with, err := Render(payload, "agents")
@@ -471,10 +477,14 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 	for _, want := range []string{
 		"closure_packages=('libnss3')\n",
 		"  printf '%s\\n' 'bubblewrap'\n",
+		"  resident_packages \"${packages[@]}\" 'orca' > \"$build_dir/seeds\"\n",
+		"  if [ \"$mode\" = full ]; then\n    installed_packages > \"$build_dir/packages.after\"\n  else\n    listing=\"$(installed_packages)\" || {\n",
+		"  local link_check=spelling\n  verify_pin \"$tool_dir/\"'uv-0.1.0' ",
+		"  verify_bin 'cc-transcript'\n}\n",
 		"  expose link required '/opt/cc-remote/closure'\n  expose copy required '/usr/local/bin/certutil'\n  expose copy optional '/usr/local/share/mime'\n  expose copy optional '/usr/local/share/glib-2.0/schemas'\n  expose copy optional '/usr/local/share/icons'\n",
 		"  closure_link \"$closure_root\" \"$payload$closure_root\"\n  closure_link '/usr/local/bin/certutil' \"$closure_root/\"'usr/bin/certutil'\n  if [ -d \"$closure_root/\"'usr/share/mime' ]; then\n    closure_link '/usr/local/share/mime' \"$closure_root/\"'usr/share/mime'\n  fi\n",
 		"  closure_project '/usr/share/X11/xkb'\n  write_conf \"$closure_loader_conf\"",
-		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\ndone\ninstall -d -m 0755 /var/lib/cc-remote\nflock /var/lib/cc-remote/ldconfig.lock ldconfig\nSH\n",
+		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\ndone\nif [ -e /var/lib/cc-remote/closure.registered ]; then\n  flock /var/lib/cc-remote/ldconfig.lock ldconfig\nfi\nSH\n",
 		"  pack_path required '/opt/cc-remote/closure'\n  pack_path required '/usr/local/bin/certutil'\n  pack_path optional '/usr/local/share/mime'\n",
 		"  packages) provision_packages \"${2:-}\" ;;\n  loader) provision_loader ;;\n",
 	} {
@@ -482,8 +492,17 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 			t.Errorf("provision.sh with apt.payload lacks\n%s", want)
 		}
 	}
-	if !bytes.Contains(with.Plugins, []byte("  verify_closure_bin 'certutil'\n")) {
-		t.Errorf("plugins.sh with apt.payload does not verify the exposed bins")
+	if installed, recorded := bytes.Index(with.ProvisionScript, []byte("--- Installing orca 1.4.215")), bytes.Index(with.ProvisionScript, []byte("\"$build_dir/packages.after\"")); installed < 0 || recorded < installed {
+		t.Errorf("provision.sh with apt.payload records the transaction at %d, before the deb install at %d", recorded, installed)
+	}
+	for _, want := range []string{
+		"  verify_closure_bin 'certutil'\n",
+		"  local link_check=spelling\n  verify_user_links\n}\n",
+		"  verify_system\n  verify_user\n  mkdir -p \"$state_dir\"\n",
+	} {
+		if !bytes.Contains(with.Plugins, []byte(want)) {
+			t.Errorf("plugins.sh with apt.payload lacks\n%s", want)
+		}
 	}
 }
 

@@ -65,11 +65,15 @@ def clauses(field):
     return [[re.sub(r"[\s(:].*$", "", alt.strip()) for alt in clause.split("|") if alt.strip()] for clause in field.split(",") if clause.strip()]
 
 
-def partition(seeds, new):
-    meta, providers = {}, {}
-    for line in dpkg("-W", "-f", "${Package}\t${Depends}\t${Pre-Depends}\t${Provides}\n", *sorted(new)).splitlines():
+def partition(seeds, new, base):
+    meta, providers, satisfied = {}, {}, set(base)
+    for line in dpkg("-W", "-f", "${Package}\t${Depends}\t${Pre-Depends}\t${Provides}\n", *sorted(new | base)).splitlines():
         pkg, depends, predepends, provides = line.split("\t")
-        meta[pkg] = (clauses(depends) + clauses(predepends), [re.sub(r"[\s(].*$", "", name.strip()) for name in provides.split(",") if name.strip()])
+        provided = [re.sub(r"[\s(].*$", "", name.strip()) for name in provides.split(",") if name.strip()]
+        if pkg in base:
+            satisfied.update(provided)
+        else:
+            meta[pkg] = (clauses(depends) + clauses(predepends), provided)
     for pkg in sorted(new):
         for provided in meta[pkg][1]:
             providers.setdefault(provided, []).append(pkg)
@@ -80,6 +84,8 @@ def partition(seeds, new):
             continue
         resident.add(pkg)
         for clause in meta[pkg][0]:
+            if any(alt in satisfied for alt in clause):
+                continue
             candidates = [c for alt in clause for c in ([alt] if alt in new else providers.get(alt, []))]
             if candidates and not any(c in resident for c in candidates):
                 queue.append(candidates[0])
@@ -95,11 +101,20 @@ def listed(package):
     return [line for line in dpkg("-L", package).splitlines() if line.startswith("/")]
 
 
+def search(paths):
+    result = run(["dpkg-query", "-S", *paths])
+    reports = result.stderr.splitlines()
+    unexpected = [line for line in reports if not re.fullmatch(r"dpkg-query: no path found matching pattern .+", line)]
+    if result.returncode not in (0, 1) or unexpected or (result.returncode == 1 and not reports):
+        fatal(f"dpkg-query -S exited {result.returncode}" + (f": {result.stderr.strip()}" if result.stderr.strip() else " without reporting why"))
+    return result.stdout
+
+
 def owners(paths):
     found = {}
     paths = sorted(set(paths))
     for at in range(0, len(paths), 300):
-        for line in run(["dpkg-query", "-S", *paths[at:at + 300]]).stdout.splitlines():
+        for line in search(paths[at:at + 300]).splitlines():
             match = re.match(r"^(.+?): (/.+)$", line)
             if match and not line.startswith("diversion"):
                 found[match.group(2)] = [owner.split(":")[0] for owner in match.group(1).split(", ")]
@@ -107,7 +122,7 @@ def owners(paths):
 
 
 def unowned(path):
-    return run(["dpkg-query", "-S", path]).returncode != 0
+    return not search([path]).strip()
 
 
 def sha256(path):
@@ -131,6 +146,14 @@ def confine(path):
         existing = os.path.dirname(existing)
     if os.path.realpath(existing) != existing or not os.path.isdir(existing):
         fatal(f"{path[len(root):]} would be written through {existing}, which is not a directory inside the closure")
+
+
+def confined_directories(top):
+    for d, names, _ in os.walk(top):
+        confine(d)
+        for name in names:
+            confine(os.path.join(d, name))
+        yield d
 
 
 def directory(path):
@@ -292,9 +315,9 @@ def seal_fonts(generated):
     os.chmod(conf, 0o644)
     generated["/share/cc-remote/fonts.conf"] = "snippet"
     directory(cache)
-    if not os.path.isdir(fonts):
+    if not os.path.lexists(fonts):
         return
-    for d, _, _ in os.walk(fonts):
+    for d in confined_directories(fonts):
         info = os.lstat(d)
         os.utime(d, (int(info.st_atime), int(info.st_mtime)))
     built = run(["fc-cache", "-f"], FONTCONFIG_FILE=conf)
@@ -316,6 +339,7 @@ def seal_fonts(generated):
 
 def settle_icon_caches(themes):
     for theme in themes:
+        confine(f"{root}/usr/share/icons/{theme}")
         stamp = int(os.lstat(f"{root}/usr/share/icons/{theme}").st_mtime) + 1
         os.utime(f"{root}/usr/share/icons/{theme}/icon-theme.cache", (stamp, stamp))
 
@@ -343,13 +367,14 @@ def capture():
     for record in ("packages.before", "packages.after", "seeds"):
         if not os.path.isfile(os.path.join(build, record)):
             fatal(f"{build}/{record} is missing, so this machine did not run packages full")
-    new = installed(os.path.join(build, "packages.after")) - installed(os.path.join(build, "packages.before"))
+    base = installed(os.path.join(build, "packages.before"))
+    new = installed(os.path.join(build, "packages.after")) - base
     if not new:
         fatal("packages full installed nothing new, so there is no transaction to capture")
     with open(os.path.join(build, "seeds"), encoding="utf-8") as fh:
         seeds = fh.read().split()
     consumers = resolve_consumers(payload["consumers"])
-    resident = partition(seeds, new)
+    resident = partition(seeds, new, base)
     if new - resident != closure:
         fatal(f"apt.payload.closure differs from the measured partition: resident or absent {sorted(closure - (new - resident))}, undeclared {sorted((new - resident) - closure)}")
     packages = versions(sorted(closure))

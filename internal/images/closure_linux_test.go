@@ -52,6 +52,11 @@ elif args[0] == "-L":
         sys.exit(1)
     print("\n".join(pkg["files"]))
 elif args[0] == "-S":
+    if os.environ.get("FAKE_DPKG_SEARCH") == "crash":
+        print("dpkg-query: error: cannot open the package database", file=sys.stderr)
+        sys.exit(2)
+    if os.environ.get("FAKE_DPKG_SEARCH") == "mute":
+        sys.exit(1)
     code = 0
     for path in args[1:]:
         found = owners.get(path) or [name for name, pkg in packages.items() if path in pkg["files"]]
@@ -103,7 +108,7 @@ printf '%s\n' "flock $*" >> "$TEST_ROOT/calls"
 shift
 exec "$@"
 `
-	fakeLdconfig  = "#!/bin/sh\nprintf '%s\\n' \"ldconfig$*\" >> \"$TEST_ROOT/calls\"\n"
+	fakeLdconfig  = "#!/bin/sh\nprintf '%s\\n' \"ldconfig$*\" >> \"$TEST_ROOT/calls\"\n[ -z \"${LDCONFIG_FAIL:-}\" ] || exit 7\n"
 	fakeAptCache  = "#!/bin/sh\nprintf 'Package: libasound2t64\\n'\n"
 	fakeInstaller = `#!/bin/bash
 set -euo pipefail
@@ -176,10 +181,12 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 	full := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
 	resident := "update -qq\ninstall -y -qq --no-install-recommends bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server\n"
 	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\n"
+	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
 		name      string
 		mode      []string
 		installed string
+		env       []string
 		apt       string
 		records   bool
 		exit      int
@@ -189,7 +196,11 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 		{name: "full installs everything and records the transaction", mode: []string{PackagesFull}, apt: full, records: true},
 		{name: "resident leaves the closure to the payload", mode: []string{PackagesResident}, apt: resident},
 		{name: "a repeat resident run on a valid payload machine passes", mode: []string{PackagesResident}, installed: "ii \tbubblewrap\nii \tca-certificates\nii \topenssh-server\n", apt: resident},
-		{name: "a closure package left installed in resident mode is fatal", mode: []string{PackagesResident}, installed: "ii \tlibnss3\nii \tlibasound2t64\n", apt: resident, exit: 1, wantErr: "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\nlibasound2t64 install ok installed 1.0-1\nlibnss3 install ok installed 1.0-1\n"},
+		{name: "closure packages dpkg only knows or keeps the configuration of pass", mode: []string{PackagesResident}, installed: "un \tlibnss3\nrc \tlibasound2t64\n", apt: resident},
+		{name: "a closure package left installed in resident mode is fatal", mode: []string{PackagesResident}, installed: "ii \tlibnss3\nii \tlibasound2t64\n", apt: resident, exit: 1, wantErr: shadowing + "libasound2t64 install ok installed 1.0-1\nlibnss3 install ok installed 1.0-1\n"},
+		{name: "a half-installed closure package in resident mode is fatal", mode: []string{PackagesResident}, installed: "iH \tlibnss3\n", apt: resident, exit: 1, wantErr: shadowing + "libnss3 install ok installed 1.0-1\n"},
+		{name: "a held closure package in resident mode is fatal", mode: []string{PackagesResident}, installed: "hi \tlibasound2t64\n", apt: resident, exit: 1, wantErr: shadowing + "libasound2t64 install ok installed 1.0-1\n"},
+		{name: "a failing package listing in resident mode is fatal", mode: []string{PackagesResident}, env: []string{"DPKG_FAIL=1"}, apt: resident, exit: 1, wantErr: "cc-remote: cannot list the installed packages"},
 		{name: "an unknown mode is a usage error", mode: []string{"bundle"}, exit: 2, wantErr: "provision: packages takes full or resident, not bundle"},
 	}
 	scripts, err := Render(scriptInventory(), "agents")
@@ -204,7 +215,7 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 				"id":         "#!/bin/sh\necho 0\n",
 				"apt-get":    fakeInstaller,
 				"apt-cache":  fakeAptCache,
-				"dpkg-query": "#!/bin/sh\ncase \"$3\" in\n  *'${Status}'*) shift 3; for p in \"$@\"; do printf '%s install ok installed 1.0-1\\n' \"$p\"; done ;;\n  *) cat \"$TEST_ROOT/installed\" ;;\nesac\n",
+				"dpkg-query": "#!/bin/sh\n[ -z \"${DPKG_FAIL:-}\" ] || exit 2\ncase \"$3\" in\n  *'${Status}'*) shift 3; for p in \"$@\"; do printf '%s install ok installed 1.0-1\\n' \"$p\"; done ;;\n  *) cat \"$TEST_ROOT/installed\" ;;\nesac\n",
 			})
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
 			provision := strings.NewReplacer(
@@ -212,7 +223,7 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 				"rm -rf /var/lib/apt/lists/*", ":",
 			).Replace(string(scripts.ProvisionScript))
 			cmd := exec.Command("bash", slices.Concat([]string{"-c", provision, "provision.sh", PhasePackages}, tt.mode)...)
-			cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
+			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
 			out, err := cmd.CombinedOutput()
 			if tt.wantErr != "" {
 				if exitCode(err) != tt.exit || !strings.Contains(string(out), tt.wantErr) {
@@ -251,24 +262,52 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 }
 
 func TestProvisionLoaderRegistersTheClosureUnderTheLock(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		exit int
+	}{
+		{name: "a registered closure is marked for the boot remount"},
+		{name: "a failed ldconfig leaves the closure unmarked", env: []string{"LDCONFIG_FAIL=1"}, exit: 7},
+	}
 	scripts, err := Render(scriptInventory(), "agents")
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, fakes := t.TempDir(), t.TempDir()
-	lock := filepath.Join(root, "lib", "cc-remote", "ldconfig.lock")
-	writeFakes(t, fakes, map[string]string{"id": "#!/bin/sh\necho 0\n", "flock": fakeFlock, "ldconfig": fakeLdconfig})
-	provision := strings.Replace(string(scripts.ProvisionScript), "closure_lock=/var/lib/cc-remote/ldconfig.lock\n", "closure_lock="+quote(lock)+"\n", 1)
-	cmd := exec.Command("bash", "-c", provision, "provision.sh", PhaseLoader)
-	cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("loader failed: %v\n%s", err, out)
-	}
-	if got, want := logLines(t, filepath.Join(root, "calls")), []string{"flock " + lock + " ldconfig", "ldconfig"}; !slices.Equal(got, want) {
-		t.Errorf("calls = %q, want %q", got, want)
-	}
-	if info, err := os.Stat(filepath.Dir(lock)); err != nil || !info.IsDir() {
-		t.Errorf("the lock directory is %v, %v; want a directory", info, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			lock, marker := filepath.Join(root, "lib", "cc-remote", "ldconfig.lock"), filepath.Join(root, "lib", "cc-remote", "closure.registered")
+			writeFakes(t, fakes, map[string]string{"id": "#!/bin/sh\necho 0\n", "flock": fakeFlock, "ldconfig": fakeLdconfig})
+			provision := strings.NewReplacer(
+				"closure_lock=/var/lib/cc-remote/ldconfig.lock\n", "closure_lock="+quote(lock)+"\n",
+				"closure_registered=/var/lib/cc-remote/closure.registered\n", "closure_registered="+quote(marker)+"\n",
+			).Replace(string(scripts.ProvisionScript))
+			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhaseLoader)
+			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
+			out, err := cmd.CombinedOutput()
+			if got, want := logLines(t, filepath.Join(root, "calls")), []string{"flock " + lock + " ldconfig", "ldconfig"}; !slices.Equal(got, want) {
+				t.Errorf("calls = %q, want %q", got, want)
+			}
+			if tt.exit != 0 {
+				if exitCode(err) != tt.exit {
+					t.Fatalf("loader = %v\n%s\nwant exit %d", err, out, tt.exit)
+				}
+				if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+					t.Errorf("a failed ldconfig marked the closure registered: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("loader failed: %v\n%s", err, out)
+			}
+			if info, err := os.Stat(filepath.Dir(lock)); err != nil || !info.IsDir() {
+				t.Errorf("the lock directory is %v, %v; want a directory", info, err)
+			}
+			if info, err := os.Stat(marker); err != nil || info.Size() != 0 {
+				t.Errorf("the registration marker is %v, %v; want an empty file", info, err)
+			}
+		})
 	}
 }
 
@@ -465,7 +504,7 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			if target, err := os.Readlink(filepath.Join(root, "usr/share/X11/xkb")); err != nil || target != filepath.Join(closure, "usr/share/X11/xkb") {
 				t.Errorf("xkb -> %q, %v; want the closure's projection", target, err)
 			}
-			fonts := "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n  <dir>" + closure + "/usr/share/fonts</dir>\n  <cachedir>" + closure + "/var/cache/fontconfig</cachedir>\n</fontconfig>\n"
+			fonts := "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n  <dir>" + closure + "/usr/share/fonts</dir>\n  <cachedir>" + closure + "/var/cache/fontconfig</cachedir>\n  <include ignore_missing=\"yes\">" + closure + "/etc/fonts/conf.d</include>\n</fontconfig>\n"
 			for path, want := range map[string]string{loaderConf: closure + "/usr/lib/" + arch + "-linux-gnu\n", fontsConf: fonts} {
 				got, err := os.ReadFile(path)
 				if err != nil || string(got) != want {
@@ -479,8 +518,32 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				}
 			}
 			helper, err := os.ReadFile(filepath.Join(root, "payload-mount.sh"))
-			if err != nil || !strings.HasSuffix(string(helper), "done\ninstall -d -m 0755 /var/lib/cc-remote\nflock /var/lib/cc-remote/ldconfig.lock ldconfig\n") || !strings.Contains(string(helper), "mount -t squashfs -o ro,nosuid,nodev,loop") {
-				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts followed by a locked ldconfig", helper, err)
+			if err != nil || !strings.HasSuffix(string(helper), "done\nif [ -e /var/lib/cc-remote/closure.registered ]; then\n  flock /var/lib/cc-remote/ldconfig.lock ldconfig\nfi\n") || !strings.Contains(string(helper), "mount -t squashfs -o ro,nosuid,nodev,loop") {
+				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts followed by a locked ldconfig once the loader has registered the closure", helper, err)
+			}
+			marker, lock, bootFakes := filepath.Join(root, "closure.registered"), filepath.Join(root, "ldconfig.lock"), filepath.Join(root, "boot-fakes")
+			boot := strings.NewReplacer(
+				"/var/lib/cc-remote/payload", store,
+				"/opt/cc-remote/payload", payloads,
+				"/var/lib/cc-remote/closure.registered", marker,
+				"/var/lib/cc-remote/ldconfig.lock", lock,
+			).Replace(string(helper))
+			writePluginTestFile(t, filepath.Join(root, "boot.sh"), []byte(boot), 0o700)
+			writeFakes(t, bootFakes, map[string]string{"flock": fakeFlock})
+			wantCalls := []string{"flock 9"}
+			for _, registered := range []bool{false, true} {
+				if registered {
+					writePluginTestFile(t, marker, nil, 0o644)
+					wantCalls = append(wantCalls, "flock 9", "flock "+lock+" ldconfig", "ldconfig")
+				}
+				cmd := exec.Command("sh", filepath.Join(root, "boot.sh"))
+				cmd.Env = append(os.Environ(), "PATH="+bootFakes+":"+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("boot helper (registered=%t) failed: %v\n%s", registered, err, out)
+				}
+				if got := logLines(t, filepath.Join(root, "calls")); !slices.Equal(got, wantCalls) {
+					t.Errorf("boot helper (registered=%t) calls = %q, want %q", registered, got, wantCalls)
+				}
 			}
 		})
 	}
@@ -817,6 +880,50 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		}},
 		{name: "an unresolved consumer library is fatal", mutate: func(h *captureHost) { h.env = []string{"LDSO_MISSING=libmissing.so.9"} }, wantErr: func(*captureHost) string {
 			return "cc-remote: /home/u/.agent-browser/chrome cannot load libmissing.so.9"
+		}},
+		{name: "a dpkg-query search failing for another reason is fatal", mutate: func(h *captureHost) { h.env = []string{"FAKE_DPKG_SEARCH=crash"} }, wantErr: func(*captureHost) string {
+			return "cc-remote: dpkg-query -S exited 2: dpkg-query: error: cannot open the package database"
+		}, untouched: true},
+		{name: "a dpkg-query search refusing without a report is fatal", mutate: func(h *captureHost) { h.env = []string{"FAKE_DPKG_SEARCH=mute"} }, wantErr: func(*captureHost) string {
+			return "cc-remote: dpkg-query -S exited 1 without reporting why"
+		}, untouched: true},
+		{name: "a symlinked font directory is fatal", mutate: func(h *captureHost) {
+			if err := os.RemoveAll(filepath.Join(h.host, "usr/share/fonts")); err != nil {
+				h.t.Fatal(err)
+			}
+			h.link("/usr/share/fonts", "/etc")
+			h.dpkg.Packages["fonts-x"].Files = []string{"/usr/share/fonts"}
+		}, wantErr: func(h *captureHost) string {
+			return "cc-remote: /usr/share/fonts would be written through " + h.closure + "/usr/share/fonts, which is not a directory inside the closure"
+		}},
+		{name: "a dependency the base already satisfies stays in the closure", mutate: func(h *captureHost) {
+			h.dpkg.Packages["base-files"].Provides = "base-virtual"
+			h.dpkg.Packages["openssh-server"].Depends += ", libc6 | libfoo1, base-virtual | libfoo1"
+		}},
+		{name: "a seeded deb artifact keeps its dependencies resident", mutate: func(h *captureHost) {
+			h.dpkg.Packages["orca"] = &fakePackage{Version: "1.4.215", Depends: "libnew1", Files: []string{"/opt/Orca/orca-ide"}}
+			h.dpkg.Packages["libnew1"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew.so.1"}}
+			for name, extra := range map[string]string{"packages.after": "ii \tlibnew1\nii \torca\n", "seeds": "orca\n"} {
+				recorded, err := os.ReadFile(filepath.Join(h.build, name))
+				if err != nil {
+					h.t.Fatal(err)
+				}
+				writePluginTestFile(h.t, filepath.Join(h.build, name), append(recorded, extra...), 0o644)
+			}
+		}, check: func(t *testing.T, h *captureHost) {
+			var manifest struct {
+				Resident []string `json:"resident"`
+			}
+			raw, err := os.ReadFile(h.closure + "/closure.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &manifest); err != nil {
+				t.Fatalf("closure.json: %v\n%s", err, raw)
+			}
+			if want := []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca"}; !slices.Equal(manifest.Resident, want) {
+				t.Errorf("resident = %v, want %v", manifest.Resident, want)
+			}
 		}},
 		{name: "the closure is captured, sealed and exposed"},
 	}

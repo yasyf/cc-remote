@@ -657,7 +657,11 @@ run_install() {
   )
 {{- end}}
   local link_check=spelling
+{{- if .Closure}}
+  verify_user_links
+{{- else}}
   verify_user
+{{- end}}
 }
 
 run_natives() {
@@ -676,7 +680,11 @@ run_natives() {
 run_publish() {
   local stamp="${1:?publish needs the ready stamp}"
   verify_system
+{{- if .Closure}}
+  verify_user
+{{- else}}
   verify_user_links
+{{- end}}
   mkdir -p "$state_dir"
   printf '%s\n' "$stamp" > "$state_dir/ready"
 }
@@ -724,8 +732,7 @@ run_configure() {
   cookiesync install
 {{- end}}
 }
-
-{{with .Closure -}}
+{{- with .Closure}}
 verify_loader() {
   local missing
   missing="$(python3 "$tmp_dir/loader.py" "$1" | awk '$2 == "=>" && $3 == "not" && $4 == "found" { print $1 }')" || exit
@@ -753,8 +760,8 @@ verify_closure_bin() {
     exit 1
   fi
 }
+{{- end}}
 
-{{end -}}
 verify_system() {
   :
 {{- range .System}}
