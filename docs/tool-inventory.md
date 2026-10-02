@@ -22,8 +22,8 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 
 ```json
 {
-  "tools": "5a77921a5ca9d5c02e267bd119dfd97bac89e5d8dd61cccb16b608a939eb18dd",
-  "image": "42e68f9e3d982894c97fa0ef9dfd88b84daeae37934a3b5d5ecbea68bc1b23c5"
+  "tools": "d315a7c25216c6973ac89f28d4fe25f9a2d4e16e40cd7959293a2037a82b2431",
+  "image": "283bddd21100faa26510aa42b58319ecdd9cffbf11e2ed8478d0b88189751cc4"
 }
 ```
 
@@ -58,6 +58,11 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | `dest` | Optional user destination relative to `$HOME`. It must be a clean path and may not overlap another artifact or managed state directory. |
 | `bins` | Map of executable names to extracted paths. Archives require relative member paths; Debian packages require absolute paths. For a binary or gzip, the extracted file is `name`. |
 | `verify` | Arguments used to check the linked executable, such as `[--version]`. |
+
+Non-Debian artifacts install with at most four concurrent jobs per phase. Each
+Debian artifact waits for preceding jobs and installs before later jobs start.
+All artifact jobs finish before links, plugins, preparation, or verification run.
+A failed job drains the started jobs and prevents readiness.
 
 Every download is digest-checked before installation. Verification checks its
 digest marker and executable link target. Profile tools cannot overwrite base

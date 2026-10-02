@@ -91,7 +91,7 @@ func TestRenderScopesProfileTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render stack: %v", err)
 	}
-	kind := `install_artifact 'kind' '0.29.0'`
+	kind := `queue_artifact install_artifact 'kind' '0.29.0'`
 	if bytes.Contains(agents.Plugins, []byte(kind)) {
 		t.Errorf("agents plugins.sh installs kind")
 	}

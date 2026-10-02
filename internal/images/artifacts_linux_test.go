@@ -5,10 +5,16 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"testing"
 
 	assets "github.com/yasyf/cc-remote/images"
@@ -72,7 +78,7 @@ func library(root, script string) *exec.Cmd {
 	if err != nil {
 		panic(err)
 	}
-	prelude := "set -euo pipefail\ntool_dir=" + quote(filepath.Join(root, "tools")) + "\nbin_dir=" + quote(filepath.Join(root, "bin")) + "\ntmp_dir=\"$(mktemp -d)\"\n"
+	prelude := "set -euo pipefail\ntool_dir=" + quote(filepath.Join(root, "tools")) + "\nbin_dir=" + quote(filepath.Join(root, "bin")) + "\ntmp_dir=\"$(mktemp -d)\"\ntrap 'status=$?; drain_artifacts || status=$?; rm -rf \"$tmp_dir\"; exit \"$status\"' EXIT\n"
 	return exec.Command("bash", "-c", prelude+string(raw)+"\n"+script)
 }
 
@@ -109,4 +115,323 @@ func writeArchive(t *testing.T, member, content string) (string, string) {
 	}
 	sum := sha256.Sum256(raw)
 	return file, hex.EncodeToString(sum[:])
+}
+
+func TestArtifactQueueOverlapsAndCapsDownloads(t *testing.T) {
+	var active, peak atomic.Int32
+	arrivals := make(chan string, 6)
+	release := make(chan struct{})
+	var once sync.Once
+	unlatch := func() { once.Do(func() { close(release) }) }
+	defer unlatch()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := active.Add(1)
+		defer active.Add(-1)
+		for prior := peak.Load(); count > prior; prior = peak.Load() {
+			if peak.CompareAndSwap(prior, count) {
+				break
+			}
+		}
+		arrivals <- r.URL.Path
+		<-release
+		fmt.Fprint(w, "#!/bin/sh\n")
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	var script strings.Builder
+	for i := range 6 {
+		artifact := binaryArtifact(fmt.Sprintf("tool%d", i), server.URL+fmt.Sprintf("/%d", i), "#!/bin/sh\n")
+		script.WriteString("queue_artifact " + installCall(artifact, "tool_dir", "bin_dir") + "\n")
+	}
+	script.WriteString("drain_artifacts\n")
+	done := startArtifactScript(library(root, script.String()))
+	for range 4 {
+		awaitArtifactArrival(t, arrivals, unlatch, done)
+	}
+	if got := peak.Load(); got != 4 {
+		t.Errorf("peak downloads = %d, want 4", got)
+	}
+	select {
+	case extra := <-arrivals:
+		t.Errorf("fifth download started before a worker drained: %s", extra)
+	default:
+	}
+	unlatch()
+	finishArtifactScript(t, done, false)
+	if got := peak.Load(); got > 4 {
+		t.Errorf("peak downloads = %d, exceeds 4", got)
+	}
+	for i := range 6 {
+		if _, err := os.Stat(filepath.Join(root, "bin", fmt.Sprintf("tool%d", i))); err != nil {
+			t.Errorf("installed tool%d: %v", i, err)
+		}
+	}
+}
+
+func TestArtifactQueueStagesRepeatedNamesSeparately(t *testing.T) {
+	arrivals := make(chan string, 2)
+	release := make(chan struct{})
+	var once sync.Once
+	unlatch := func() { once.Do(func() { close(release) }) }
+	defer unlatch()
+	payloads := map[string]string{"/first": "#!/bin/sh\necho first\n", "/second": "#!/bin/sh\necho second\n"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrivals <- r.URL.Path
+		<-release
+		fmt.Fprint(w, payloads[r.URL.Path])
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	var script strings.Builder
+	for _, name := range []string{"first", "second"} {
+		artifact := binaryArtifact("tool", server.URL+"/"+name, payloads["/"+name])
+		artifact.Dest = ".tools/" + name
+		artifact.Bins = map[string]string{name: "tool"}
+		script.WriteString("queue_artifact " + installCall(artifact, "tool_dir", "bin_dir") + "\n")
+	}
+	script.WriteString("drain_artifacts\n")
+	cmd := library(root, script.String())
+	cmd.Env = append(os.Environ(), "HOME="+root)
+	done := startArtifactScript(cmd)
+	for range 2 {
+		awaitArtifactArrival(t, arrivals, unlatch, done)
+	}
+	unlatch()
+	finishArtifactScript(t, done, false)
+	for name, want := range payloads {
+		raw, err := os.ReadFile(filepath.Join(root, ".tools", name[1:], "tool"))
+		if err != nil || string(raw) != want {
+			t.Errorf("installed %s = %q, %v, want %q", name, raw, err, want)
+		}
+	}
+}
+
+func TestArtifactQueueDrainsFailuresBeforeCleanup(t *testing.T) {
+	for _, count := range []int{2, 5} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			arrivals := make(chan string, count)
+			release := make(chan struct{})
+			var once sync.Once
+			unlatch := func() { once.Do(func() { close(release) }) }
+			defer unlatch()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				arrivals <- r.URL.Path
+				if r.URL.Path != "/0" {
+					<-release
+				}
+				fmt.Fprint(w, "#!/bin/sh\n")
+			}))
+			defer server.Close()
+			root := t.TempDir()
+			var script strings.Builder
+			script.WriteString("printf '%s' \"$tmp_dir\" > " + quote(filepath.Join(root, "temporary")) + "\n")
+			for i := range count {
+				artifact := binaryArtifact(fmt.Sprintf("tool%d", i), server.URL+fmt.Sprintf("/%d", i), "#!/bin/sh\n")
+				if i == 0 {
+					artifact.SHA256 = strings.Repeat("0", 64)
+				}
+				script.WriteString("queue_artifact " + installCall(artifact, "tool_dir", "bin_dir") + "\n")
+			}
+			script.WriteString("drain_artifacts\nprintf ready > " + quote(filepath.Join(root, "ready")) + "\n")
+			done := startArtifactScript(library(root, script.String()))
+			for range min(count, 4) {
+				awaitArtifactArrival(t, arrivals, unlatch, done)
+			}
+			select {
+			case result := <-done:
+				unlatch()
+				t.Fatalf("installer exited before outstanding downloads finished: %v %s", result.err, result.out)
+			default:
+			}
+			unlatch()
+			finishArtifactScript(t, done, true)
+			for i := 1; i < min(count, 4); i++ {
+				if _, err := os.Stat(filepath.Join(root, "tools", fmt.Sprintf("tool%d-1.0", i), ".cc-remote-digest")); err != nil {
+					t.Errorf("worker %d did not finish before failure returned: %v", i, err)
+				}
+			}
+			for _, absent := range []string{"ready", "bin/tool0", "bin/tool4"} {
+				if _, err := os.Stat(filepath.Join(root, absent)); !os.IsNotExist(err) {
+					t.Errorf("failed installer left %s: %v", absent, err)
+				}
+			}
+			temporary, err := os.ReadFile(filepath.Join(root, "temporary"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(string(temporary)); !os.IsNotExist(err) {
+				t.Errorf("temporary directory survived cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func binaryArtifact(name, url, content string) Artifact {
+	sum := sha256.Sum256([]byte(content))
+	return Artifact{Name: name, Version: "1.0", URL: url, SHA256: hex.EncodeToString(sum[:]), Format: Binary}
+}
+
+type artifactScriptResult struct {
+	out []byte
+	err error
+}
+
+func startArtifactScript(cmd *exec.Cmd) <-chan artifactScriptResult {
+	done := make(chan artifactScriptResult, 1)
+	go func() {
+		out, err := cmd.CombinedOutput()
+		done <- artifactScriptResult{out: out, err: err}
+	}()
+	return done
+}
+
+func awaitArtifactArrival(t *testing.T, arrivals <-chan string, release func(), done <-chan artifactScriptResult) {
+	t.Helper()
+	select {
+	case <-arrivals:
+	case result := <-done:
+		release()
+		t.Fatalf("installer exited before concurrent downloads: %v %s", result.err, result.out)
+	case <-time.After(10 * time.Second):
+		release()
+		finishArtifactScript(t, done, true)
+		t.Fatal("installer did not overlap latched downloads")
+	}
+}
+
+func finishArtifactScript(t *testing.T, done <-chan artifactScriptResult, wantFailure bool) {
+	t.Helper()
+	result := <-done
+	if (result.err != nil) != wantFailure {
+		t.Fatalf("installer error = %v, want failure %t: %s", result.err, wantFailure, result.out)
+	}
+}
+
+func TestProvisionDrainsArtifactsAtDebianBarriers(t *testing.T) {
+	root := t.TempDir()
+	payload := "#!/bin/sh\n"
+	var lock sync.Mutex
+	var events []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lock.Lock()
+		defer lock.Unlock()
+		events = append(events, r.URL.Path)
+		if _, err := os.Stat(filepath.Join(root, "apt-active")); !os.IsNotExist(err) {
+			t.Errorf("artifact fetch overlapped apt: %v", err)
+		}
+		switch r.URL.Path {
+		case "/first.deb":
+			if _, err := os.Stat(filepath.Join(root, "tools", "first-1.0", ".cc-remote-digest")); err != nil {
+				t.Errorf("first Debian fetch overlapped preceding install: %v", err)
+			}
+		case "/second":
+			if _, err := os.Stat(filepath.Join(root, "first-apt")); err != nil {
+				t.Errorf("second artifact preceded first apt completion: %v", err)
+			}
+		case "/second.deb":
+			if _, err := os.Stat(filepath.Join(root, "tools", "second-1.0", ".cc-remote-digest")); err != nil {
+				t.Errorf("second Debian fetch overlapped preceding install: %v", err)
+			}
+		case "/third":
+			if _, err := os.Stat(filepath.Join(root, "second-apt")); err != nil {
+				t.Errorf("third artifact preceded second apt completion: %v", err)
+			}
+		}
+		fmt.Fprint(w, payload)
+	}))
+	defer server.Close()
+	inventory := Inventory{Version: SchemaVersion}
+	for _, name := range []string{"first", "first.deb", "second", "second.deb", "third"} {
+		artifact := binaryArtifact(name, server.URL+"/"+name, payload)
+		if strings.HasSuffix(name, ".deb") {
+			artifact.Format = Deb
+			artifact.Bins = map[string]string{name: filepath.Join(root, "deb-target")}
+		}
+		inventory.System = append(inventory.System, artifact)
+	}
+	scripts, err := Render(inventory, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakes := t.TempDir()
+	fakeApt := `#!/bin/bash
+set -euo pipefail
+if ! mkdir "$TEST_ROOT/apt-active"; then
+  exit 91
+fi
+trap 'rmdir "$TEST_ROOT/apt-active"' EXIT
+for arg in "$@"; do
+  case "$arg" in
+    */first.deb-1.0.deb) touch "$TEST_ROOT/first-apt" ;;
+    */second.deb-1.0.deb) touch "$TEST_ROOT/second-apt" ;;
+  esac
+done
+`
+	for name, content := range map[string]string{"id": "#!/bin/sh\necho 0\n", "apt-get": fakeApt, "apt-cache": "#!/bin/sh\nexit 1\n"} {
+		if err := os.WriteFile(filepath.Join(fakes, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "deb-target"), []byte(payload), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	provision := strings.NewReplacer("tool_dir=/opt/cc-remote/tools", "tool_dir="+quote(filepath.Join(root, "tools")), "bin_dir=/usr/local/bin", "bin_dir="+quote(filepath.Join(root, "bin")), "rm -rf /var/lib/apt/lists/*", "test -f "+quote(filepath.Join(root, "tools", "third-1.0", ".cc-remote-digest"))).Replace(string(scripts.Provision))
+	cmd := exec.Command("bash", "-c", provision)
+	cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("provision failed: %v %s", err, out)
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	if got, want := strings.Join(events, ","), "/first,/first.deb,/second,/second.deb,/third"; got != want {
+		t.Errorf("download order = %s, want %s", got, want)
+	}
+}
+
+func TestPluginsDrainArtifactsBeforeConsumersAndReady(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			archive, sum := writeArchive(t, "tool", "#!/bin/sh\n")
+			tool := Artifact{Name: "tool", Version: "1.0", URL: "file://" + archive, SHA256: sum, Format: TarGz, Bins: map[string]string{"tool": "tool"}}
+			if fail {
+				tool.SHA256 = strings.Repeat("0", 64)
+			}
+			inventory := Inventory{Version: SchemaVersion, Tools: []Artifact{tool}, Prepare: []string{"test -f \"$HOME/.local/share/cc-remote/tools/tool-1.0/.cc-remote-digest\"", "touch \"$HOME/consumer\""}}
+			host := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+			out, err := host.plugins("install", "stamp")
+			if (err != nil) != fail {
+				t.Fatalf("install error = %v, want failure %t: %s", err, fail, out)
+			}
+			for _, name := range []string{"consumer", ".cc-remote/ready"} {
+				_, err := os.Stat(filepath.Join(host.home, name))
+				if fail && !os.IsNotExist(err) {
+					t.Errorf("failed install reached %s: %v", name, err)
+				}
+				if !fail && err != nil {
+					t.Errorf("successful install omitted %s: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPluginsWorkersCannotConsumeTokenInput(t *testing.T) {
+	archive, sum := writeArchive(t, "tool", "#!/bin/sh\n")
+	tool := Artifact{Name: "tool", Version: "1.0", URL: "file://" + archive, SHA256: sum, Format: TarGz, Bins: map[string]string{"tool": "tool"}}
+	inventory := Inventory{Version: SchemaVersion, Tools: []Artifact{tool}, Prepare: []string{"IFS= read -r remaining", "test \"$remaining\" = retained-input"}}
+	host := newPluginsHost(t, inventory, nil, fakeState{}, nil)
+	curl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeCurl := "#!/bin/bash\nset -euo pipefail\nif IFS= read -r line; then exit 92; fi\nif env | grep -q '^github_token='; then exit 93; fi\nexec " + quote(curl) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(host.fakes, "curl"), []byte(fakeCurl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "install", "stamp")
+	cmd.Env = append(os.Environ(), "HOME="+host.home, "PATH="+host.fakes+":"+os.Getenv("PATH"))
+	cmd.Stdin = strings.NewReader("synthetic-token\nretained-input\n")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("worker inherited token input or environment: %v %s", err, out)
+	}
 }
