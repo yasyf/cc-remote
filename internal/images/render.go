@@ -154,6 +154,10 @@ func parse(inv Inventory) (*template.Template, error) {
 		"expand":     expand,
 		"executable": serviceExecutable,
 		"spec":       spec,
+		"pluginRef": func(plugin Plugin) string {
+			_, marketplace, _ := strings.Cut(plugin.ID, "@")
+			return refs[marketplace]
+		},
 	}).ParseFS(assets.FS, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile")
 	if err != nil {
 		return nil, fmt.Errorf("parse image templates: %w", err)

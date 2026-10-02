@@ -43,10 +43,55 @@ plugin_root() {
   jq -er --arg id "$1" '.[] | select(.id == $id) | .installPath' <<< "$plugins"
 }
 
+pinned_blob() {
+  local dir="$1" ref="$2" path="$3" mode oid target
+  read -r mode _ oid _ <<< "$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "$path")"
+  if [ "$mode" = 120000 ]; then
+    target="$(git -C "$dir" cat-file blob "$oid")"
+    case "$target" in
+      "" | /* | */ | . | .. | */. | */..) return 1 ;;
+    esac
+    read -r mode _ oid _ <<< "$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "${path%/*}/$target")"
+  fi
+  case "$mode" in
+    100644 | 100755) printf '%s %s\n' "$mode" "$oid" ;;
+    *) return 1 ;;
+  esac
+}
+
 verify_plugin_bin() {
-  local root
-  root="$(plugin_root "$1")"
-  "$root/$2" --version > /dev/null
+  local id="$1" bin="$2" ref="$3" root dir source launcher descriptor
+  root="$(plugin_root "$id")"
+  if [ ! -x "$root/$bin" ]; then
+    echo "cc-remote: plugin $id has no executable $bin" >&2
+    exit 1
+  fi
+  if [ -n "$ref" ] && [ "${id%@*}" != captain-hook ]; then
+    dir="$marketplace_dir/${id#*@}"
+    source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')"
+    if ! launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")"; then
+      echo "cc-remote: plugin $id $bin is not a committed file at $ref" >&2
+      exit 1
+    fi
+    git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher"
+    if grep -qF "DESCRIPTOR=\"\$ROOT/$bin.binrun\"" "$tmp_dir/launcher" \
+      && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" "$tmp_dir/launcher"; then
+      if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
+        || [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
+        || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
+        echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
+        exit 1
+      fi
+      sed '1{/^#!/d;}' "$root/$bin.binrun" | jq -e '
+        .schema == 1 and .kind == "release-binary"
+        and (.version.static | type == "string" and length > 0)
+        and (.platforms | length > 0)
+        and all(.platforms[]; .size > 0 and .hash == "sha256" and (.digest | test("^[0-9a-f]{64}$")))
+      ' > /dev/null
+      return
+    fi
+  fi
+  "$root/$bin" --version > /dev/null
 }
 
 pinned() {
@@ -143,6 +188,10 @@ pin_ref_marketplace() {
 
 verify_ref_marketplace() {
   verify_marketplace "$1" "directory $marketplace_dir/$1"
+  if [ "$(git -C "$marketplace_dir/$1" rev-parse HEAD)" != "$2" ]; then
+    echo "cc-remote: marketplace $1 is not checked out at $2" >&2
+    exit 1
+  fi
 }
 
 pin_branch_marketplace() {
@@ -181,21 +230,26 @@ install_plugins() {
   check_plugins
 }
 
-uv_tool() {
-  local python="$2" spec="$3" stamp="$state_dir/uv-tools/$1"
+uv_launcher() {
+  local bin="$1" python="$2" spec="$3" arg uv
   shift 3
-  if [ "$(cat "$stamp" 2> /dev/null)" != "$python $spec $*" ]; then
-    uv tool install --quiet --force --python "$python" "$@" "$spec"
-    mkdir -p "$state_dir/uv-tools"
-    printf '%s\n' "$python $spec $*" > "$stamp"
-  fi
+  uv="$(command -v uv)" || return
+  printf '#!/bin/sh\nexec %s tool run --python %s' "$(shq "$uv")" "$(shq "$python")"
+  for arg in "$@"; do
+    printf ' %s' "$(shq "$arg")"
+  done
+  printf ' --from %s %s "$@"\n' "$(shq "$spec")" "$(shq "$bin")"
 }
 
-verify_uv_tool() {
-  local name="$1" python="$2" spec="$3"
-  shift 3
-  if [ "$(cat "$state_dir/uv-tools/$name" 2> /dev/null)" != "$python $spec $*" ]; then
-    echo "cc-remote: uv tool $name is not installed as $spec" >&2
+install_uv_launcher() {
+  uv_launcher "$@" > "$tmp_dir/uv-$1"
+  chmod 755 "$tmp_dir/uv-$1"
+  mv -f "$tmp_dir/uv-$1" "$bin_dir/$1"
+}
+
+verify_uv_launcher() {
+  if [ ! -x "$bin_dir/$1" ] || ! uv_launcher "$@" | cmp -s "$bin_dir/$1" -; then
+    echo "cc-remote: Python tool $1 does not have its pinned first-use launcher" >&2
     exit 1
   fi
 }
@@ -356,7 +410,10 @@ run_install() {
   fi
 {{- end}}
 {{- range .Python.User}}
-  uv_tool {{q .Name}} {{q $.Python.Version}} {{spec .}}{{range .Args}} {{q .}}{{end}}
+{{- $tool := .}}
+{{- range .Bins}}
+  install_uv_launcher {{q .}} {{q $.Python.Version}} {{spec $tool}}{{range $tool.Args}} {{q .}}{{end}}
+{{- end}}
 {{- end}}
 {{- with .CodexRuntime}}
   install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
@@ -436,7 +493,7 @@ run_verify() {
 {{- end}}
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
-  verify_ref_marketplace {{q .Name}}
+  verify_ref_marketplace {{q .Name}} {{q .Ref}}
 {{- else}}
   verify_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}
 {{- end}}
@@ -446,15 +503,14 @@ run_verify() {
 {{- range .Claude.Plugins}}
 {{- $plugin := .}}
 {{- range .Bins}}
-  verify_plugin_bin {{q $plugin.ID}} {{q .}}
+  verify_plugin_bin {{q $plugin.ID}} {{q .}} {{q (pluginRef $plugin)}}
 {{- end}}
 {{- end}}
 {{- end}}
 {{- range .Python.User}}
-  verify_uv_tool {{q .Name}} {{q $.Python.Version}} {{spec .}}{{range .Args}} {{q .}}{{end}}
 {{- $tool := .}}
 {{- range .Bins}}
-  verify_bin {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
+  verify_uv_launcher {{q .}} {{q $.Python.Version}} {{spec $tool}}{{range $tool.Args}} {{q .}}{{end}}
 {{- end}}
 {{- end}}
 {{- with .CodexRuntime}}

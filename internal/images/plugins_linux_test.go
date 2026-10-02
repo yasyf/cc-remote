@@ -15,6 +15,7 @@ import (
 const fakeClaude = `#!/usr/bin/env python3
 import json
 import os
+import shutil
 import sys
 
 state_path = os.environ["FAKE_STATE"]
@@ -120,10 +121,16 @@ elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
         fail("no marketplace " + market)
     version = source["snapshot"][name]
     root = os.path.join(os.path.dirname(state_path), "plugins", name)
-    os.makedirs(os.path.join(root, "bin"), exist_ok=True)
-    with open(os.path.join(root, "bin", name), "w") as tool:
-        tool.write("#!/bin/sh\n")
-    os.chmod(os.path.join(root, "bin", name), 0o755)
+    manifest_path = os.path.join(source.get("path", ""), ".claude-plugin", "marketplace.json")
+    if os.path.isfile(manifest_path):
+        manifest = json.load(open(manifest_path))
+        relative = next(p["source"] for p in manifest["plugins"] if p["name"] == name)
+        shutil.copytree(os.path.join(source["path"], relative), root, dirs_exist_ok=True)
+    else:
+        os.makedirs(os.path.join(root, "bin"), exist_ok=True)
+        with open(os.path.join(root, "bin", name), "w") as tool:
+            tool.write("#!/bin/sh\n")
+        os.chmod(os.path.join(root, "bin", name), 0o755)
     state["plugins"] = [p for p in state["plugins"] if p["id"] != args[2]]
     state["plugins"].append({"id": args[2], "version": version, "enabled": True, "errors": [], "installPath": root})
     save()
@@ -156,8 +163,13 @@ case "$1" in
       checkout)
         [ "$3" = FETCH_HEAD ] || exit 2
         cp "$dir/.fake-fetch" "$dir/.fake-head"
+        source="$FAKE_SOURCES/$(basename "$dir")"
+        if [ -d "$source" ]; then
+          cp -R "$source/." "$dir/"
+        fi
         ;;
       rev-parse) cat "$dir/.fake-head" 2> /dev/null || exit 128 ;;
+      ls-tree | cat-file | hash-object) exec "$REAL_GIT" -C "$dir" "$@" ;;
       *) exit 2 ;;
     esac
     ;;
@@ -247,6 +259,10 @@ func (h pluginsHost) setCatalog(catalog map[string]any) {
 }
 
 func (h pluginsHost) run(name string, args ...string) (string, error) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		h.t.Fatal(err)
+	}
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = strings.NewReader("\n")
 	cmd.Env = append(os.Environ(),
@@ -256,6 +272,8 @@ func (h pluginsHost) run(name string, args ...string) (string, error) {
 		"FAKE_STATE="+filepath.Join(h.fakes, "state.json"),
 		"FAKE_CATALOG="+filepath.Join(h.fakes, "catalog.json"),
 		"FAKE_LOG="+filepath.Join(h.fakes, "calls.log"),
+		"FAKE_SOURCES="+filepath.Join(h.fakes, "sources"),
+		"REAL_GIT="+git,
 	)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
