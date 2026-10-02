@@ -64,11 +64,12 @@ Artifact directories and pinned marketplaces use links into the read-only mount;
 plugin caches and configuration use writable copies. The `cc-remote-payload`
 service remounts stored payloads at boot, before dependent inventory services.
 
-Startup runs these lanes concurrently:
+Startup runs `provision.sh prerequisites` on machines provisioned in place, then
+runs these lanes concurrently:
 
 | Lane | Order |
 | --- | --- |
-| Packages | Install and verify packages on machines provisioned in place. |
+| Packages | Run the remaining `apt-get` work and verify Debian artifacts on machines provisioned in place. |
 | Checkout | Check out the pinned source commit, then run profile preparation. |
 | Tools | Mount the payload when configured, provision system tools in place, install user tools and plugins, configure, then enroll in the tailnet. |
 
@@ -76,8 +77,8 @@ Each lane preserves its own order; profile preparation can overlap tool
 installation. Create publishes the
 [readiness stamp](tool-inventory.md#fingerprints-and-readiness) only after every
 lane succeeds, then connects. Installation clears the stamp; the separate
-`publish` phase writes it. Resume uses the stamp to check for changed tools or
-images.
+`publish` phase writes it. Resume uses the stamp to check for changed tools,
+images, or payloads.
 
 | Part of the lean profile | Task-specific setup |
 | --- | --- |

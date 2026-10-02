@@ -20,10 +20,11 @@ const (
 )
 
 const (
-	PhasePackages = "packages"
-	PhaseTools    = "tools"
-	PhasePayload  = "payload"
-	PhasePack     = "pack"
+	PhasePrerequisites = "prerequisites"
+	PhasePackages      = "packages"
+	PhaseTools         = "tools"
+	PhasePayload       = "payload"
+	PhasePack          = "pack"
 )
 
 const stagePlugins = `set -eu

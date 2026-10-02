@@ -295,13 +295,23 @@ func TestStamp(t *testing.T) {
 	scripts := Scripts{ProvisionScript: []byte("A"), Plugins: []byte("BC")}
 	image := Context{Dockerfile: []byte("D"), Provision: []byte("A"), Start: []byte("S")}
 	tools, img := scripts.Fingerprint(), image.Fingerprint()
-	sum := sha256.Sum256([]byte("cc-remote/ready/v1\ntools 64\n" + tools))
-	if got, want := Stamp(scripts, nil), hex.EncodeToString(sum[:]); got != want {
-		t.Errorf("Stamp without image = %s, want %s", got, want)
+	tests := []struct {
+		name    string
+		image   *Context
+		payload string
+		framed  string
+	}{
+		{"tools only", nil, "", "tools 64\n" + tools},
+		{"an image", &image, "", "tools 64\n" + tools + "image 64\n" + img},
+		{"a payload", nil, digest, "tools 64\n" + tools + "payload 64\n" + digest},
 	}
-	sum = sha256.Sum256([]byte("cc-remote/ready/v1\ntools 64\n" + tools + "image 64\n" + img))
-	if got, want := Stamp(scripts, &image), hex.EncodeToString(sum[:]); got != want {
-		t.Errorf("Stamp with image = %s, want %s", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sum := sha256.Sum256([]byte("cc-remote/ready/v1\n" + tt.framed))
+			if got, want := Stamp(scripts, tt.image, tt.payload), hex.EncodeToString(sum[:]); got != want {
+				t.Errorf("Stamp = %s, want %s", got, want)
+			}
+		})
 	}
 }
 

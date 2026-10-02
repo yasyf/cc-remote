@@ -12,6 +12,7 @@ tool_dir=/opt/cc-remote/tools
 bin_dir=/usr/local/bin
 payload_root=/opt/cc-remote/payload
 payload_store=/var/lib/cc-remote/payload
+prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)
 tmp_dir="$(mktemp -d)"
 trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
 
@@ -27,12 +28,31 @@ t64() {
   done
 }
 
+has_prerequisites() {
+  local bin
+  for bin in curl git jq python3 unzip xz; do
+    if ! command -v "$bin" > /dev/null; then
+      return 1
+    fi
+  done
+  [ -f /etc/ssl/certs/ca-certificates.crt ]
+}
+
+provision_prerequisites() {
+  if has_prerequisites; then
+    return
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends "${prerequisites[@]}" > /dev/null
+}
+
 provision_packages() {
   local -a t64_packages
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   mapfile -t t64_packages < <(t64{{range .Apt.T64}} {{q .}}{{end}})
-  apt-get install -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils{{range .Apt.Install}} {{q .}}{{end}} \
+  apt-get install -y -qq --no-install-recommends "${prerequisites[@]}"{{range .Apt.Install}} {{q .}}{{end}} \
     "${t64_packages[@]}" > /dev/null
 {{- range .Apt.Remove}}
   if dpkg -s {{q .}} > /dev/null 2>&1; then
@@ -99,24 +119,25 @@ passwd_home() {
 
 os_version() {
   (
+    # shellcheck source=/dev/null
     . /etc/os-release
     printf '%s\n' "$VERSION_ID"
   )
 }
 
+verify_payload() {
+  if ! echo "$1  $2" | sha256sum -c --status -; then
+    echo "cc-remote: $2 does not match its sha256 $1" >&2
+    exit 1
+  fi
+}
+
 provision_payload() {
   local sha256="${1:?payload needs the image sha256}" fingerprint="${2:?payload needs the tools fingerprint}"
   local image="$payload_store/$sha256.sqfs" payload="$payload_root/$sha256" user_home version mismatch
-  if [ -f "$image" ]; then
-    rm -f "$image.partial"
-  elif [ ! -f "$image.partial" ]; then
+  if [ ! -f "$image.partial" ] && [ ! -f "$image" ]; then
     echo "cc-remote: no payload is staged at $image.partial" >&2
     exit 1
-  elif ! echo "$sha256  $image.partial" | sha256sum -c --status -; then
-    echo "cc-remote: the staged payload $image.partial does not match its sha256 $sha256" >&2
-    exit 1
-  else
-    mv -f "$image.partial" "$image"
   fi
   cat > "$tmp_dir/payload-mount.sh" <<'SH'
 #!/bin/sh
@@ -139,10 +160,16 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
   fi
 done
 SH
-  install -m 0755 "$tmp_dir/payload-mount.sh" /opt/cc-remote/payload-mount.sh
   mkdir -p "$payload"
+  install -m 0755 "$tmp_dir/payload-mount.sh" /opt/cc-remote/payload-mount.sh
   (
     flock 9
+    if [ -f "$image.partial" ]; then
+      verify_payload "$sha256" "$image.partial"
+      mv -f "$image.partial" "$image"
+    elif ! mountpoint -q "$payload"; then
+      verify_payload "$sha256" "$image"
+    fi
     if ! mountpoint -q "$payload"; then
       mount -t squashfs -o ro,loop "$image" "$payload"
     fi
@@ -208,12 +235,13 @@ provision_pack() {
 }
 
 case "$phase" in
+  prerequisites) provision_prerequisites ;;
   packages) provision_packages ;;
   tools) provision_tools ;;
   payload) provision_payload "${2:-}" "${3:-}" ;;
   pack) provision_pack "${2:-}" ;;
   *)
-    echo "usage: provision.sh packages|tools|payload SHA256 FINGERPRINT|pack FINGERPRINT" >&2
+    echo "usage: provision.sh prerequisites|packages|tools|payload SHA256 FINGERPRINT|pack FINGERPRINT" >&2
     exit 2
     ;;
 esac

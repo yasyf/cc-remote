@@ -176,7 +176,7 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 				t.Errorf("wrote %q, want %q", out.String(), provider.payload)
 			}
 			pack := "provision pack " + scripts.Fingerprint()
-			steps := []string{"provision packages", "provision tools", "stage plugins", "plugins install", pack}
+			steps := []string{"provision packages", "provision tools", "stage plugins", "plugins install", "plugins verify", pack}
 			if !slices.Equal(machine.steps, steps) {
 				t.Errorf("steps = %q, want %q", machine.steps, steps)
 			}
@@ -185,6 +185,7 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 				"provision tools":    string(scripts.ProvisionScript),
 				"stage plugins":      string(scripts.Plugins),
 				"plugins install":    tt.install,
+				"plugins verify":     "",
 				pack:                 string(scripts.ProvisionScript),
 			}
 			if !maps.Equal(machine.stdins, stdins) {
@@ -226,7 +227,8 @@ func TestBuildPayloadRemovesTheMachineWhenAStepFails(t *testing.T) {
 	}{
 		{name: "a phase fails", failing: "provision tools", steps: 2, message: "exited 1: boom"},
 		{name: "the install fails", failing: "plugins install", steps: 4, message: "exited 1: boom"},
-		{name: "the download fails", fail: failed, steps: 5, reads: 1, is: failed},
+		{name: "the full verification fails before the pack", failing: "plugins verify", steps: 5, message: "exited 1: boom"},
+		{name: "the download fails", fail: failed, steps: 6, reads: 1, is: failed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,7 +271,9 @@ func TestBuildPayloadDiscardsAFailedCreateOnlyWhenItsLabelProvesTheBuildMadeIt(t
 	}{
 		{name: "a create that left a labelled machine destroys it", createErr: timedOut, leaves: func(name string) map[string]string { return map[string]string{LabelPayloadBuild: name} }, verbs: "create destroy"},
 		{name: "a create that left an unlabelled machine keeps it", createErr: timedOut, leaves: func(string) map[string]string { return map[string]string{} }, verbs: "create", kept: true, message: "without a label proving this build made it"},
-		{name: "a create that left another build's machine keeps it", createErr: timedOut, leaves: func(string) map[string]string { return map[string]string{LabelPayloadBuild: "cc-remote-payload-00000000"} }, verbs: "create", kept: true, message: "so it was left running"},
+		{name: "a create that left another build's machine keeps it", createErr: timedOut, leaves: func(string) map[string]string {
+			return map[string]string{LabelPayloadBuild: "cc-remote-payload-00000000"}
+		}, verbs: "create", kept: true, message: "so it was left running"},
 		{name: "a create that made nothing destroys nothing", createErr: timedOut, verbs: ""},
 		{name: "a taken name keeps the machine", createErr: fmt.Errorf("fake: %w", providers.ErrExists), leaves: func(string) map[string]string { return map[string]string{} }, verbs: "create", kept: true, message: "already exists at the provider, so it was left alone: fake: machine already exists"},
 	}

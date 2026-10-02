@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -70,20 +71,30 @@ func TestWritePayload(t *testing.T) {
 	built := workspace.PayloadBuild{SHA256: strings.Repeat("a", 64), Size: 4, Tools: strings.Repeat("b", 64), Machine: "cc-remote-payload-0123abcd"}
 	tests := []struct {
 		name     string
+		dirMode  fs.FileMode
 		existing string
 		err      error
 		want     workspace.PayloadBuild
 		is       error
+		refused  bool
 		contents string
 		calls    int
 	}{
-		{name: "writes the payload", want: built, contents: "hsqs", calls: 1},
-		{name: "removes a failed payload", err: failed, is: failed, calls: 1},
-		{name: "keeps an existing file", existing: "keep", is: fs.ErrExist, contents: "keep"},
+		{name: "writes the payload", dirMode: 0o700, want: built, contents: "hsqs", calls: 1},
+		{name: "writes into a directory others can only read", dirMode: 0o755, want: built, contents: "hsqs", calls: 1},
+		{name: "removes a failed payload", dirMode: 0o700, err: failed, is: failed, calls: 1},
+		{name: "keeps an existing file", dirMode: 0o700, existing: "keep", is: fs.ErrExist, contents: "keep"},
+		{name: "refuses a group-writable directory", dirMode: 0o770, refused: true},
+		{name: "refuses a world-writable directory", dirMode: 0o707, refused: true},
+		{name: "refuses a sticky shared directory", dirMode: 0o777 | fs.ModeSticky, refused: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "payload.sqfs")
+			dir := t.TempDir()
+			if err := os.Chmod(dir, tt.dirMode); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "payload.sqfs")
 			if tt.existing != "" {
 				if err := os.WriteFile(path, []byte(tt.existing), 0o600); err != nil {
 					t.Fatal(err)
@@ -97,7 +108,13 @@ func TestWritePayload(t *testing.T) {
 				}
 				return built, tt.err
 			})
-			if tt.is == nil && err != nil || tt.is != nil && !errors.Is(err, tt.is) {
+			refusal := fmt.Sprintf("refusing to write the payload into %s: its mode %v lets its group or other users replace the private payload, so choose a directory only you can write", dir, tt.dirMode.Perm())
+			switch {
+			case tt.refused:
+				if err == nil || err.Error() != refusal {
+					t.Errorf("writePayload = %v, want %q", err, refusal)
+				}
+			case tt.is == nil && err != nil || tt.is != nil && !errors.Is(err, tt.is):
 				t.Errorf("writePayload = %v, want %v", err, tt.is)
 			}
 			if got != tt.want || calls != tt.calls {

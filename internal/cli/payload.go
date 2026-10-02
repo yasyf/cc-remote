@@ -69,6 +69,14 @@ and sha256 to them.`,
 }
 
 func writePayload(path string, build func(io.Writer) (workspace.PayloadBuild, error)) (workspace.PayloadBuild, error) {
+	dir := filepath.Dir(path)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return workspace.PayloadBuild{}, fmt.Errorf("stat the payload directory: %w", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o022 != 0 {
+		return workspace.PayloadBuild{}, fmt.Errorf("refusing to write the payload into %s: its mode %v lets its group or other users replace the private payload, so choose a directory only you can write", dir, mode)
+	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return workspace.PayloadBuild{}, fmt.Errorf("create %s: %w", path, err)

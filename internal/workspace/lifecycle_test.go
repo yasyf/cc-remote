@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ const (
 	prepares      = "cd /home/fake/app\n"
 	noState       = `{"BackendState":"NoState"}`
 	provisions    = "sudo bash -s"
+	prereqsPhase  = "sudo bash -s prerequisites"
 	packagesPhase = "sudo bash -s packages"
 	toolsPhase    = "sudo bash -s tools"
 	payloadPhase  = "sudo bash -s payload "
@@ -413,11 +415,13 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.ordered(0, packagesPhase, publishes)
+	h.ordered(0, prereqsPhase, packagesPhase, publishes)
+	h.ordered(0, prereqsPhase, checkout)
+	h.ordered(0, prereqsPhase, toolsPhase)
 	toolsLane := h.ordered(0, toolsPhase, stages, installs, configures, freshens, enrolls, publishes)
 	source := h.ordered(0, checkout, prepares, publishes)
-	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", publishes) != 1 {
-		t.Errorf("a fresh create renewed identity, checked a ready stamp, mounted a payload, or published more than once: %q", h.machine.scripts["ws-1"])
+	if h.machine.ran("ws-1", renews) != 0 || h.machine.ran("ws-1", readies) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", publishes) != 1 || h.machine.ran("ws-1", prereqsPhase) != 1 {
+		t.Errorf("a fresh create renewed identity, checked a ready stamp, mounted a payload, or ran its prerequisites or publish other than once: %q", h.machine.scripts["ws-1"])
 	}
 	if got := h.machine.stdins["ws-1"][toolsLane[2]]; got != "" {
 		t.Errorf("the tool install read %q on stdin although no private marketplace needs a token", got)
@@ -845,6 +849,7 @@ func TestAPayloadIsStagedAndMountedBeforeTheToolsAndHandedToTheInstall(t *testin
 		t.Fatal(err)
 	}
 	order := h.ordered(0, stagesPayload, payloadPhase, toolsPhase, stages, installs, configures, publishes)
+	h.ordered(0, prereqsPhase, stagesPayload)
 	h.ordered(0, packagesPhase, publishes)
 	h.ordered(0, checkout, prepares, publishes)
 	if stage := h.machine.scripts["ws-1"][order[0]]; !strings.HasPrefix(stage, "sudo sh -c ") || !strings.HasSuffix(stage, " "+stagesPayload+sha) {
@@ -882,6 +887,114 @@ func TestAMissingPayloadFileFailsTheCreateBeforeAnythingIsPublished(t *testing.T
 	}
 	if _, ok := h.record("ws-1"); ok {
 		t.Error("the failed create kept its record")
+	}
+}
+
+func TestAPayloadPathMustResolveToARegularFile(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(path, staged string) error
+		refused bool
+	}{
+		{name: "a symlink to the payload is followed", replace: func(path, staged string) error { return os.Symlink(staged, path) }},
+		{name: "a directory is refused", replace: func(path, _ string) error { return os.Mkdir(path, 0o700) }, refused: true},
+		{name: "a fifo is refused without waiting for a writer", replace: func(path, _ string) error { return syscall.Mkfifo(path, 0o600) }, refused: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPayloadHarness(t)
+			path := h.cfg.Profiles["lean"].Machine["fake"].Payload.Path
+			staged := filepath.Join(t.TempDir(), "staged.sqfs")
+			if err := os.Rename(path, staged); err != nil {
+				t.Fatal(err)
+			}
+			if err := tt.replace(path, staged); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+			if !tt.refused {
+				if err != nil {
+					t.Fatal(err)
+				}
+				order := h.ordered(0, stagesPayload, payloadPhase, publishes)
+				if got := h.machine.stdins["ws-1"][order[0]]; got != payloadBytes {
+					t.Errorf("the staging read %q through the symlink, want the payload file", got)
+				}
+				return
+			}
+			if want := fmt.Sprintf("open payload: %s is not a regular file (mode %v)", path, info.Mode()); err == nil || err.Error() != want {
+				t.Fatalf("Create = %v, want %q", err, want)
+			}
+			if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
+				t.Errorf("a create with a non-regular payload ran %q", h.machine.scripts["ws-1"])
+			}
+			if _, ok := h.record("ws-1"); ok {
+				t.Error("the failed create kept its record")
+			}
+		})
+	}
+}
+
+func TestResumeRemountsThePayloadOnlyWhenItsDigestChanged(t *testing.T) {
+	other := strings.Repeat("ab", 32)
+	tests := []struct {
+		name    string
+		sha256  string
+		moved   bool
+		remount bool
+	}{
+		{name: "a new digest stages and mounts the new payload", sha256: other, remount: true},
+		{name: "the same digest at a new path stays ready", sha256: sha, moved: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPayloadHarness(t)
+			ctx := context.Background()
+			if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+				t.Fatal(err)
+			}
+			machine := h.cfg.Profiles["lean"].Machine["fake"]
+			path := machine.Payload.Path
+			if tt.moved {
+				moved := filepath.Join(t.TempDir(), "moved.sqfs")
+				if err := os.Rename(path, moved); err != nil {
+					t.Fatal(err)
+				}
+				path = moved
+			}
+			machine.Payload = &config.Payload{Path: path, SHA256: tt.sha256}
+			h.cfg.Profiles["lean"].Machine["fake"] = machine
+			repaid := h.open()
+			if (repaid.Stamp != h.session.Stamp) != tt.remount {
+				t.Fatalf("the payload change moved the stamp from %s to %s, want a move %v", h.session.Stamp, repaid.Stamp, tt.remount)
+			}
+			before := len(h.machine.scripts["ws-1"])
+			if _, err := repaid.Resume(ctx, "ws-1"); err != nil {
+				t.Fatal(err)
+			}
+			if h.machine.ready["ws-1"] != repaid.Stamp {
+				t.Errorf("the resume left stamp %q, want %q", h.machine.ready["ws-1"], repaid.Stamp)
+			}
+			if !tt.remount {
+				for _, script := range h.machine.scripts["ws-1"][before:] {
+					if strings.Contains(script, stagesPayload) || strings.Contains(script, payloadPhase) || strings.Contains(script, publishes) {
+						t.Errorf("a resume at the ready stamp ran %q", script)
+					}
+				}
+				return
+			}
+			order := h.ordered(before, readies, prereqsPhase, stagesPayload+tt.sha256, payloadPhase+tt.sha256, toolsPhase, installs+" "+images.PayloadRoot+"/"+tt.sha256, publishes, prepares, configures)
+			if staged := h.machine.stdins["ws-1"][order[2]]; staged != payloadBytes {
+				t.Errorf("the staging read %q on stdin, want the payload file", staged)
+			}
+		})
 	}
 }
 
@@ -957,7 +1070,8 @@ func TestResumeProvisionsInPlaceWhenTheInventoryDrifted(t *testing.T) {
 	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	h.ordered(before, readies, packagesPhase, publishes)
+	h.ordered(before, readies, prereqsPhase, packagesPhase, publishes)
+	h.ordered(before, prereqsPhase, toolsPhase)
 	order := h.ordered(before, readies, toolsPhase, stages, installs, publishes, prepares, configures)
 	provision, plugins := h.machine.stdins["ws-1"][order[1]], h.machine.stdins["ws-1"][order[2]]
 	if !strings.Contains(provision, "jq-1.8.3") || strings.Contains(provision, "1.8.2") || !strings.Contains(plugins, "jq-1.8.3") || strings.Contains(plugins, "1.8.2") {

@@ -131,7 +131,7 @@ provisioned in place with the `sprite-env` supervisor and exclude `image`.
 
 | Field | Contract |
 | --- | --- |
-| `path` | Local payload file; relative paths resolve from the config file's directory. |
+| `path` | Must resolve to a local regular file; symlinks are followed, and relative paths resolve from the config file's directory. Other file types fail creation before streaming. |
 | `sha256` | File digest as 64 lowercase hexadecimal characters. |
 
 With a configured Sprites provider and `lean` profile, a build command is:
@@ -143,14 +143,22 @@ cc-remote payload build --config ./config.yaml --provider sprites --profile lean
 The build installs the full inventory, including private marketplaces and the
 selected profile's additions, on a fresh build Sprite. Private marketplace access
 uses `GH_TOKEN`, `GITHUB_TOKEN`, or `git.token_command`; the token reaches the
-Sprite only on the install phase's stdin. The build packs an explicit allowlist
-of installed trees, streams the file back, and computes its SHA-256 and byte size.
-`--out` must not exist; the new file has mode `0600`. The build destroys its Sprite
-and confirms its absence before returning success. Its returned `path` and
+Sprite only on the install phase's stdin.
+
+Before packing, `plugins.sh verify` checks system and user tools and links,
+including running each target's verify arguments; a failed check stops the build.
+The build packs an explicit allowlist of installed trees, streams the file back,
+and computes its SHA-256 and byte size.
+The build refuses to create `--out` if it exists or its parent directory is
+writable by group or others; the new file has mode `0600`. The build destroys its
+Sprite and confirms its absence before returning success. Its returned `path` and
 `sha256` supply the machine's payload fields.
 
-Create streams the local file into the Sprite, checks its SHA-256, and mounts it
-read-only under `/opt/cc-remote/payload/<sha256>`. The manifest
+Create streams the local file into the Sprite as a staged file; the payload phase
+checks its SHA-256, atomically renames it over the cached `<sha256>.sqfs`, and mounts
+it read-only under `/opt/cc-remote/payload/<sha256>`. Without a staged file, it
+verifies the cached image before mounting, or reuses an existing mount without
+hashing again. A digest mismatch fails creation. The manifest
 `cc-remote-payload.json` must have `schemaVersion: 1` and match the rendered tools
 fingerprint, the target account's passwd home directory, `uname -m`, and the OS
 `VERSION_ID`. A mismatch or missing required tree fails creation. Packing also
@@ -169,8 +177,10 @@ The allowlist uses the following exposure rules for entries in the inventory:
 | Codex runtime and configuration | Link `$HOME/.cache/codex-runtimes/codex-primary-runtime`; copy `$HOME/.codex/config.toml` and `$HOME/.codex/plugins/cache/openai-primary-runtime`. |
 | Captain Hook version directory | Keep a real directory; link its children except `.lock`. |
 
-Exposure replaces links into older payloads and leaves other existing paths to
-the installer. Plugin caches are writable because plugins build runtime files
+Exposure replaces links into older payloads, including child links in an existing
+Captain Hook version directory, and leaves other existing paths, including
+copies, to the installer.
+Plugin caches are writable because plugins build runtime files
 and Claude writes `.in_use` there. The allowlist excludes owner state: agent
 authentication and sessions, plugin data, daemon locks, cc-remote workspace state,
 and SSH/tailnet state. Packing also excludes `.in_use` and `.orphaned_at`.
@@ -185,7 +195,8 @@ readiness publication:
 
 | Invocation | Result |
 | --- | --- |
-| `provision.sh packages` | Installs packages and Debian artifacts with `apt-get`, verifies the artifacts, and clears package lists. |
+| `provision.sh prerequisites` | Checks for `curl`, `git`, `jq`, `python3`, `unzip`, `xz`, and `/etc/ssl/certs/ca-certificates.crt`; only if any are missing, runs `apt-get update` and installs `ca-certificates`, `curl`, `git`, `jq`, `python3`, `unzip`, and `xz-utils`. Runs no apt command when all exist. |
+| `provision.sh packages` | Installs prerequisite packages, inventory packages, and Debian artifacts with `apt-get`, verifies the artifacts, and clears package lists. |
 | `provision.sh tools` | Installs and verifies non-Debian system artifacts and system Python tools; writes managed Claude settings. |
 | `provision.sh payload SHA256 FINGERPRINT` | Validates and mounts the staged payload, registers boot remounting, and exposes system trees. |
 | `provision.sh pack FINGERPRINT` | Packs the allowlisted trees and manifest into a `SquashFS` file with zstd compression. |
@@ -203,19 +214,23 @@ Namespace image builds run `packages` followed by `tools`.
 | --- | --- |
 | Tool fingerprint | Rendered `provision.sh` and `plugins.sh` for the selected profile, including its tool and prepare additions. |
 | Image fingerprint | Rendered `Dockerfile`, root `provision.sh`, and `start.sh`. |
-| Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host. |
+| Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host or the configured payload `sha256` for a machine with a payload; payload `path` is excluded. |
 
 Each uses SHA-256 with its own domain and file-name/length framing. The image
 description includes `cc-remote-image=<fingerprint>`.
 
-Installation clears readiness and never writes the stamp. Create runs packages,
+Installation clears readiness and never writes the stamp. Create first runs
+`prerequisites` on machines provisioned in place. It then runs packages,
 checkout and profile preparation, and tools in concurrent lanes. The tools lane
 includes payload mounting when configured, installation, configuration, and
 tailnet enrollment.
 Only after every lane succeeds does `publish` write the stamp; connection follows.
 
-On resume, tool reinstallation runs packages and tools concurrently, then publishes
+On resume, tool reinstallation also runs `prerequisites` first on machines
+provisioned in place. It runs packages and tools concurrently, then publishes
 before profile preparation and configuration. The `ready` phase checks the stamp.
+A changed payload `sha256` causes a readiness miss on resume, which stages,
+verifies, and mounts the new payload before publishing.
 
 Namespace image building and live host startup have not been exercised with this
 implementation. CI grades rendering, validation, shell syntax, shellcheck, Python

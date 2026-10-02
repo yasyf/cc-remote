@@ -434,6 +434,72 @@ done
 	}
 }
 
+func TestProvisionPrerequisitesRunAptOnlyWhenOneIsMissing(t *testing.T) {
+	install := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils\n"
+	tests := []struct {
+		name    string
+		missing string
+		apt     string
+	}{
+		{name: "everything present runs no apt"},
+		{name: "a missing command installs the prerequisites", missing: "xz", apt: install},
+		{name: "a missing CA bundle installs the prerequisites", missing: "ca-certificates.crt", apt: install},
+	}
+	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			bundle := filepath.Join(root, "ca-certificates.crt")
+			files := map[string]string{
+				"id":                  "#!/bin/sh\necho 0\n",
+				"apt-get":             "#!/bin/sh\necho \"$*\" >> \"$TEST_ROOT/apt\"\n",
+				"curl":                "#!/bin/sh\n",
+				"git":                 "#!/bin/sh\n",
+				"jq":                  "#!/bin/sh\n",
+				"python3":             "#!/bin/sh\n",
+				"unzip":               "#!/bin/sh\n",
+				"xz":                  "#!/bin/sh\n",
+				"ca-certificates.crt": "",
+			}
+			delete(files, tt.missing)
+			for name, content := range files {
+				path := filepath.Join(fakes, name)
+				if name == "ca-certificates.crt" {
+					path = bundle
+				}
+				if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range []string{"mktemp", "rm"} {
+				target, err := exec.LookPath(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Join(fakes, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			provision := strings.ReplaceAll(string(scripts.ProvisionScript), "/etc/ssl/certs/ca-certificates.crt", bundle)
+			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePrerequisites)
+			cmd.Env = append(os.Environ(), "PATH="+fakes, "TEST_ROOT="+root)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("provision prerequisites failed: %v\n%s", err, out)
+			}
+			apt, err := os.ReadFile(filepath.Join(root, "apt"))
+			switch {
+			case tt.apt == "" && !os.IsNotExist(err):
+				t.Errorf("apt-get ran %q, %v; want no apt run", apt, err)
+			case tt.apt != "" && (err != nil || string(apt) != tt.apt):
+				t.Errorf("apt-get ran %q, %v; want %q", apt, err, tt.apt)
+			}
+		})
+	}
+}
+
 func TestPluginsDrainArtifactsBeforeConsumers(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {

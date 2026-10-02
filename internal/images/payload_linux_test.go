@@ -1,7 +1,11 @@
 package images
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -16,6 +20,13 @@ const (
 	payloadPython  = ".local/share/uv/python"
 	failingCurl    = "#!/bin/sh\necho \"curl $*\" >> \"$FAKE_LOG\"\nexit 22\n"
 	installedHooks = `{"build":"1.0.0"}`
+	fakeMount      = `#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$5" >> "$TEST_ROOT/mounts"
+jq -n --arg tools "$FINGERPRINT" --arg home "$(getent passwd "$SUDO_USER" | cut -d: -f6)" --arg arch "$(uname -m)" --arg os "$(. /etc/os-release && printf '%s' "$VERSION_ID")" \
+  '{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}' > "$6/cc-remote-payload.json"
+touch "$6/.mounted"
+`
 )
 
 func payloadInventory() Inventory {
@@ -74,11 +85,13 @@ func TestPluginsInstallExposesThePayload(t *testing.T) {
 			writePluginTestFile(t, filepath.Join(h.home, ".local/share/captain-hook/host/version.json"), []byte(installedHooks), 0o600)
 			writePluginTestFile(t, filepath.Join(h.home, ".cc-remote", "ready"), []byte(digest+"\n"), 0o600)
 			if tt.stale {
-				if err := os.MkdirAll(filepath.Dir(filepath.Join(h.home, payloadTool)), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(filepath.Join(root, "older", h.home, payloadTool), filepath.Join(h.home, payloadTool)); err != nil {
-					t.Fatal(err)
+				for _, rel := range []string{payloadTool, payloadHook + "/capt-hook"} {
+					if err := os.MkdirAll(filepath.Dir(filepath.Join(h.home, rel)), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.Join(root, "older", h.home, rel), filepath.Join(h.home, rel)); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			out, err := h.plugins("install", payload)
@@ -126,4 +139,127 @@ func TestPluginsInstallExposesThePayload(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
+	good, bad := "hsqs verified payload", "hsqs tampered payload"
+	sum := sha256.Sum256([]byte(good))
+	sha := hex.EncodeToString(sum[:])
+	tests := []struct {
+		name    string
+		partial string
+		cached  string
+		mounted bool
+		hashed  string
+		mounts  bool
+		wantErr string
+		after   string
+	}{
+		{name: "a staged payload is verified once and mounted", partial: good, hashed: ".sqfs.partial", mounts: true, after: good},
+		{name: "a staged payload replaces a corrupt cached image", partial: good, cached: bad, hashed: ".sqfs.partial", mounts: true, after: good},
+		{name: "a staged payload replaces the file under an existing mount", partial: good, cached: good, mounted: true, hashed: ".sqfs.partial", after: good},
+		{name: "a corrupt staged payload is fatal", partial: bad, hashed: ".sqfs.partial", wantErr: "cc-remote: %[1]s.partial does not match its sha256 %[2]s"},
+		{name: "a cached image is verified before it mounts", cached: good, hashed: ".sqfs", mounts: true, after: good},
+		{name: "a corrupt cached image is fatal", cached: bad, hashed: ".sqfs", wantErr: "cc-remote: %[1]s does not match its sha256 %[2]s", after: bad},
+		{name: "an existing mount is trusted without hashing", cached: bad, mounted: true, after: bad},
+		{name: "nothing staged is fatal", wantErr: "cc-remote: no payload is staged at %[1]s.partial"},
+	}
+	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha256sum, err := exec.LookPath("sha256sum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			store, payloads := filepath.Join(root, "store"), filepath.Join(root, "payload")
+			image, dir := filepath.Join(store, sha+".sqfs"), filepath.Join(payloads, sha)
+			for name, content := range map[string]string{
+				"id":         "#!/bin/sh\necho 0\n",
+				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
+				"mount":      fakeMount,
+				"sprite-env": "#!/bin/sh\nexit 0\n",
+				"sha256sum":  "#!/bin/sh\nline=\"$(cat)\"\nprintf '%s\\n' \"$line\" >> \"$TEST_ROOT/hashes\"\nprintf '%s\\n' \"$line\" | exec " + sha256sum + " \"$@\"\n",
+			} {
+				writePluginTestFile(t, filepath.Join(fakes, name), []byte(content), 0o700)
+			}
+			if err := os.MkdirAll(store, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.partial != "" {
+				writePluginTestFile(t, image+".partial", []byte(tt.partial), 0o644)
+			}
+			if tt.cached != "" {
+				writePluginTestFile(t, image, []byte(tt.cached), 0o644)
+			}
+			env := append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
+			if tt.mounted {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				premount := exec.Command(filepath.Join(fakes, "mount"), "-t", "squashfs", "-o", "ro,loop", image, dir)
+				premount.Env = env
+				if out, err := premount.CombinedOutput(); err != nil {
+					t.Fatalf("premount: %v\n%s", err, out)
+				}
+				if err := os.Remove(filepath.Join(root, "mounts")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			provision := strings.NewReplacer(
+				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
+				"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
+				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
+			).Replace(string(scripts.ProvisionScript))
+			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if tt.wantErr != "" {
+				if want := fmt.Sprintf(tt.wantErr, image, sha); exitCode(err) != 1 || !strings.Contains(string(out), want) {
+					t.Fatalf("payload = %v\n%s\nwant exit 1 with %q", err, out, want)
+				}
+			} else if err != nil {
+				t.Fatalf("payload failed: %v\n%s", err, out)
+			}
+			var hashed []string
+			if tt.hashed != "" {
+				hashed = []string{sha + "  " + filepath.Join(store, sha+tt.hashed)}
+			}
+			if got := logLines(t, filepath.Join(root, "hashes")); !slices.Equal(got, hashed) {
+				t.Errorf("hashed %q, want %q", got, hashed)
+			}
+			var mounted []string
+			if tt.mounts {
+				mounted = []string{image}
+			}
+			if got := logLines(t, filepath.Join(root, "mounts")); !slices.Equal(got, mounted) {
+				t.Errorf("mounted %q, want %q", got, mounted)
+			}
+			cached, err := os.ReadFile(image)
+			switch {
+			case tt.after == "" && !os.IsNotExist(err):
+				t.Errorf("the cache holds %q, %v; want no image", cached, err)
+			case tt.after != "" && (err != nil || string(cached) != tt.after):
+				t.Errorf("the cache holds %q, %v; want %q", cached, err, tt.after)
+			}
+			if _, err := os.Stat(image + ".partial"); tt.wantErr == "" && !os.IsNotExist(err) {
+				t.Errorf("the staged payload outlived a successful phase: %v", err)
+			}
+		})
+	}
+}
+
+func logLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 }

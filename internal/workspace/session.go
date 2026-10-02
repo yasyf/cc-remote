@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
@@ -69,7 +70,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if supervisor := provider.Traits().Supervisor; machine.Payload != nil && supervisor != providers.SupervisorSpriteEnv {
 		return nil, fmt.Errorf("profile %s: machine %s mounts a payload, which only a %s host remounts at boot; provider %s runs %s", profile, kind, providers.SupervisorSpriteEnv, kind, supervisor)
 	}
-	rendered, err := render(cfg, profile, machine.Image != "")
+	rendered, err := render(cfg, profile, machine)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +117,7 @@ type rendered struct {
 	private   bool
 }
 
-func render(cfg *config.Config, profile string, imaged bool) (rendered, error) {
+func render(cfg *config.Config, profile string, machine config.Machine) (rendered, error) {
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
 	if err != nil {
 		return rendered{}, err
@@ -126,14 +127,18 @@ func render(cfg *config.Config, profile string, imaged bool) (rendered, error) {
 		return rendered{}, err
 	}
 	private := slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private })
-	if !imaged {
-		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil), private: private}, nil
+	if machine.Image == "" {
+		var payload string
+		if machine.Payload != nil {
+			payload = machine.Payload.SHA256
+		}
+		return rendered{scripts: scripts, stamp: images.Stamp(scripts, nil, payload), private: private}, nil
 	}
 	image, err := images.RenderImage(inventory)
 	if err != nil {
 		return rendered{}, err
 	}
-	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image), imageSpec: image.Fingerprint(), private: private}, nil
+	return rendered{scripts: scripts, stamp: images.Stamp(scripts, &image, ""), imageSpec: image.Fingerprint(), private: private}, nil
 }
 
 func coverEnv(forwards []config.Forward, declared []string) error {
@@ -343,6 +348,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if err != nil {
 		return nil, err
 	}
+	if err := s.installPrerequisites(ctx, machine); err != nil {
+		return nil, err
+	}
 	run := newLanes(ctx)
 	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
 	run.Go(func(ctx context.Context) error {
@@ -373,6 +381,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
+	if err := s.installPrerequisites(ctx, machine); err != nil {
+		return err
+	}
 	run := newLanes(ctx)
 	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
 	run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
@@ -380,6 +391,13 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 		return err
 	}
 	return s.publish(ctx, machine)
+}
+
+func (s *Session) installPrerequisites(ctx context.Context, machine string) error {
+	if !s.inPlace() {
+		return nil
+	}
+	return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePrerequisites)
 }
 
 func (s *Session) installPackages(ctx context.Context, machine string) error {
@@ -426,11 +444,19 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 }
 
 func (s *Session) mountPayload(ctx context.Context, machine string, run images.Exec) (err error) {
-	image, err := os.Open(s.Config.ScriptPath(s.payload.Path))
+	// O_NONBLOCK keeps a FIFO from blocking the open until a writer appears, so the fstat can reject it.
+	image, err := os.OpenFile(s.Config.ScriptPath(s.payload.Path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return fmt.Errorf("open payload: %w", err)
 	}
 	defer func() { err = errors.Join(err, image.Close()) }()
+	info, err := image.Stat()
+	if err != nil {
+		return fmt.Errorf("open payload: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("open payload: %s is not a regular file (mode %v)", image.Name(), info.Mode())
+	}
 	if err = s.Scripts.StagePayload(ctx, run, image, s.payload.SHA256); err != nil {
 		return err
 	}

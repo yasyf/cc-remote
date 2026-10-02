@@ -123,6 +123,10 @@ expose() {
       "$(dirname "$payload")"/*) rm -f "$path" ;;
       *) return ;;
     esac
+  elif [ "$kind" = children ] && [ -d "$path" ]; then
+    if [ -z "$(find "$path" -mindepth 1 -maxdepth 1 -type l -lname "$(dirname "$payload")/*" -print -delete)" ]; then
+      return
+    fi
   elif [ -e "$path" ]; then
     return
   fi
@@ -131,7 +135,7 @@ expose() {
     link) ln -s "$source" "$path" ;;
     copy) cp -a "$source" "$path" ;;
     children)
-      mkdir "$path"
+      mkdir -p "$path"
       find "$source" -mindepth 1 -maxdepth 1 ! -name .lock -exec ln -s -t "$path" {} +
       ;;
   esac

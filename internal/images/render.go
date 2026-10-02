@@ -195,10 +195,13 @@ func (s Scripts) Fingerprint() string {
 	return fingerprint(toolDomain, file{"provision.sh", s.ProvisionScript}, file{"plugins.sh", s.Plugins})
 }
 
-func Stamp(scripts Scripts, image *Context) string {
+func Stamp(scripts Scripts, image *Context, payload string) string {
 	files := []file{{"tools", []byte(scripts.Fingerprint())}}
 	if image != nil {
 		files = append(files, file{"image", []byte(image.Fingerprint())})
+	}
+	if payload != "" {
+		files = append(files, file{"payload", []byte(payload)})
 	}
 	return fingerprint(stampDomain, files...)
 }
