@@ -25,7 +25,7 @@ prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)
 tmp_dir="$(mktemp -d)"
 trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
 
-{{template "artifacts.sh"}}
+{{template "artifacts.sh" .}}
 t64() {
   local name packages
   local -a aliases=()
@@ -80,6 +80,16 @@ closure_package() {
   return 1
 }
 
+record_deb() {
+  local package
+  package="$(dpkg-deb -f "$1" Package)" || exit
+  if [ -z "$package" ]; then
+    echo "cc-remote: $1 names no Package" >&2
+    exit 1
+  fi
+  printf '%s\n' "$package" >> "$deb_seeds"
+}
+
 resident_packages() {
   local package
 {{- if .Resident}}
@@ -107,11 +117,13 @@ provision_packages() {
   mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
   packages+=("${t64_packages[@]}")
   if [ "$mode" = resident ]; then
+    deb_seeds=/dev/null
     mapfile -t packages < <(resident_packages "${packages[@]}")
     apt-get install -y -qq --no-install-recommends "${packages[@]}" > /dev/null
   else
     install -d -m 0755 "$build_dir"
-    resident_packages "${packages[@]}"{{range $.System}}{{if eq .Format "deb"}} {{q .Name}}{{end}}{{end}} > "$build_dir/seeds"
+    deb_seeds="$build_dir/seeds"
+    resident_packages "${packages[@]}" > "$deb_seeds"
     installed_packages > "$build_dir/packages.before"
     apt-get install -y -qq --no-install-recommends "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
   fi

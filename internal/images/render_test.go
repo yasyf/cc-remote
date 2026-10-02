@@ -468,6 +468,11 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 			if !bytes.Contains(scripts.ProvisionScript, []byte("  verify_bin 'cc-transcript' '--version'\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  local link_check=spelling\n  verify_user\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  verify_system\n  verify_user_links\n  mkdir -p \"$state_dir\"\n")) {
 				t.Errorf("an inventory without apt.payload deferred its executable probes")
 			}
+			for _, rendered := range [][]byte{scripts.ProvisionScript, scripts.Plugins, context.Provision} {
+				if !bytes.Contains(rendered, []byte("      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n")) || bytes.Contains(rendered, []byte("record_deb")) {
+					t.Errorf("an inventory without apt.payload records deb packages")
+				}
+			}
 		}
 	}
 	with, err := Render(payload, "agents")
@@ -477,7 +482,9 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 	for _, want := range []string{
 		"closure_packages=('libnss3')\n",
 		"  printf '%s\\n' 'bubblewrap'\n",
-		"  resident_packages \"${packages[@]}\" 'orca' > \"$build_dir/seeds\"\n",
+		"    deb_seeds=\"$build_dir/seeds\"\n    resident_packages \"${packages[@]}\" > \"$deb_seeds\"\n",
+		"      deb) record_deb \"$download\"; apt-get install -y -qq \"$download\" > /dev/null ;;\n",
+		"record_deb() {\n  local package\n  package=\"$(dpkg-deb -f \"$1\" Package)\" || exit\n",
 		"  if [ \"$mode\" = full ]; then\n    installed_packages > \"$build_dir/packages.after\"\n  else\n    listing=\"$(installed_packages)\" || {\n",
 		"  local link_check=spelling\n  verify_pin \"$tool_dir/\"'uv-0.1.0' ",
 		"  verify_bin 'cc-transcript'\n}\n",

@@ -2,6 +2,7 @@ package images
 
 import (
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -69,6 +70,79 @@ elif args[0] == "-S":
 else:
     sys.exit(91)
 `
+	fakeStatusQuery = `#!/usr/bin/env python3
+import os
+import sys
+
+if os.environ.get("DPKG_FAIL"):
+    sys.exit(2)
+args = sys.argv[1:]
+if len(args) > 3 and "${Status}" in args[2]:
+    for name in sorted(args[3:]):
+        print(name + " install ok installed 1.0-1")
+else:
+    with open(os.path.join(os.environ["TEST_ROOT"], "installed")) as fh:
+        sys.stdout.write(fh.read())
+`
+	fakeCurl = `#!/bin/sh
+while [ "$#" -gt 1 ]; do
+  if [ "$1" = -o ]; then
+    printf 'deb' > "$2"
+    exit 0
+  fi
+  shift
+done
+exit 1
+`
+	fakeDpkgDeb = `#!/bin/sh
+[ "$1" = -f ] && [ "$3" = Package ] || exit 9
+case "${DPKG_DEB:-}" in
+  fail)
+    echo "dpkg-deb: error: cannot read $2" >&2
+    exit 2
+    ;;
+  empty) ;;
+  *) echo orca-ide ;;
+esac
+`
+	liveFontProof = `Font directories:
+	/home/sprite/.local/share/fonts
+	/usr/local/share/fonts
+	/usr/share/fonts
+	/home/sprite/.fonts
+	@FONTS@
+	/usr/share/fonts/truetype
+	@FONTS@/opentype
+	@FONTS@/truetype
+	/usr/share/fonts/truetype/liberation
+	@FONTS@/opentype/noto
+	@FONTS@/truetype/freefont
+	@FONTS@/truetype/noto
+/home/sprite/.local/share/fonts: skipping, no such directory
+/usr/local/share/fonts: skipping, existing cache is valid: 0 fonts, 0 dirs
+/usr/share/fonts: skipping, existing cache is valid: 0 fonts, 1 dirs
+/usr/share/fonts/truetype: skipping, existing cache is valid: 0 fonts, 1 dirs
+/usr/share/fonts/truetype/liberation: skipping, existing cache is valid: 12 fonts, 0 dirs
+/home/sprite/.fonts: skipping, no such directory
+@FONTS@: skipping, existing cache is valid: 0 fonts, 2 dirs
+@FONTS@/opentype: skipping, existing cache is valid: 0 fonts, 1 dirs
+@FONTS@/opentype/noto: skipping, existing cache is valid: 30 fonts, 0 dirs
+@FONTS@/truetype: skipping, existing cache is valid: 0 fonts, 2 dirs
+@FONTS@/truetype/freefont: skipping, existing cache is valid: 12 fonts, 0 dirs
+@FONTS@/truetype/noto: skipping, existing cache is valid: 1 fonts, 0 dirs
+/usr/share/fonts/truetype: skipping, looped directory detected
+@FONTS@/opentype: skipping, looped directory detected
+@FONTS@/truetype: skipping, looped directory detected
+/usr/share/fonts/truetype/liberation: skipping, looped directory detected
+@FONTS@/opentype/noto: skipping, looped directory detected
+@FONTS@/truetype/freefont: skipping, looped directory detected
+@FONTS@/truetype/noto: skipping, looped directory detected
+/opt/cc-remote/closure/var/cache/fontconfig: not cleaning unwritable cache directory
+/var/cache/fontconfig: not cleaning non-existent cache directory
+/home/sprite/.cache/fontconfig: not cleaning non-existent cache directory
+/home/sprite/.fontconfig: not cleaning non-existent cache directory
+fc-cache: succeeded
+`
 	fakeLdso = `#!/bin/sh
 [ "$1" = --list ] || exit 9
 printf '%s\n' "ld.so $2" >> "$TEST_ROOT/ldso.log"
@@ -85,7 +159,9 @@ printf '%s\n' "fc-cache $* uid=$(id -u) conf=$FONTCONFIG_FILE" >> "$TEST_ROOT/fc
 case "$1" in
   -f) : > "$cachedir/abc-le64.cache-9" ;;
   -v)
-    if [ -n "${FC_STALE:-}" ]; then
+    if [ -n "${FC_PROOF:-}" ]; then
+      sed "s|@FONTS@|$dir|g" "$FC_PROOF"
+    elif [ -n "${FC_STALE:-}" ]; then
       echo "$dir: caching, new cache contents: 1 fonts, 1 dirs"
     else
       find "$dir" -type d | sort | while read -r d; do
@@ -215,7 +291,7 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 				"id":         "#!/bin/sh\necho 0\n",
 				"apt-get":    fakeInstaller,
 				"apt-cache":  fakeAptCache,
-				"dpkg-query": "#!/bin/sh\n[ -z \"${DPKG_FAIL:-}\" ] || exit 2\ncase \"$3\" in\n  *'${Status}'*) shift 3; for p in \"$@\"; do printf '%s install ok installed 1.0-1\\n' \"$p\"; done ;;\n  *) cat \"$TEST_ROOT/installed\" ;;\nesac\n",
+				"dpkg-query": fakeStatusQuery,
 			})
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
 			provision := strings.NewReplacer(
@@ -256,6 +332,77 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 				if got, err := os.ReadFile(filepath.Join(build, name)); err != nil || string(got) != want {
 					t.Errorf("%s = %q, %v; want %q", name, got, err, want)
 				}
+			}
+		})
+	}
+}
+
+func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
+	sum := sha512.Sum512([]byte("deb"))
+	inventory := scriptInventory()
+	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
+	tests := []struct {
+		name    string
+		mode    string
+		env     []string
+		exit    int
+		wantErr string
+		seeds   string
+	}{
+		{name: "full mode seeds the package the deb declares", mode: PackagesFull, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n"},
+		{name: "resident mode records nothing", mode: PackagesResident},
+		{name: "a deb naming no package is fatal", mode: PackagesFull, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package"},
+		{name: "a failing dpkg-deb is fatal", mode: PackagesFull, env: []string{"DPKG_DEB=fail"}, exit: 2, wantErr: "dpkg-deb: error: cannot read"},
+	}
+	scripts, err := Render(inventory, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, fakes := t.TempDir(), t.TempDir()
+			build, tools, bins, ide := filepath.Join(root, "build"), filepath.Join(root, "tools"), filepath.Join(root, "bin"), filepath.Join(root, "orca-ide")
+			writeFakes(t, fakes, map[string]string{
+				"id":         "#!/bin/sh\necho 0\n",
+				"apt-get":    fakeInstaller,
+				"apt-cache":  fakeAptCache,
+				"dpkg-query": fakeStatusQuery,
+				"curl":       fakeCurl,
+				"dpkg-deb":   fakeDpkgDeb,
+			})
+			writePluginTestFile(t, ide, []byte("#!/bin/sh\n"), 0o755)
+			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"), 0o644)
+			provision := strings.NewReplacer(
+				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(build)+"\n",
+				"tool_dir=/opt/cc-remote/tools\n", "tool_dir="+quote(tools)+"\n",
+				"bin_dir=/usr/local/bin\n", "bin_dir="+quote(bins)+"\n",
+				"'/opt/Orca/orca-ide'", quote(ide),
+				"rm -rf /var/lib/apt/lists/*", ":",
+			).Replace(string(scripts.ProvisionScript))
+			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePackages, tt.mode)
+			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
+			out, err := cmd.CombinedOutput()
+			if tt.wantErr != "" {
+				if exitCode(err) != tt.exit || !strings.Contains(string(out), tt.wantErr) {
+					t.Fatalf("packages = %v\n%s\nwant exit %d with %q", err, out, tt.exit, tt.wantErr)
+				}
+				if seeds, err := os.ReadFile(filepath.Join(build, "seeds")); err != nil || strings.Contains(string(seeds), "orca") {
+					t.Errorf("seeds = %q, %v; want the apt seeds without any deb package", seeds, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("packages failed: %v\n%s", err, out)
+			}
+			seeds, err := os.ReadFile(filepath.Join(build, "seeds"))
+			if tt.seeds == "" {
+				if !os.IsNotExist(err) {
+					t.Errorf("resident mode recorded seeds %q, %v", seeds, err)
+				}
+				return
+			}
+			if err != nil || string(seeds) != tt.seeds {
+				t.Errorf("seeds = %q, %v; want %q", seeds, err, tt.seeds)
 			}
 		})
 	}
@@ -328,7 +475,7 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				if err := os.MkdirAll(filepath.Join(root, "usr/share/X11"), 0o755); err != nil {
 					return err
 				}
-				return os.Symlink(filepath.Join(closure, "usr/share/X11/xkb"), filepath.Join(root, "usr/share/X11/xkb"))
+				return os.Symlink(closure+root+"/usr/share/X11/xkb", filepath.Join(root, "usr/share/X11/xkb"))
 			},
 		},
 		{
@@ -340,8 +487,8 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 		},
 		{
 			name: "a projection the closure lacks is fatal",
-			foreign: func(_, closure, payloads string) error {
-				return os.RemoveAll(filepath.Join(payloads, sha, closure, "usr/share/X11"))
+			foreign: func(root, closure, payloads string) error {
+				return os.RemoveAll(filepath.Join(payloads, sha, closure, root, "usr/share/X11"))
 			},
 			wantErr: func(root, _, _ string) string {
 				return "cc-remote: the closure has no directory " + root + "/usr/share/X11/xkb to project"
@@ -349,8 +496,8 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 		},
 		{
 			name: "a projection resolving outside the closure is fatal",
-			foreign: func(_, closure, payloads string) error {
-				link := filepath.Join(payloads, sha, closure, "usr/share/X11/xkb")
+			foreign: func(root, closure, payloads string) error {
+				link := filepath.Join(payloads, sha, closure, root, "usr/share/X11/xkb")
 				if err := os.Remove(link); err != nil {
 					return err
 				}
@@ -418,11 +565,11 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			})
 			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
 			writePluginTestFile(t, filepath.Join(dir, closure, "closure.json"), []byte("{}"), 0o644)
-			writePluginTestFile(t, filepath.Join(dir, closure, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
-			if err := os.MkdirAll(filepath.Join(dir, closure, "usr/share/X11"), 0o755); err != nil {
+			writePluginTestFile(t, filepath.Join(dir, closure, root, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
+			if err := os.MkdirAll(filepath.Join(dir, closure, root, "usr/share/X11"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink("../xkeyboard-config-2", filepath.Join(dir, closure, "usr/share/X11/xkb")); err != nil {
+			if err := os.Symlink("../xkeyboard-config-2", filepath.Join(dir, closure, root, "usr/share/X11/xkb")); err != nil {
 				t.Fatal(err)
 			}
 			for _, bin := range []string{"certutil", "fc-match"} {
@@ -501,7 +648,7 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 					t.Errorf("%s -> %q, %v; want the closure's share tree", share, target, err)
 				}
 			}
-			if target, err := os.Readlink(filepath.Join(root, "usr/share/X11/xkb")); err != nil || target != filepath.Join(closure, "usr/share/X11/xkb") {
+			if target, err := os.Readlink(filepath.Join(root, "usr/share/X11/xkb")); err != nil || target != closure+root+"/usr/share/X11/xkb" {
 				t.Errorf("xkb -> %q, %v; want the closure's projection", target, err)
 			}
 			fonts := "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n  <dir>" + closure + "/usr/share/fonts</dir>\n  <cachedir>" + closure + "/var/cache/fontconfig</cachedir>\n  <include ignore_missing=\"yes\">" + closure + "/etc/fonts/conf.d</include>\n</fontconfig>\n"
@@ -674,6 +821,27 @@ func (h *captureHost) link(path, target string) {
 	}
 	if err := os.Symlink(target, filepath.Join(h.host, path)); err != nil {
 		h.t.Fatal(err)
+	}
+}
+
+func (h *captureHost) proof(output string) string {
+	h.t.Helper()
+	path := filepath.Join(h.root, "fc-cache.out")
+	writePluginTestFile(h.t, path, []byte(output), 0o644)
+	return path
+}
+
+func (h *captureHost) liveFonts() {
+	h.t.Helper()
+	if err := os.RemoveAll(filepath.Join(h.host, "usr/share/fonts")); err != nil {
+		h.t.Fatal(err)
+	}
+	files := []string{"/usr/share/fonts/opentype", "/usr/share/fonts/opentype/noto", "/usr/share/fonts/opentype/noto/N.otf", "/usr/share/fonts/truetype", "/usr/share/fonts/truetype/freefont", "/usr/share/fonts/truetype/freefont/F.ttf", "/usr/share/fonts/truetype/noto", "/usr/share/fonts/truetype/noto/N.ttf"}
+	h.dpkg.Packages["fonts-x"].Files = files
+	for _, path := range files {
+		if filepath.Ext(path) != "" {
+			h.file(path, "font", 0o644)
+		}
 	}
 }
 
@@ -876,7 +1044,27 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			return "cc-remote: " + lib + "/gtk-3.0/3.0.0/immodules.cache was not generated on the build machine"
 		}},
 		{name: "a stale font cache is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_STALE=1"} }, wantErr: func(h *captureHost) string {
-			return "cc-remote: the font cache is not valid for every closure font directory: ['" + h.closure + "/usr/share/fonts: caching, new cache contents: 1 fonts, 1 dirs']"
+			return "cc-remote: the font cache is not valid for " + h.closure + "/usr/share/fonts: caching, new cache contents: 1 fonts, 1 dirs"
+		}},
+		{name: "a looped directory before its valid scan is fatal", mutate: func(h *captureHost) {
+			h.env = []string{"FC_PROOF=" + h.proof("@FONTS@/truetype/x: skipping, looped directory detected\n@FONTS@: skipping, existing cache is valid: 0 fonts, 1 dirs\n@FONTS@/truetype: skipping, existing cache is valid: 0 fonts, 1 dirs\n@FONTS@/truetype/x: skipping, existing cache is valid: 1 fonts, 0 dirs\n")}
+		}, wantErr: func(h *captureHost) string {
+			return "cc-remote: the font cache is not valid for " + h.closure + "/usr/share/fonts/truetype/x: skipping, looped directory detected"
+		}},
+		{name: "a closure font directory fc-cache never scanned is fatal", mutate: func(h *captureHost) {
+			h.env = []string{"FC_PROOF=" + h.proof("@FONTS@: skipping, existing cache is valid: 0 fonts, 1 dirs\n@FONTS@/truetype: skipping, existing cache is valid: 0 fonts, 1 dirs\n")}
+		}, wantErr: func(h *captureHost) string {
+			return "cc-remote: fc-cache -v never scanned " + h.closure + "/usr/share/fonts/truetype/x"
+		}},
+		{name: "the live fc-cache output with covered loops passes", mutate: func(h *captureHost) {
+			h.liveFonts()
+			h.env = []string{"FC_PROOF=" + h.proof(liveFontProof)}
+		}, check: func(t *testing.T, h *captureHost) {
+			for _, path := range []string{"/usr/share/fonts/opentype/noto/N.otf", "/usr/share/fonts/truetype/freefont/F.ttf", "/usr/share/fonts/truetype/noto/N.ttf", "/var/cache/fontconfig/abc-le64.cache-9", "/closure.json"} {
+				if _, err := os.Lstat(h.closure + path); err != nil {
+					t.Errorf("the closure lacks %s: %v", path, err)
+				}
+			}
 		}},
 		{name: "an unresolved consumer library is fatal", mutate: func(h *captureHost) { h.env = []string{"LDSO_MISSING=libmissing.so.9"} }, wantErr: func(*captureHost) string {
 			return "cc-remote: /home/u/.agent-browser/chrome cannot load libmissing.so.9"
@@ -901,9 +1089,9 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			h.dpkg.Packages["openssh-server"].Depends += ", libc6 | libfoo1, base-virtual | libfoo1"
 		}},
 		{name: "a seeded deb artifact keeps its dependencies resident", mutate: func(h *captureHost) {
-			h.dpkg.Packages["orca"] = &fakePackage{Version: "1.4.215", Depends: "libnew1", Files: []string{"/opt/Orca/orca-ide"}}
+			h.dpkg.Packages["orca-ide"] = &fakePackage{Version: "1.4.215", Depends: "libnew1", Files: []string{"/opt/Orca/orca-ide"}}
 			h.dpkg.Packages["libnew1"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew.so.1"}}
-			for name, extra := range map[string]string{"packages.after": "ii \tlibnew1\nii \torca\n", "seeds": "orca\n"} {
+			for name, extra := range map[string]string{"packages.after": "ii \tlibnew1\nii \torca-ide\n", "seeds": "orca-ide\n"} {
 				recorded, err := os.ReadFile(filepath.Join(h.build, name))
 				if err != nil {
 					h.t.Fatal(err)
@@ -921,7 +1109,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			if err := json.Unmarshal(raw, &manifest); err != nil {
 				t.Fatalf("closure.json: %v\n%s", err, raw)
 			}
-			if want := []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca"}; !slices.Equal(manifest.Resident, want) {
+			if want := []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca-ide"}; !slices.Equal(manifest.Resident, want) {
 				t.Errorf("resident = %v, want %v", manifest.Resident, want)
 			}
 		}},
