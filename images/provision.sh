@@ -164,11 +164,13 @@ provision_packages() {
     fi
     check_base "$manifest"
     jq -r '.debs[] | "\(.sha256) \(.file)"' "$manifest" > "$tmp_dir/debs"
+    install -d -m 0755 "$tmp_dir/apt-archives/partial"
     while read -r digest file; do
       verify_payload "$digest" "$deb_dir/$file"
+      install -m 0644 "$deb_dir/$file" "$tmp_dir/apt-archives/$file"
       captured+=("$deb_dir/$file")
     done < "$tmp_dir/debs"
-    apt-get install -y -qq --no-download --no-install-recommends "${captured[@]}" > /dev/null
+    apt-get install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null
   else
     apt-get update -qq
     mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})

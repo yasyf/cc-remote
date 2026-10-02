@@ -111,7 +111,7 @@ func TestParseAcceptsAPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := cfg.Profiles["lean"].Machine["fake"].Payload
-	if got == nil || *got != (Payload{Path: "payloads/agent.sqfs", SHA256: digest64}) {
+	if got == nil || got.Path != "payloads/agent.sqfs" || got.SHA256 != digest64 || len(got.URLCommand) != 0 || got.Size != 0 {
 		t.Errorf("payload = %+v", got)
 	}
 }

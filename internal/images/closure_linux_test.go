@@ -206,7 +206,25 @@ exec "$@"
 	fakeAptCache  = "#!/bin/sh\nprintf 'Package: libasound2t64\\n'\n"
 	fakeInstaller = `#!/bin/bash
 set -euo pipefail
-printf '%s\n' "$*" >> "$TEST_ROOT/apt"
+logged=("$@")
+if [[ " $* " == *" --no-download "* && " $* " == *" --no-install-recommends "* ]]; then
+  archives=
+  for i in "${!logged[@]}"; do
+    case "${logged[i]}" in
+      Dir::Cache::Archives=*)
+        archives="${logged[i]#Dir::Cache::Archives=}"
+        logged[i]='Dir::Cache::Archives=@CACHE@/'
+        ;;
+    esac
+  done
+  [ -d "$archives/partial" ] || exit 100
+  for arg in "$@"; do
+    case "$arg" in
+      *.deb) cmp "$arg" "$archives/$(basename "$arg")" || exit 100 ;;
+    esac
+  done
+fi
+printf '%s\n' "${logged[*]}" >> "$TEST_ROOT/apt"
 if [ "$1" = install ] && [[ " $* " != *" --download-only "* ]]; then
   for arg in "$@"; do
     case "$arg" in
@@ -382,7 +400,7 @@ func writeCapturedPayload(t *testing.T, root string, manifest capturedDebs, cont
 
 func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 	base := "installed\tbase-files=13\ninstalled\tlibc6=2.42-1\n"
-	install := "install -y -qq --no-download --no-install-recommends @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
+	install := "install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
 	drifted := "cc-remote: the packages on this machine differ from the base its payload captured the resident packages against (-payload +machine), so they cannot install offline; rebuild the payload on this base:\n"
 	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
@@ -487,7 +505,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	inventory := scriptInventory()
 	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
 	full := "update -qq\ninstall -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
-	resident := "install -y -qq --no-download --no-install-recommends\n"
+	resident := "install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives=@CACHE@/\n"
 	tests := []struct {
 		name    string
 		args    []string
