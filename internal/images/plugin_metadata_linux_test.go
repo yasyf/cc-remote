@@ -9,7 +9,7 @@ import (
 )
 
 func TestVerificationReadsMetadataOnceAndRunsEveryProbe(t *testing.T) {
-	h := metadataHost(t, nil)
+	h := metadataHost(t, nil, nil)
 	if out, err := h.plugins("install"); err != nil {
 		t.Fatalf("install: %v\n%s", err, out)
 	}
@@ -44,10 +44,42 @@ func TestVerificationReadsMetadataOnceAndRunsEveryProbe(t *testing.T) {
 	}
 }
 
+func TestClosurePhasesListEachMetadataSourceOnce(t *testing.T) {
+	h := metadataHost(t, nil, &AptPayload{Closure: []string{"libnss3"}})
+	for _, phase := range []struct {
+		args         []string
+		marketplaces int
+		plugins      int
+	}{
+		{args: []string{"install"}, marketplaces: 1, plugins: 2},
+		{args: []string{"verify"}, marketplaces: 1, plugins: 1},
+		{args: []string{"publish", digest}, marketplaces: 1, plugins: 1},
+	} {
+		writePluginTestFile(t, filepath.Join(h.fakes, "calls.log"), nil, 0o600)
+		if out, err := h.plugins(phase.args[0], phase.args[1:]...); err != nil {
+			t.Fatalf("%s: %v\n%s", phase.args[0], err, out)
+		}
+		calls := h.calls()
+		if got := countCall(calls, "claude plugin marketplace list --json"); got != phase.marketplaces {
+			t.Errorf("%s marketplace listings = %d, want %d", phase.args[0], got, phase.marketplaces)
+		}
+		if got := countCall(calls, "claude plugin list --json"); got != phase.plugins {
+			t.Errorf("%s plugin listings = %d, want %d", phase.args[0], got, phase.plugins)
+		}
+		if phase.args[0] != "install" {
+			continue
+		}
+		for _, plugin := range h.state().Plugins[:7] {
+			name, _, _ := strings.Cut(plugin["id"].(string), "@")
+			writePluginTestFile(t, filepath.Join(plugin["installPath"].(string), "bin", name), []byte("#!/bin/sh\n"), 0o755)
+		}
+	}
+}
+
 func TestVerificationUsesCurrentMetadataOnEveryInvocation(t *testing.T) {
 	for _, change := range []string{"version", "disabled", "errors", "path", "duplicate-id", "marketplace"} {
 		t.Run(change, func(t *testing.T) {
-			h := metadataHost(t, nil)
+			h := metadataHost(t, nil, nil)
 			if out, err := h.plugins("install"); err != nil {
 				t.Fatalf("install: %v\n%s", err, out)
 			}
@@ -80,7 +112,7 @@ func TestFinalVerificationReadsAfterPrepare(t *testing.T) {
 	for _, mutation := range []string{`data["plugins"][0]["version"] = "9.0.0"`, `data["marketplaces"][0]["ref"] = "other"`} {
 		t.Run(mutation, func(t *testing.T) {
 			prepare := "python3 -c " + quote(`import json, os; path = os.environ["FAKE_STATE"]; data = json.load(open(path)); `+mutation+`; json.dump(data, open(path, "w"))`)
-			h := metadataHost(t, []string{prepare})
+			h := metadataHost(t, []string{prepare}, nil)
 			if out, err := h.plugins("install"); err == nil {
 				t.Fatalf("install accepted metadata changed after plugin installation: %s", out)
 			}
@@ -89,9 +121,9 @@ func TestFinalVerificationReadsAfterPrepare(t *testing.T) {
 	}
 }
 
-func metadataHost(t *testing.T, prepare []string) pluginsHost {
+func metadataHost(t *testing.T, prepare []string, payload *AptPayload) pluginsHost {
 	t.Helper()
-	inventory := Inventory{Version: SchemaVersion, Prepare: prepare}
+	inventory := Inventory{Version: SchemaVersion, Prepare: prepare, Apt: Apt{Payload: payload}}
 	catalog := map[string]any{}
 	for index := range 14 {
 		market := fmt.Sprintf("market-%02d", index)

@@ -1,6 +1,7 @@
 package images
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
@@ -80,6 +81,9 @@ args = sys.argv[1:]
 if len(args) > 3 and "${Status}" in args[2]:
     for name in sorted(args[3:]):
         print(name + " install ok installed 1.0-1")
+elif "${db:Status-Status}" in args[2]:
+    with open(os.path.join(os.environ["TEST_ROOT"], "base")) as fh:
+        sys.stdout.write(fh.read())
 else:
     with open(os.path.join(os.environ["TEST_ROOT"], "installed")) as fh:
         sys.stdout.write(fh.read())
@@ -96,6 +100,9 @@ exit 1
 `
 	fakeDpkgDeb = `#!/bin/sh
 [ "$1" = -f ] && [ "$3" = Package ] || exit 9
+if [ "$#" -gt 3 ]; then
+  exec cat "$2.control"
+fi
 case "${DPKG_DEB:-}" in
   fail)
     echo "dpkg-deb: error: cannot read $2" >&2
@@ -200,7 +207,7 @@ exec "$@"
 	fakeInstaller = `#!/bin/bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$TEST_ROOT/apt"
-if [ "$1" = install ]; then
+if [ "$1" = install ] && [[ " $* " != *" --download-only "* ]]; then
   for arg in "$@"; do
     case "$arg" in
       install | -*) ;;
@@ -208,8 +215,15 @@ if [ "$1" = install ]; then
     esac
   done
 fi
+exit "${APT_FAIL:-0}"
 `
+	fakeOnline     = "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$TEST_ROOT/online\"\nexit 1\n"
+	fakeMounted    = "#!/bin/sh\n[ \"$1\" = -q ] && [ -e \"$2/.mounted\" ]\n"
+	fakeDpkgStatus = "#!/bin/sh\n[ \"$1\" = -s ] && grep -qx \"ii \t$2\" \"$TEST_ROOT/installed\"\n"
+	payloadDigest  = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 )
+
+var fakeClosureMount = strings.Replace(fakeMount, "{schemaVersion: 1,", "{schemaVersion: 2,", 1)
 
 func scriptInventory() Inventory {
 	return Inventory{
@@ -265,29 +279,18 @@ func writeFakes(t *testing.T, dir string, fakes map[string]string) {
 }
 
 func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
-	full := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
-	resident := "update -qq\ninstall -y -qq --no-install-recommends bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server\n"
+	download := "install -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server\n"
+	full := "update -qq\n" + download + "install -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
 	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\n"
-	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
-		name      string
-		mode      []string
-		installed string
-		env       []string
-		apt       string
-		records   bool
-		exit      int
-		wantErr   string
+		name    string
+		mode    []string
+		apt     string
+		exit    int
+		wantErr string
 	}{
-		{name: "no mode installs everything and records the transaction", apt: full, records: true},
-		{name: "full installs everything and records the transaction", mode: []string{PackagesFull}, apt: full, records: true},
-		{name: "resident leaves the closure to the payload", mode: []string{PackagesResident}, apt: resident},
-		{name: "a repeat resident run on a valid payload machine passes", mode: []string{PackagesResident}, installed: "ii \tbubblewrap\nii \tca-certificates\nii \topenssh-server\n", apt: resident},
-		{name: "closure packages dpkg only knows or keeps the configuration of pass", mode: []string{PackagesResident}, installed: "un \tlibnss3\nrc \tlibasound2t64\n", apt: resident},
-		{name: "a closure package left installed in resident mode is fatal", mode: []string{PackagesResident}, installed: "ii \tlibnss3\nii \tlibasound2t64\n", apt: resident, exit: 1, wantErr: shadowing + "libasound2t64 install ok installed 1.0-1\nlibnss3 install ok installed 1.0-1\n"},
-		{name: "a half-installed closure package in resident mode is fatal", mode: []string{PackagesResident}, installed: "iH \tlibnss3\n", apt: resident, exit: 1, wantErr: shadowing + "libnss3 install ok installed 1.0-1\n"},
-		{name: "a held closure package in resident mode is fatal", mode: []string{PackagesResident}, installed: "hi \tlibasound2t64\n", apt: resident, exit: 1, wantErr: shadowing + "libasound2t64 install ok installed 1.0-1\n"},
-		{name: "a failing package listing in resident mode is fatal", mode: []string{PackagesResident}, env: []string{"DPKG_FAIL=1"}, apt: resident, exit: 1, wantErr: "cc-remote: cannot list the installed packages"},
+		{name: "no mode downloads the resident set, installs everything, and records the transaction", apt: full},
+		{name: "full downloads the resident set, installs everything, and records the transaction", mode: []string{PackagesFull}, apt: full},
 		{name: "an unknown mode is a usage error", mode: []string{"bundle"}, exit: 2, wantErr: "provision: packages takes full or resident, not bundle"},
 	}
 	scripts, err := Render(scriptInventory(), "agents")
@@ -304,45 +307,176 @@ func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
 				"apt-cache":  fakeAptCache,
 				"dpkg-query": fakeStatusQuery,
 			})
-			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
+			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"), 0o644)
+			writePluginTestFile(t, filepath.Join(root, "base"), []byte("installed\tbase-files=13\nconfig-files\told=1\n"), 0o644)
 			provision := strings.NewReplacer(
 				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(build)+"\n",
 				"rm -rf /var/lib/apt/lists/*", ":",
 			).Replace(string(scripts.ProvisionScript))
 			cmd := exec.Command("bash", slices.Concat([]string{"-c", provision, "provision.sh", PhasePackages}, tt.mode)...)
-			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
+			cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
 			out, err := cmd.CombinedOutput()
+			apt, aptErr := os.ReadFile(filepath.Join(root, "apt"))
 			if tt.wantErr != "" {
 				if exitCode(err) != tt.exit || !strings.Contains(string(out), tt.wantErr) {
 					t.Fatalf("packages = %v\n%s\nwant exit %d with %q", err, out, tt.exit, tt.wantErr)
 				}
-			} else if err != nil {
-				t.Fatalf("packages failed: %v\n%s", err, out)
-			}
-			apt, err := os.ReadFile(filepath.Join(root, "apt"))
-			switch {
-			case tt.apt == "" && !os.IsNotExist(err):
-				t.Errorf("apt-get ran for a usage error: %q %v", apt, err)
-			case tt.apt != "" && (err != nil || string(apt) != tt.apt):
-				t.Errorf("apt-get calls:\n%s\n%v\nwant:\n%s", apt, err, tt.apt)
-			}
-			if tt.wantErr != "" {
-				return
-			}
-			if !tt.records {
-				if _, err := os.Stat(build); !os.IsNotExist(err) {
-					t.Errorf("resident mode recorded a transaction: %v", err)
+				if !os.IsNotExist(aptErr) {
+					t.Errorf("apt-get ran for a usage error: %q %v", apt, aptErr)
 				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("packages failed: %v\n%s", err, out)
+			}
+			if want := strings.ReplaceAll(tt.apt, "@BUILD@", build); aptErr != nil || string(apt) != want {
+				t.Errorf("apt-get calls:\n%s\n%v\nwant:\n%s", apt, aptErr, want)
 			}
 			installed, err := os.ReadFile(filepath.Join(root, "installed"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			for name, want := range map[string]string{"seeds": seeds, "packages.before": "ii \tbase-files\n", "packages.after": string(installed)} {
+			for name, want := range map[string]string{"seeds": seeds, "packages.before": "ii \tbase-files\n", "packages.after": string(installed), "base": "base-files=13\n"} {
 				if got, err := os.ReadFile(filepath.Join(build, name)); err != nil || string(got) != want {
 					t.Errorf("%s = %q, %v; want %q", name, got, err, want)
 				}
+			}
+			if info, err := os.Stat(filepath.Join(build, "debs", "partial")); err != nil || !info.IsDir() {
+				t.Errorf("the download cache lacks its partial directory: %v", err)
+			}
+		})
+	}
+}
+
+type capturedDeb struct {
+	Architecture string `json:"architecture"`
+	File         string `json:"file"`
+	Package      string `json:"package"`
+	SHA256       string `json:"sha256,omitempty"`
+	Version      string `json:"version"`
+}
+
+type capturedDebs struct {
+	Artifacts []capturedDeb `json:"artifacts"`
+	Base      []string      `json:"base"`
+	Debs      []capturedDeb `json:"debs"`
+}
+
+func writeCapturedPayload(t *testing.T, root string, manifest capturedDebs, contents map[string]string, mounted bool) string {
+	t.Helper()
+	payload := filepath.Join(root, "payload", payloadDigest)
+	debs := filepath.Join(payload, "opt/cc-remote/debs")
+	for i, deb := range manifest.Debs {
+		sum := sha256.Sum256([]byte(contents[deb.File]))
+		manifest.Debs[i].SHA256 = hex.EncodeToString(sum[:])
+	}
+	for file, content := range contents {
+		writePluginTestFile(t, filepath.Join(debs, file), []byte(content), 0o644)
+	}
+	writePluginTestFile(t, filepath.Join(debs, "debs.json"), mustJSON(t, manifest), 0o644)
+	if mounted {
+		writePluginTestFile(t, filepath.Join(payload, ".mounted"), nil, 0o644)
+	}
+	return debs
+}
+
+func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
+	base := "installed\tbase-files=13\ninstalled\tlibc6=2.42-1\n"
+	install := "install -y -qq --no-download --no-install-recommends @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
+	drifted := "cc-remote: the packages on this machine differ from the base its payload captured the resident packages against (-payload +machine), so they cannot install offline; rebuild the payload on this base:\n"
+	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
+	tests := []struct {
+		name      string
+		args      []string
+		base      string
+		installed string
+		env       []string
+		unmounted bool
+		corrupt   bool
+		remove    bool
+		apt       string
+		exit      int
+		wantErr   string
+	}{
+		{name: "the captured debs install offline", apt: install},
+		{name: "a repeat run over the installed resident packages passes", base: base + "installed\tbubblewrap=0.11.0-2\ninstalled\topenssh-server=1:9.9p1-3\n", apt: install},
+		{name: "packages dpkg only knows or keeps the configuration of are not part of the base", base: base + "config-files\told=1\nnot-installed\tgone=2\n", apt: install},
+		{name: "a drifted base version fails before apt", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", exit: 1, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
+		{name: "an extra base package fails before apt", base: base + "installed\tvim=2\n", exit: 1, wantErr: drifted + "+vim=2\n"},
+		{name: "a missing base package fails before apt", base: "installed\tbase-files=13\n", exit: 1, wantErr: drifted + "-libc6=2.42-1\n"},
+		{name: "a corrupted deb fails before apt", corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
+		{name: "an unmounted payload fails before apt", unmounted: true, exit: 1, wantErr: "cc-remote: payload " + payloadDigest + " is not mounted at "},
+		{name: "resident without the payload sha256 is a usage error", args: []string{PackagesResident}, exit: 2, wantErr: "provision: packages resident takes the payload sha256"},
+		{name: "a failing apt install propagates its status", env: []string{"APT_FAIL=100"}, apt: install, exit: 100},
+		{name: "a closure package left installed is fatal", installed: "ii \tlibnss3\n", apt: install, exit: 1, wantErr: shadowing + "libnss3 install ok installed 1.0-1\n"},
+		{name: "a failing package listing fails before apt", env: []string{"DPKG_FAIL=1"}, exit: 2},
+		{name: "apt.remove still runs offline and its packages leave the base", remove: true, base: base + "installed\twatchman=2025.1\n", installed: "ii \twatchman\n", apt: install + "remove -y -qq watchman\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inventory := scriptInventory()
+			if tt.remove {
+				inventory.Apt.Remove = []string{"watchman"}
+			}
+			scripts, err := Render(inventory, "agents")
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, fakes := t.TempDir(), t.TempDir()
+			writeFakes(t, fakes, map[string]string{
+				"id":         "#!/bin/sh\necho 0\n",
+				"apt-get":    fakeInstaller,
+				"apt-cache":  fakeOnline,
+				"curl":       fakeOnline,
+				"dpkg-query": fakeStatusQuery,
+				"dpkg":       fakeDpkgStatus,
+				"mountpoint": fakeMounted,
+			})
+			contents := map[string]string{"bubblewrap_0.11.0-2_amd64.deb": "bubblewrap deb", "openssh-server_1%3a9.9p1-3_amd64.deb": "openssh-server deb"}
+			captured := []string{"base-files=13", "libc6=2.42-1"}
+			if tt.remove {
+				captured = append(captured, "watchman=2024.1")
+			}
+			debs := writeCapturedPayload(t, root, capturedDebs{
+				Artifacts: []capturedDeb{},
+				Base:      captured,
+				Debs: []capturedDeb{
+					{Architecture: "amd64", File: "bubblewrap_0.11.0-2_amd64.deb", Package: "bubblewrap", Version: "0.11.0-2"},
+					{Architecture: "amd64", File: "openssh-server_1%3a9.9p1-3_amd64.deb", Package: "openssh-server", Version: "1:9.9p1-3"},
+				},
+			}, contents, !tt.unmounted)
+			if tt.corrupt {
+				writePluginTestFile(t, filepath.Join(debs, "openssh-server_1%3a9.9p1-3_amd64.deb"), []byte("tampered"), 0o644)
+			}
+			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
+			writePluginTestFile(t, filepath.Join(root, "base"), []byte(cmp.Or(tt.base, base)), 0o644)
+			provision := strings.NewReplacer(
+				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(filepath.Join(root, "build"))+"\n",
+				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(filepath.Join(root, "payload"))+"\n",
+				"rm -rf /var/lib/apt/lists/*", ":",
+			).Replace(string(scripts.ProvisionScript))
+			args := tt.args
+			if args == nil {
+				args = []string{PackagesResident, payloadDigest}
+			}
+			cmd := exec.Command("bash", slices.Concat([]string{"-c", provision, "provision.sh", PhasePackages}, args)...)
+			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
+			out, err := cmd.CombinedOutput()
+			if exitCode(err) != tt.exit || !strings.Contains(string(out), tt.wantErr) {
+				t.Fatalf("packages = %v\n%s\nwant exit %d with %q", err, out, tt.exit, tt.wantErr)
+			}
+			apt, aptErr := os.ReadFile(filepath.Join(root, "apt"))
+			switch want := strings.ReplaceAll(tt.apt, "@DEBS@", debs); {
+			case want == "" && !os.IsNotExist(aptErr):
+				t.Errorf("apt-get ran before the payload's packages were proven: %q %v", apt, aptErr)
+			case want != "" && (aptErr != nil || string(apt) != want):
+				t.Errorf("apt-get calls:\n%s\n%v\nwant:\n%s", apt, aptErr, want)
+			}
+			if online, err := os.ReadFile(filepath.Join(root, "online")); !os.IsNotExist(err) {
+				t.Errorf("the offline install reached for the network: %q %v", online, err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "build")); !os.IsNotExist(err) {
+				t.Errorf("the offline install recorded a build: %v", err)
 			}
 		})
 	}
@@ -352,18 +486,24 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	sum := sha512.Sum512([]byte("deb"))
 	inventory := scriptInventory()
 	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
+	full := "update -qq\ninstall -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
+	resident := "install -y -qq --no-download --no-install-recommends\n"
 	tests := []struct {
 		name    string
-		mode    string
+		args    []string
 		env     []string
+		copy    string
 		exit    int
 		wantErr string
 		seeds   string
+		apt     string
+		fetches int
 	}{
-		{name: "full mode seeds the package the deb declares", mode: PackagesFull, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n"},
-		{name: "resident mode records nothing", mode: PackagesResident},
-		{name: "a deb naming no package is fatal", mode: PackagesFull, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package"},
-		{name: "a failing dpkg-deb is fatal", mode: PackagesFull, env: []string{"DPKG_DEB=fail"}, exit: 2, wantErr: "dpkg-deb: error: cannot read"},
+		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
+		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, payloadDigest}, copy: "deb", apt: resident + "install -y -qq --no-download @DEBS@/orca-1.4.215.deb\n"},
+		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, payloadDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
+		{name: "a deb naming no package is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package", fetches: 1},
+		{name: "a failing dpkg-deb is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=fail"}, exit: 2, wantErr: "dpkg-deb: error: cannot read", fetches: 1},
 	}
 	scripts, err := Render(inventory, "agents")
 	if err != nil {
@@ -378,42 +518,76 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 				"apt-get":    fakeInstaller,
 				"apt-cache":  fakeAptCache,
 				"dpkg-query": fakeStatusQuery,
-				"curl":       fakeCurl,
+				"curl":       "#!/bin/sh\nprintf 'curl\\n' >> \"$TEST_ROOT/fetches\"\n" + strings.TrimPrefix(fakeCurl, "#!/bin/sh\n"),
 				"dpkg-deb":   fakeDpkgDeb,
+				"mountpoint": fakeMounted,
 			})
+			debs := writeCapturedPayload(t, root, capturedDebs{
+				Artifacts: []capturedDeb{{Architecture: "amd64", File: "orca-1.4.215.deb", Package: "orca-ide", Version: "1.4.215"}},
+				Base:      []string{"base-files=13"},
+				Debs:      []capturedDeb{},
+			}, map[string]string{"orca-1.4.215.deb": tt.copy}, true)
 			writePluginTestFile(t, ide, []byte("#!/bin/sh\n"), 0o755)
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"), 0o644)
+			writePluginTestFile(t, filepath.Join(root, "base"), []byte("installed\tbase-files=13\n"), 0o644)
 			provision := strings.NewReplacer(
 				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(build)+"\n",
+				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(filepath.Join(root, "payload"))+"\n",
 				"tool_dir=/opt/cc-remote/tools\n", "tool_dir="+quote(tools)+"\n",
 				"bin_dir=/usr/local/bin\n", "bin_dir="+quote(bins)+"\n",
 				"'/opt/Orca/orca-ide'", quote(ide),
 				"rm -rf /var/lib/apt/lists/*", ":",
 			).Replace(string(scripts.ProvisionScript))
-			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePackages, tt.mode)
+			cmd := exec.Command("bash", slices.Concat([]string{"-c", provision, "provision.sh", PhasePackages}, tt.args)...)
 			cmd.Env = append(append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root), tt.env...)
 			out, err := cmd.CombinedOutput()
-			if tt.wantErr != "" {
-				if exitCode(err) != tt.exit || !strings.Contains(string(out), tt.wantErr) {
-					t.Fatalf("packages = %v\n%s\nwant exit %d with %q", err, out, tt.exit, tt.wantErr)
-				}
-				if seeds, err := os.ReadFile(filepath.Join(build, "seeds")); err != nil || strings.Contains(string(seeds), "orca") {
-					t.Errorf("seeds = %q, %v; want the apt seeds without any deb package", seeds, err)
-				}
-				return
+			paths := strings.NewReplacer("@BUILD@", build, "@DEBS@", debs)
+			if want := paths.Replace(tt.wantErr); exitCode(err) != tt.exit || !strings.Contains(string(out), want) {
+				t.Fatalf("packages = %v\n%s\nwant exit %d with %q", err, out, tt.exit, want)
 			}
-			if err != nil {
-				t.Fatalf("packages failed: %v\n%s", err, out)
+			if apt, err := os.ReadFile(filepath.Join(root, "apt")); tt.apt != "" && (err != nil || string(apt) != paths.Replace(tt.apt)) {
+				t.Errorf("apt-get calls:\n%s\n%v\nwant:\n%s", apt, err, paths.Replace(tt.apt))
+			}
+			if fetches, _ := os.ReadFile(filepath.Join(root, "fetches")); strings.Count(string(fetches), "curl\n") != tt.fetches {
+				t.Errorf("curl ran %q, want %d fetches", fetches, tt.fetches)
 			}
 			seeds, err := os.ReadFile(filepath.Join(build, "seeds"))
-			if tt.seeds == "" {
-				if !os.IsNotExist(err) {
-					t.Errorf("resident mode recorded seeds %q, %v", seeds, err)
-				}
-				return
-			}
-			if err != nil || string(seeds) != tt.seeds {
+			switch {
+			case tt.args[0] == PackagesResident && !os.IsNotExist(err):
+				t.Errorf("resident mode recorded seeds %q, %v", seeds, err)
+			case tt.exit != 0 && tt.args[0] == PackagesFull && (err != nil || strings.Contains(string(seeds), "orca")):
+				t.Errorf("seeds = %q, %v; want the apt seeds without any deb package", seeds, err)
+			case tt.exit == 0 && tt.args[0] == PackagesFull && (err != nil || string(seeds) != tt.seeds):
 				t.Errorf("seeds = %q, %v; want %q", seeds, err, tt.seeds)
+			}
+		})
+	}
+}
+
+func TestAClosurePayloadDeclaresSchemaTwoAndPacksItsDebs(t *testing.T) {
+	bare := scriptInventory()
+	bare.Apt.Payload = nil
+	tests := []struct {
+		name      string
+		inventory Inventory
+		schema    string
+		debs      bool
+	}{
+		{name: "a closure payload", inventory: scriptInventory(), schema: "2", debs: true},
+		{name: "a payload without a closure", inventory: bare, schema: "1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scripts, err := Render(tt.inventory, "agents")
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := string(scripts.ProvisionScript)
+			if got := strings.Count(script, "{schemaVersion: "+tt.schema+", tools: $tools, home: $home, arch: $arch, os: $os}"); got != 2 {
+				t.Errorf("the pack writer and the payload check name schemaVersion %s %d times, want 2", tt.schema, got)
+			}
+			if got := strings.Contains(script, `pack_path required "$debs_dir"`); got != tt.debs {
+				t.Errorf("the pack carries the captured debs: %v, want %v", got, tt.debs)
 			}
 		})
 	}
@@ -570,11 +744,11 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				"id":         "#!/bin/sh\necho 0\n",
 				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
 				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
-				"mount":      fakeMount,
+				"mount":      fakeClosureMount,
 				"sprite-env": "#!/bin/sh\nexit 0\n",
 				"ldconfig":   fakeLdconfig,
 			})
-			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
+			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.admitted"), []byte(image), 0o600)
 			writePluginTestFile(t, filepath.Join(dir, closure, "closure.json"), []byte("{}"), 0o644)
 			writePluginTestFile(t, filepath.Join(dir, closure, root, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
 			if err := os.MkdirAll(filepath.Join(dir, closure, root, "usr/share/X11"), 0o755); err != nil {
@@ -645,6 +819,13 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("payload failed: %v\n%s", err, out)
+			}
+			boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if marked, err := os.ReadFile(filepath.Join(store, sha+".sqfs.boot")); err != nil || string(marked) != string(boot) {
+				t.Errorf("the boot marker is %q, %v; want this boot's id %q so the remount service skips the mount's rescan", marked, err, boot)
 			}
 			if target, err := os.Readlink(closure); err != nil || target != dir+closure {
 				t.Errorf("closure -> %q, %v; want %q", target, err, dir+closure)
@@ -721,13 +902,14 @@ type fakeDpkg struct {
 }
 
 type captureHost struct {
-	t                                 *testing.T
-	root, host, closure, build, fakes string
-	lib                               string
-	dpkg                              fakeDpkg
-	payload                           AptPayload
-	env                               []string
-	contents                          map[string]string
+	t                                       *testing.T
+	root, host, closure, build, fakes, debs string
+	downloaded                              bool
+	lib                                     string
+	dpkg                                    fakeDpkg
+	payload                                 AptPayload
+	env                                     []string
+	contents                                map[string]string
 }
 
 func newCaptureHost(t *testing.T) *captureHost {
@@ -741,6 +923,7 @@ func newCaptureHost(t *testing.T) *captureHost {
 		closure:  filepath.Join(root, "closure"),
 		build:    filepath.Join(root, "build"),
 		fakes:    filepath.Join(root, "fakes"),
+		debs:     filepath.Join(root, "debs"),
 		lib:      "/usr/lib/" + arch + "-linux-gnu",
 		contents: map[string]string{},
 		payload: AptPayload{
@@ -812,8 +995,63 @@ func newCaptureHost(t *testing.T) *captureHost {
 	writePluginTestFile(t, filepath.Join(h.build, "packages.before"), []byte(before), 0o644)
 	writePluginTestFile(t, filepath.Join(h.build, "packages.after"), []byte(after), 0o644)
 	writePluginTestFile(t, filepath.Join(h.build, "seeds"), []byte("ca-certificates\nopenssh-server\nbubblewrap\n"), 0o644)
-	writeFakes(t, h.fakes, map[string]string{"dpkg-query": fakeDpkgQuery, "fc-cache": fakeFcCache, "runuser": fakeRunuser})
+	writeFakes(t, h.fakes, map[string]string{"dpkg-query": fakeDpkgQuery, "fc-cache": fakeFcCache, "runuser": fakeRunuser, "dpkg-deb": fakeDpkgDeb})
 	return h
+}
+
+func (h *captureHost) listed(record string) []string {
+	h.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(h.build, record))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var packages []string
+	for line := range strings.Lines(string(raw)) {
+		if status, pkg, _ := strings.Cut(strings.TrimSuffix(line, "\n"), "\t"); strings.HasPrefix(status, "ii") {
+			packages = append(packages, pkg)
+		}
+	}
+	return packages
+}
+
+func (h *captureHost) version(pkg string) (string, string) {
+	if p, ok := h.dpkg.Packages[pkg]; ok {
+		return p.Version, cmp.Or(p.Arch, "amd64")
+	}
+	return "0", "amd64"
+}
+
+func (h *captureHost) deb(dir, pkg, version string) string {
+	h.t.Helper()
+	_, arch := h.version(pkg)
+	file := pkg + "_" + strings.ReplaceAll(version, ":", "%3a") + "_" + arch + ".deb"
+	path := filepath.Join(h.build, dir, file)
+	writePluginTestFile(h.t, path, []byte("deb "+pkg+" "+version), 0o644)
+	writePluginTestFile(h.t, path+".control", []byte("Package: "+pkg+"\nVersion: "+version+"\nArchitecture: "+arch+"\n"), 0o644)
+	return file
+}
+
+func (h *captureHost) download() {
+	h.t.Helper()
+	h.downloaded = true
+	before, after := h.listed("packages.before"), h.listed("packages.after")
+	var base strings.Builder
+	for _, pkg := range before {
+		version, _ := h.version(pkg)
+		base.WriteString(pkg + "=" + version + "\n")
+	}
+	writePluginTestFile(h.t, filepath.Join(h.build, "base"), []byte(base.String()), 0o644)
+	for _, dir := range []string{"debs/partial", "artifacts"} {
+		if err := os.MkdirAll(filepath.Join(h.build, dir), 0o755); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	for _, pkg := range after {
+		if !slices.Contains(before, pkg) && !slices.Contains(h.payload.Closure, pkg) {
+			version, _ := h.version(pkg)
+			h.deb("debs", pkg, version)
+		}
+	}
 }
 
 func (h *captureHost) file(path, content string, mode os.FileMode) {
@@ -913,7 +1151,10 @@ func (h *captureHost) run() (string, error) {
 	writePluginTestFile(h.t, filepath.Join(h.root, "loader.py"), loader, 0o644)
 	writePluginTestFile(h.t, filepath.Join(h.root, "dpkg.json"), mustJSON(h.t, h.dpkg), 0o644)
 	writePluginTestFile(h.t, filepath.Join(h.root, "closure.json"), mustJSON(h.t, closure(Inventory{Apt: Apt{Payload: &h.payload}})), 0o644)
-	cmd := exec.Command("python3", filepath.Join(h.root, "capture.py"), filepath.Join(h.root, "closure.json"), h.host, h.closure, h.build, "/home/u", filepath.Join(h.root, "loader.py"))
+	if !h.downloaded {
+		h.download()
+	}
+	cmd := exec.Command("python3", filepath.Join(h.root, "capture.py"), filepath.Join(h.root, "closure.json"), h.host, h.closure, h.build, "/home/u", filepath.Join(h.root, "loader.py"), h.debs)
 	cmd.Env = append(append(os.Environ(), "PATH="+h.fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+h.root, "FAKE_DPKG="+filepath.Join(h.root, "dpkg.json"), "SUDO_USER=u"), h.env...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -1195,6 +1436,108 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 				t.Errorf("resident = %v, want %v", got, want)
 			}
 		}},
+		{name: "the resident download is captured beside the closure", check: func(t *testing.T, h *captureHost) {
+			want := capturedDebs{Artifacts: []capturedDeb{}, Base: []string{"base-files=13ubuntu10", "libc6=2.42-1ubuntu1"}}
+			for _, deb := range []capturedDeb{{Package: "libwrap0", Version: "7.6.q-35"}, {Package: "openssh-server", Version: "1:9.9p1-3"}, {Package: "openssh-sftp-server", Version: "1:9.9p1-3"}} {
+				deb.Architecture, deb.File = "amd64", deb.Package+"_"+strings.ReplaceAll(deb.Version, ":", "%3a")+"_amd64.deb"
+				sum := sha256.Sum256([]byte("deb " + deb.Package + " " + deb.Version))
+				deb.SHA256 = hex.EncodeToString(sum[:])
+				want.Debs = append(want.Debs, deb)
+			}
+			raw, err := json.MarshalIndent(want, "", " ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := os.ReadFile(filepath.Join(h.debs, "debs.json")); err != nil || string(got) != string(raw)+"\n" {
+				t.Errorf("debs.json = %s, %v; want %s", got, err, raw)
+			}
+			entries, err := os.ReadDir(h.debs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			if wantNames := []string{"debs.json", want.Debs[0].File, want.Debs[1].File, want.Debs[2].File}; !slices.Equal(names, wantNames) {
+				t.Errorf("the captured debs are %q, want %q", names, wantNames)
+			}
+			for _, deb := range want.Debs {
+				copied, err := os.ReadFile(filepath.Join(h.debs, deb.File))
+				downloaded, downloadErr := os.ReadFile(filepath.Join(h.build, "debs", deb.File))
+				if err != nil || downloadErr != nil || string(copied) != string(downloaded) {
+					t.Errorf("%s was copied as %q (%v), want the download %q (%v)", deb.File, copied, err, downloaded, downloadErr)
+				}
+			}
+		}},
+		{name: "an artifact deb is captured beside the resident download", mutate: func(h *captureHost) {
+			h.dpkg.Packages["orca-ide"] = &fakePackage{Version: "1.4.215", Files: []string{"/opt/Orca/orca-ide"}}
+			h.record(map[string]string{"packages.after": "ii \torca-ide\n", "seeds": "orca-ide\n"})
+			h.download()
+			if err := os.Remove(filepath.Join(h.build, "debs", "orca-ide_1.4.215_amd64.deb")); err != nil {
+				t.Fatal(err)
+			}
+			h.deb("artifacts", "orca-ide", "1.4.215")
+		}, check: func(t *testing.T, h *captureHost) {
+			var got capturedDebs
+			raw, err := os.ReadFile(filepath.Join(h.debs, "debs.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if want := []capturedDeb{{Architecture: "amd64", File: "orca-ide_1.4.215_amd64.deb", Package: "orca-ide", Version: "1.4.215"}}; !reflect.DeepEqual(got.Artifacts, want) || len(got.Debs) != 3 {
+				t.Errorf("debs.json artifacts = %+v with %d debs, want %+v with 3", got.Artifacts, len(got.Debs), want)
+			}
+			if copied, err := os.ReadFile(filepath.Join(h.debs, "orca-ide_1.4.215_amd64.deb")); err != nil || string(copied) != "deb orca-ide 1.4.215" {
+				t.Errorf("the artifact deb was copied as %q, %v", copied, err)
+			}
+		}},
+		{name: "a build without the resident download is fatal", mutate: func(h *captureHost) {
+			h.download()
+			if err := os.RemoveAll(filepath.Join(h.build, "debs")); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: func(h *captureHost) string {
+			return "cc-remote: " + h.build + "/debs is missing, so this machine did not run packages full"
+		}, untouched: true},
+		{name: "a closure package in the resident download is fatal", mutate: func(h *captureHost) {
+			h.download()
+			h.deb("debs", "libfoo1", "1.0-1")
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: the resident download installs the closure packages ['libfoo1'], whose system copies would shadow the payload"
+		}, untouched: true},
+		{name: "a resident download short of the partition is fatal", mutate: func(h *captureHost) {
+			h.download()
+			if err := os.Remove(filepath.Join(h.build, "debs", "libwrap0_7.6.q-35_amd64.deb")); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: the resident download differs from the measured partition: downloaded beyond it [], partition beyond it ['libwrap0']"
+		}, untouched: true},
+		{name: "a resident download at another version than the install is fatal", mutate: func(h *captureHost) {
+			h.download()
+			if err := os.Remove(filepath.Join(h.build, "debs", "openssh-server_1%3a9.9p1-3_amd64.deb")); err != nil {
+				t.Fatal(err)
+			}
+			h.deb("debs", "openssh-server", "1:9.9p1-4")
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: the resident download is not what packages full installed: ['openssh-server 1:9.9p1-4 (installed 1:9.9p1-3)']"
+		}, untouched: true},
+		{name: "a package downloaded twice is fatal", mutate: func(h *captureHost) {
+			h.download()
+			h.deb("artifacts", "libwrap0", "7.6.q-35")
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: the resident download names ['libwrap0'] more than once"
+		}, untouched: true},
+		{name: "an existing debs directory is fatal", mutate: func(h *captureHost) {
+			if err := os.MkdirAll(h.debs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: func(h *captureHost) string {
+			return "cc-remote: " + h.debs + " already exists on the build machine"
+		}, untouched: true},
 		{name: "the closure is captured, sealed and exposed"},
 	}
 	for _, tt := range tests {

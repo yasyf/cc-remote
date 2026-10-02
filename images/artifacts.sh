@@ -6,6 +6,15 @@ fetch() {
     exit 1
   fi
 }
+{{- if and . .Closure}}
+
+pinned() {
+  if ! echo "$3  $1" | "${2}sum" -c --status -; then
+    echo "cc-remote: $1 does not match its pinned $2 $3" >&2
+    exit 1
+  fi
+}
+{{- end}}
 
 install_artifact() {
   local name="$1" version="$2" url="$3" algorithm="$4" digest="$5" format="$6" dir="$7" links="$8"
@@ -14,7 +23,16 @@ install_artifact() {
   if [ "$format" = deb ] || [ "$(cat "$dir/.cc-remote-digest" 2> /dev/null)" != "$digest" ]; then
     staging="$(mktemp -d "$tmp_dir/artifact.XXXXXX")"
     download="$staging/$name-$version.$format"
+{{- if and . .Closure}}
+    if [ "$format" = deb ]; then
+      download="$deb_dir/$name-$version.deb"
+      pinned "$download" "$algorithm" "$digest"
+    else
+      fetch "$url" "$download" "$algorithm" "$digest"
+    fi
+{{- else}}
     fetch "$url" "$download" "$algorithm" "$digest"
+{{- end}}
     rm -rf "$dir"
     mkdir -p "$dir"
     case "$format" in
@@ -26,7 +44,7 @@ install_artifact() {
       tar.gz) tar -xzf "$download" -C "$dir" ;;
       tar.xz) tar -xJf "$download" -C "$dir" ;;
       zip) unzip -q "$download" -d "$dir" ;;
-      deb){{- if and . .Closure}} record_deb "$download";{{- end}} apt-get install -y -qq "$download" > /dev/null ;;
+      deb) apt-get install -y -qq{{if and . .Closure}} "${deb_flags[@]}"{{end}} "$download" > /dev/null ;;
     esac
     rm -rf "$staging"
     printf '%s\n' "$digest" > "$dir/.cc-remote-digest"

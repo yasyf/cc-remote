@@ -346,7 +346,9 @@ func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, 
 		"q":          quote,
 		"json":       indentJSON,
 		"install":    installCall,
+		"stage":      stageCall,
 		"verify":     verifyCalls,
+		"probed":     probedCalls,
 		"expand":     expand,
 		"executable": serviceExecutable,
 		"spec":       spec,
@@ -443,11 +445,34 @@ func installCall(a Artifact, toolDir, binDir string) string {
 	return strings.Join(words, " ")
 }
 
+func stageCall(a Artifact) string {
+	algorithm, digest := a.digest()
+	return strings.Join([]string{"stage_deb", quote(a.Name), quote(a.Version), quote(a.URL), algorithm, quote(digest)}, " ")
+}
+
 func verifyCalls(a Artifact, toolDir, binDir string) []string {
+	return linkCalls(a, toolDir, binDir, func(link, target string, args []string) []string {
+		return []string{strings.Join(append([]string{"verify_link", link, target}, args...), " ")}
+	})
+}
+
+func probedCalls(a Artifact, toolDir, binDir string) []string {
+	return linkCalls(a, toolDir, binDir, func(link, target string, args []string) []string {
+		return []string{
+			"verify_link " + link + " " + target,
+			strings.Join(append([]string{"probe", link}, args...), " "),
+		}
+	})
+}
+
+func linkCalls(a Artifact, toolDir, binDir string, check func(link, target string, args []string) []string) []string {
 	_, digest := a.digest()
 	bins := a.bins()
-	calls := make([]string, 0, 1+len(bins))
-	calls = append(calls, "verify_pin "+artifactDir(a, toolDir)+" "+quote(digest))
+	args := make([]string, 0, len(a.Verify))
+	for _, arg := range a.Verify {
+		args = append(args, quote(arg))
+	}
+	calls := []string{"verify_pin " + artifactDir(a, toolDir) + " " + quote(digest)}
 	for _, bin := range slices.Sorted(maps.Keys(bins)) {
 		target := quote(bins[bin])
 		if a.Format != Deb {
@@ -457,12 +482,7 @@ func verifyCalls(a Artifact, toolDir, binDir string) []string {
 				target = under(toolDir, a.dir()+"/"+bins[bin])
 			}
 		}
-		words := make([]string, 0, 3+len(a.Verify))
-		words = append(words, "verify_link", under(binDir, bin), target)
-		for _, arg := range a.Verify {
-			words = append(words, quote(arg))
-		}
-		calls = append(calls, strings.Join(words, " "))
+		calls = append(calls, check(under(binDir, bin), target, args)...)
 	}
 	return calls
 }

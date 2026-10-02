@@ -9,7 +9,7 @@ import stat
 import subprocess
 import sys
 
-payload_path, host, root, build, user_home, loader_py = sys.argv[1:7]
+payload_path, host, root, build, user_home, loader_py, debs_dir = sys.argv[1:8]
 host = os.path.normpath(host)
 LIB = "/usr/lib/" + platform.machine() + "-linux-gnu"
 ALIASES = ("/lib64/", "/lib/", "/bin/", "/sbin/")
@@ -388,6 +388,54 @@ def check_consumers(paths, new):
     return {path: sorted({owner for lib in libs for owner in owned.get(lib, owned.get(canonical(lib), [])) if owner in new}) for path, libs in resolved.items()}
 
 
+def deb_fields(path):
+    result = run(["dpkg-deb", "-f", path, "Package", "Version", "Architecture"])
+    if result.returncode != 0:
+        fatal(f"dpkg-deb -f {path} exited {result.returncode}: {result.stderr.strip()}")
+    fields = dict(line.split(": ", 1) for line in result.stdout.splitlines())
+    return {"package": fields["Package"], "version": fields["Version"], "architecture": fields["Architecture"]}
+
+
+def downloaded(directory):
+    return [dict(deb_fields(os.path.join(directory, name)), file=name, source=os.path.join(directory, name)) for name in sorted(os.listdir(directory)) if name.endswith(".deb")]
+
+
+def check_debs(resident, closure, base):
+    for record in ("base", "debs", "artifacts"):
+        if not os.path.exists(os.path.join(build, record)):
+            fatal(f"{build}/{record} is missing, so this machine did not run packages full")
+    debs, artifacts = downloaded(os.path.join(build, "debs")), downloaded(os.path.join(build, "artifacts"))
+    packages = [deb["package"] for deb in debs + artifacts]
+    repeated = sorted({package for package in packages if packages.count(package) > 1})
+    if repeated:
+        fatal(f"the resident download names {repeated} more than once")
+    shadowing = sorted(set(packages) & closure)
+    if shadowing:
+        fatal(f"the resident download installs the closure packages {shadowing}, whose system copies would shadow the payload")
+    if set(packages) - base != resident:
+        fatal(f"the resident download differs from the measured partition: downloaded beyond it {sorted(set(packages) - base - resident)}, partition beyond it {sorted(resident - set(packages))}")
+    installed = versions(sorted(packages))
+    drifted = [f"{deb['package']} {deb['version']} (installed {installed[deb['package']]['version']})" for deb in debs + artifacts if installed[deb["package"]]["version"] != deb["version"]]
+    if drifted:
+        fatal(f"the resident download is not what packages full installed: {drifted}")
+    if os.path.lexists(debs_dir):
+        fatal(f"{debs_dir} already exists on the build machine")
+    with open(os.path.join(build, "base"), encoding="utf-8") as fh:
+        return {"base": fh.read().split(), "debs": debs, "artifacts": artifacts}
+
+
+def write_debs(captured):
+    os.makedirs(debs_dir)
+    for deb in captured["debs"] + captured["artifacts"]:
+        shutil.copyfile(deb.pop("source"), os.path.join(debs_dir, deb["file"]))
+    for deb in captured["debs"]:
+        deb["sha256"] = sha256(os.path.join(debs_dir, deb["file"]))
+    with open(os.path.join(debs_dir, "debs.json"), "w", encoding="utf-8") as fh:
+        json.dump(captured, fh, indent=1, sort_keys=True)
+        fh.write("\n")
+    return len(captured["debs"]) + len(captured["artifacts"])
+
+
 def capture():
     with open(payload_path, encoding="utf-8") as fh:
         payload = {key: value or [] for key, value in json.load(fh).items()}
@@ -406,6 +454,7 @@ def capture():
     resident = partition(seeds, new, base & after)
     if new - resident != closure:
         fatal(f"apt.payload.closure differs from the measured partition: resident or absent {sorted(closure - (new - resident))}, undeclared {sorted((new - resident) - closure)}")
+    debs = check_debs(resident, closure, base)
     packages = versions(sorted(closure))
     paths_by_package = {package: listed(package) for package in sorted(closure)}
     captured = {canonical(path) for paths in paths_by_package.values() for path in paths}
@@ -449,6 +498,7 @@ def capture():
         os.symlink(root + "/" + link["target"], path)
     size = sum(os.lstat(root + entry["path"]).st_size for entry in files if "sha256" in entry)
     print(f"cc-remote: captured {len(closure)} packages, {len(files)} files, {size} bytes into {root}")
+    print(f"cc-remote: captured {write_debs(debs)} resident debs into {debs_dir}")
 
 
 os.umask(0o022)

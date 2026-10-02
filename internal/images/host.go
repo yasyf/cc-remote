@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -40,10 +42,63 @@ mkdir -p "$HOME/.cc-remote"
 cat > "` + PluginsPath + `.tmp"
 mv -f "` + PluginsPath + `.tmp" "` + PluginsPath + `"`
 
-const stagePayload = "install -d -m 0755 " + PayloadStore + " && cat > " + PayloadStore + "/$1.sqfs.partial"
+const payloadURLLimit = 8192
 
-const enablePayloadPlugins = `set -eu
-settings="$HOME/.claude/settings.json"
+const openPayloadStaging = `set -euo pipefail
+digest="$1"
+store=` + PayloadStore + `
+install -d -m 0755 "$store"
+staging="$(mktemp "$store/$digest.sqfs.XXXXXXXX.partial")"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"; rm -f "$staging"' EXIT
+`
+
+const admitPayloadStaging = `read -r got _ < "$work/sum"
+if [ "$got" != "$digest" ]; then
+  echo "cc-remote: the payload has sha256 $got, want $digest" >&2
+  exit 1
+fi
+( flock 9; mv -f "$staging" "$store/$digest.sqfs.admitted" ) 9> "$store/.lock"`
+
+const stagePayload = openPayloadStaging + `set +e
+cat | tee "$staging" | sha256sum > "$work/sum"
+codes=("${PIPESTATUS[@]}")
+set -e
+if [ "${codes[*]}" != "0 0 0" ]; then
+  echo "cc-remote: the payload stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, sha256sum exit ${codes[2]})" >&2
+  exit 1
+fi
+` + admitPayloadStaging
+
+const fetchPayload = openPayloadStaging + `size="$2"
+set +e
+curl -q --config - --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
+  --max-filesize "$size" --write-out '%{stderr}%{http_code}' 2> "$work/http" \
+  | tee "$staging" | sha256sum > "$work/sum"
+codes=("${PIPESTATUS[@]}")
+set -e
+http="$(cat "$work/http")"
+[[ $http =~ ^[0-9]{3}$ ]] || http=none
+if [ "${codes[*]}" != "0 0 0" ]; then
+  hint=""
+  if [ "$http" = 403 ]; then
+    hint="; a 403 usually means the presigned URL expired"
+  fi
+  echo "cc-remote: the payload download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, sha256sum exit ${codes[2]})$hint" >&2
+  exit 1
+fi
+if [ "$http" != 200 ]; then
+  echo "cc-remote: the payload URL answered HTTP $http, want 200" >&2
+  exit 1
+fi
+got="$(stat -c %s "$staging")"
+if [ "$got" != "$size" ]; then
+  echo "cc-remote: the payload download is $got bytes, want $size" >&2
+  exit 1
+fi
+` + admitPayloadStaging
+
+const enablePayloadPlugins = `settings="$HOME/.claude/settings.json"
 image="$1$settings"
 if [ ! -f "$settings" ] || [ ! -f "$image" ]; then
   exit 0
@@ -59,6 +114,8 @@ edited="$(mktemp "$settings.XXXXXX")"
 trap 'rm -f "$edited"' EXIT
 jq --slurpfile image "$image" '.enabledPlugins = (.enabledPlugins // {}) + ($image[0].enabledPlugins // {})' "$settings" > "$edited"
 mv "$edited" "$settings"`
+
+const stagePluginsEnabling = stagePlugins + "\n" + enablePayloadPlugins
 
 const diagnoseMemory = `set -euo pipefail
 root="${1:-}"
@@ -124,6 +181,35 @@ jq -cn \
     progress: (if $progress == "" then null else $progress end)
   }'`
 
+type PayloadURL struct{ raw string }
+
+func ParsePayloadURL(raw string) (PayloadURL, error) {
+	if raw == "" {
+		return PayloadURL{}, errors.New("payload url: the command printed nothing")
+	}
+	if len(raw) > payloadURLLimit {
+		return PayloadURL{}, fmt.Errorf("payload url: %d bytes is over the %d-byte limit", len(raw), payloadURLLimit)
+	}
+	for i := range len(raw) {
+		if c := raw[i]; c < 0x21 || c > 0x7e || c == '"' || c == '\\' {
+			return PayloadURL{}, errors.New("payload url: the URL must be printable ASCII without spaces, quotes or backslashes")
+		}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return PayloadURL{}, errors.New("payload url: the URL must be an absolute https URL with a host and no userinfo")
+	}
+	return PayloadURL{raw: raw}, nil
+}
+
+func (PayloadURL) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, "[payload url]")
+}
+
+func (u PayloadURL) curlConfig() []byte {
+	return []byte(`url = "` + u.raw + "\"\n")
+}
+
 func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ...string) error {
 	sudo := []string{"sudo"}
 	if phase == PhasePayload {
@@ -141,24 +227,34 @@ func (s Scripts) StagePayload(ctx context.Context, exec Exec, image io.Reader, d
 	if !sha256Pattern.MatchString(digest) {
 		return fmt.Errorf("stage payload: %q is not a sha256 digest", digest)
 	}
-	if err := exec(ctx, []string{"sudo", "sh", "-c", stagePayload, "stage-payload", digest}, image); err != nil {
+	if err := exec(ctx, []string{"sudo", "bash", "-c", stagePayload, "stage-payload", digest}, image); err != nil {
 		return fmt.Errorf("stage payload %s: %w", digest, err)
 	}
 	return nil
 }
 
-func (s Scripts) EnablePayloadPlugins(ctx context.Context, exec Exec, digest string) error {
+func (s Scripts) FetchPayload(ctx context.Context, exec Exec, source PayloadURL, digest string, size int64) error {
 	if !sha256Pattern.MatchString(digest) {
-		return fmt.Errorf("enable payload plugins: %q is not a sha256 digest", digest)
+		return fmt.Errorf("fetch payload: %q is not a sha256 digest", digest)
 	}
-	if err := exec(ctx, []string{"sh", "-c", enablePayloadPlugins, "enable-payload-plugins", PayloadRoot + "/" + digest}, nil); err != nil {
-		return fmt.Errorf("enable payload plugins %s: %w", digest, err)
+	if size <= 0 {
+		return fmt.Errorf("fetch payload: size %d is not a byte count", size)
+	}
+	if err := exec(ctx, []string{"sudo", "bash", "-c", fetchPayload, "fetch-payload", digest, strconv.FormatInt(size, 10)}, bytes.NewReader(source.curlConfig())); err != nil {
+		return fmt.Errorf("fetch payload %s: %w", digest, err)
 	}
 	return nil
 }
 
-func (s Scripts) StagePlugins(ctx context.Context, exec Exec) error {
-	if err := exec(ctx, []string{"sh", "-c", stagePlugins}, bytes.NewReader(s.Plugins)); err != nil {
+func (s Scripts) StagePlugins(ctx context.Context, exec Exec, payload string) error {
+	argv := []string{"sh", "-c", stagePlugins}
+	if payload != "" {
+		if !sha256Pattern.MatchString(payload) {
+			return fmt.Errorf("stage plugins.sh: payload %q is not a sha256 digest", payload)
+		}
+		argv = []string{"sh", "-c", stagePluginsEnabling, "stage-plugins", PayloadRoot + "/" + payload}
+	}
+	if err := exec(ctx, argv, bytes.NewReader(s.Plugins)); err != nil {
 		return fmt.Errorf("stage plugins.sh: %w", err)
 	}
 	return nil

@@ -84,6 +84,42 @@ func TestVerifyCalls(t *testing.T) {
 	}
 }
 
+func TestProbedCalls(t *testing.T) {
+	tests := []struct {
+		name     string
+		artifact Artifact
+		want     []string
+	}{
+		{
+			name:     "versioned tarball",
+			artifact: Artifact{Name: "uv", Version: "0.1.0", URL: "https://example.com/uv.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"uvx": "uv/uvx", "uv": "uv/uv"}, Verify: []string{"--version"}},
+			want: []string{
+				`verify_pin "$system_tool_dir/"'uv-0.1.0' '` + digest + `'`,
+				`verify_link "$system_bin_dir/"'uv' "$system_tool_dir/"'uv-0.1.0/uv/uv'`,
+				`probe "$system_bin_dir/"'uv' '--version'`,
+				`verify_link "$system_bin_dir/"'uvx' "$system_tool_dir/"'uv-0.1.0/uv/uvx'`,
+				`probe "$system_bin_dir/"'uvx' '--version'`,
+			},
+		},
+		{
+			name:     "deb without verify arguments",
+			artifact: Artifact{Name: "orca", Version: "1.4.215", URL: "https://example.com/orca.deb", SHA512: digest + digest, Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}},
+			want: []string{
+				`verify_pin "$system_tool_dir/"'orca-1.4.215' '` + digest + digest + `'`,
+				`verify_link "$system_bin_dir/"'orca' '/opt/Orca/orca-ide'`,
+				`probe "$system_bin_dir/"'orca'`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := probedCalls(tt.artifact, "system_tool_dir", "system_bin_dir"); !slices.Equal(got, tt.want) {
+				t.Errorf("probedCalls =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(tt.want, "\n"))
+			}
+		})
+	}
+}
+
 func TestRenderScopesProfileTools(t *testing.T) {
 	inventory := validInventory()
 	agents, err := Render(inventory, "agents")
@@ -507,10 +543,29 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		"  verify_closure_bin 'certutil'\n",
 		"  local link_check=spelling\n  verify_user_links\n}\n",
 		"  verify_system\n  verify_user\n  mkdir -p \"$state_dir\"\n",
+		"  local stamp=\"${1:?publish needs the ready stamp}\"\n  local link_check=resolved\n  verify_system\n  verify_user\n",
+		"    verify_link \"$system_bin_dir/$1\" \"$closure_root/usr/bin/$1\"\n    probe \"$system_bin_dir/$1\"\n    verify_loader \"$system_bin_dir/$1\"\n",
+		"  progress 'python_system:cc-transcript'\n  verify_bin 'cc-transcript'\n  probe 'cc-transcript' '--version'\n",
+		"  verify_link \"$system_bin_dir/\"'uv' \"$system_tool_dir/\"'uv-0.1.0/uv/uv'\n  probe \"$system_bin_dir/\"'uv'\n",
+		"  verify_link \"$system_bin_dir/\"'orca' '/opt/Orca/orca-ide'\n  probe \"$system_bin_dir/\"'orca'\n",
+		"  verify_link \"$bin_dir/\"'claude' \"$system_bin_dir/\"'claude'\n  probe \"$bin_dir/\"'claude'\n",
+		"recorded_source() {\n  marketplace_source \"$known\" \"$1\"\n}\n",
+		"'pdf'\n  local known\n  known=\"$(claude_json plugin marketplace list --json)\" || exit\n  checkout 'market' ",
+		"'$1 == id && $2 \" \" $3 \" \" $4 == want { found = 1 } END { exit !found }' <<< \"$codex_plugins\"\n}\n",
 	} {
 		if !bytes.Contains(with.Plugins, []byte(want)) {
 			t.Errorf("plugins.sh with apt.payload lacks\n%s", want)
 		}
+	}
+	if listings := bytes.Count(with.Plugins, []byte("  local codex_plugins\n  codex_plugins=\"$(codex plugin list)\" || exit\n  for plugin in \"$@\"; do\n")); listings != 2 || bytes.Contains(with.Plugins, []byte("codex plugin list |")) {
+		t.Errorf("plugins.sh with apt.payload lists the Codex plugins %d times before its loops, want once in the install and once in the verify", listings)
+	}
+	without, err := Render(plain, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(without.Plugins, []byte("recorded_source() {\n  local known\n  known=\"$(claude_json plugin marketplace list --json)\" || exit\n")) || bytes.Contains(without.Plugins, []byte("codex_plugins")) || !bytes.Contains(without.Plugins, []byte("  codex plugin list | awk ")) {
+		t.Errorf("an inventory without apt.payload changed its marketplace or Codex plugin listings")
 	}
 }
 

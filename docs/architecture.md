@@ -53,15 +53,40 @@ when needed, including a full-stack Namespace environment.
 Each create request provisions a fresh provider machine named for the workspace.
 The selected image or [machine payload](tool-inventory.md#machine-payloads) can
 supply tools; cc-remote reconciles them with the inventory and materializes the
-requested checkout at the pinned source commit. A payload is a local file selected
-by `path` and `sha256`, owned by the current user with no group or other
-permissions. It requires an in-place machine with
-`sprite-env` and cannot be combined with `image`.
+requested checkout at the pinned source commit. The default payload source is a
+local file selected by `path` and `sha256`, owned by the current user with no
+group or other permissions. The opt-in direct source uses `url_command`,
+`sha256`, and `size` to supply a private HTTPS URL and pin the image's digest and
+byte count. Both sources require an in-place machine with `sprite-env` and cannot
+be combined with `image`.
 
-Create streams the payload into the Sprite and checks both the file and any
-existing mount's loop device against its SHA-256. It checks the manifest against
-the tools fingerprint, home directory, architecture, and OS version, then exposes
-the mounted trees. Any missing required tree fails creation.
+For a direct source, create acquires the URL after the name and tailnet checks,
+before saving the workspace record or creating a machine. A failed URL command
+stops create before either exists. The URL stays in memory and reaches the
+machine only on the remote fetch command's stdin as a curl configuration. It never
+appears in process arguments or environment, logs, state, result JSON, or errors.
+
+The mount lane fetches the direct payload while the checkout lane runs. The
+download writes the file and computes its SHA-256 in one pass; matching size
+and digest admit it as `<sha256>.sqfs.admitted` under the store lock. The
+payload phase renames it to `<sha256>.sqfs` and mounts it without a second hash.
+
+For the default `path` source, create sends the local file through the provider's
+exec stdin. The Sprite writes and hashes it in one pass, then admits it as
+`<sha256>.sqfs.admitted` under the same store lock after the digest matches.
+The payload phase renames and mounts it without a second hash.
+
+Both sources use `mktemp` to create a staging file with mode `0600`, named
+`<sha256>.sqfs.<8 random chars>.partial` in the store for each invocation. A
+canceled transfer that is still running cannot overwrite another transfer's
+bytes. Their `EXIT` traps remove staging files on failure. The payload phase
+never reads `.partial` files; it accepts admitted files or hashes a cached
+`<sha256>.sqfs` before mounting, and fails if neither exists.
+
+Both sources check any existing mount's loop device against its SHA-256 and check
+the manifest against the tools fingerprint, home directory, architecture, and OS
+version before exposing the mounted trees. Any missing required tree fails
+creation.
 Artifact directories and pinned marketplaces use links into the read-only mount;
 plugin caches and configuration use writable copies. Before installing plugins
 on create or resume with a payload, cc-remote merges the payload's `enabledPlugins`
@@ -69,23 +94,26 @@ into existing Claude settings, preserving every other user setting.
 The `cc-remote-payload`
 service checks stored payloads, or the loop devices behind existing mounts,
 against their digests and remounts the files at boot, before dependent inventory
-services.
+services. With `apt.payload`, it skips the loop-device check for a mount that
+the payload phase admitted during the current boot.
 
 Startup runs `provision.sh prerequisites` on machines provisioned in place, then
 runs these lanes concurrently:
 
 | Lane | Order |
 | --- | --- |
-| Packages | Run the remaining `apt-get` work and verify Debian artifacts on machines provisioned in place. |
+| Mount | Stream or fetch the payload when one is configured, admit it, and mount it. |
+| Packages | Run the remaining `apt-get` work and verify Debian artifacts on machines provisioned in place. With `apt.payload`, wait for the mount, then install the payload's captured resident packages offline. |
 | Checkout | Check out the pinned source commit, then run nonempty profile preparation after package and tool installation succeed. |
-| Tools | Mount the payload when configured, provision system tools in place, install user tools and plugins, then wait for the packages lane before configuring and enrolling in the tailnet. |
+| Tools | Wait for the mount, provision system tools in place, install user tools and plugins, then wait for the packages lane before configuring and enrolling in the tailnet. |
 
 Checkout overlaps installation; profile preparation and configuration start only
 after both installs succeed. Create publishes the
 [readiness stamp](tool-inventory.md#fingerprints-and-readiness) only after every
 lane succeeds, then connects. Installation clears the stamp; the separate
 `publish` phase writes it. Resume uses the stamp to check for changed tools,
-images, or payloads.
+images, or payloads. When a changed stamp requires reinstallation from a direct
+source, resume runs the URL command again immediately before the reinstall.
 
 | Part of the lean profile | Task-specific setup |
 | --- | --- |

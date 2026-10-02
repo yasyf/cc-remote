@@ -61,8 +61,10 @@ type Machine struct {
 }
 
 type Payload struct {
-	Path   string `yaml:"path"`
-	SHA256 string `yaml:"sha256"`
+	Path       string   `yaml:"path"`
+	URLCommand []string `yaml:"url_command"`
+	SHA256     string   `yaml:"sha256"`
+	Size       int64    `yaml:"size"`
 }
 
 type Forward struct {
@@ -222,11 +224,22 @@ func (m Machine) validate() error {
 	if m.Image != "" {
 		return fmt.Errorf("payload and image %q exclude each other; a payload is mounted on a fresh machine, an image carries its tools", m.Image)
 	}
-	if m.Payload.Path == "" {
-		return errors.New("payload.path names the SquashFS payload file, relative to this config file")
-	}
-	if !digest.MatchString(m.Payload.SHA256) {
-		return fmt.Errorf("payload.sha256 %q must be the 64 lowercase hex digits of the payload's sha256", m.Payload.SHA256)
+	return m.Payload.validate()
+}
+
+func (p Payload) validate() error {
+	direct := len(p.URLCommand) > 0
+	switch {
+	case (p.Path == "") == !direct:
+		return errors.New("payload.path names a local SquashFS file to stream; payload.url_command names a command that prints a private HTTPS URL; set exactly one, relative to this config file")
+	case direct && p.URLCommand[0] == "":
+		return errors.New("payload.url_command needs the command to run as its first element")
+	case direct && p.Size <= 0:
+		return fmt.Errorf("payload.size %d must pin the byte count a direct download has to match", p.Size)
+	case !direct && p.Size != 0:
+		return fmt.Errorf("payload.size %d applies only to a url_command source; a streamed path is hashed as it is read", p.Size)
+	case !digest.MatchString(p.SHA256):
+		return fmt.Errorf("payload.sha256 %q must be the 64 lowercase hex digits of the payload's sha256", p.SHA256)
 	}
 	return nil
 }

@@ -292,9 +292,13 @@ checkout() {
 }
 
 recorded_source() {
+{{- if .Closure}}
+  marketplace_source "$known" "$1"
+{{- else}}
   local known
   known="$(claude_json plugin marketplace list --json)" || exit
   marketplace_source "$known" "$1"
+{{- end}}
 }
 
 marketplace_source() {
@@ -430,14 +434,23 @@ install_codex_runtime() {
   mkdir -p "$HOME/.codex"
   grep -qsF '[marketplaces.openai-primary-runtime]' "$config" \
     || printf '\n[marketplaces.openai-primary-runtime]\nsource_type = "local"\nsource = "%s"\n' "$codex_runtime_root/plugins/openai-primary-runtime" >> "$config"
+{{- if .Closure}}
+  local codex_plugins
+  codex_plugins="$(codex plugin list)" || exit
+{{- end}}
   for plugin in "$@"; do
     codex_runtime_plugin "$plugin" "$version" || codex plugin add "$plugin@openai-primary-runtime"
   done
 }
 
 codex_runtime_plugin() {
+{{- if .Closure}}
+  awk -v id="$1@openai-primary-runtime" -v want="installed, enabled $2" \
+    '$1 == id && $2 " " $3 " " $4 == want { found = 1 } END { exit !found }' <<< "$codex_plugins"
+{{- else}}
   codex plugin list | awk -v id="$1@openai-primary-runtime" -v want="installed, enabled $2" \
     '$1 == id && $2 " " $3 " " $4 == want { found = 1 } END { exit !found }'
+{{- end}}
 }
 
 verify_codex_runtime() {
@@ -448,6 +461,10 @@ verify_codex_runtime() {
     echo "cc-remote: the Codex runtime is not at $version" >&2
     exit 1
   fi
+{{- if .Closure}}
+  local codex_plugins
+  codex_plugins="$(codex plugin list)" || exit
+{{- end}}
   for plugin in "$@"; do
     if ! codex_runtime_plugin "$plugin" "$version"; then
       echo "cc-remote: Codex runtime plugin $plugin is not installed and enabled at $version" >&2
@@ -624,6 +641,10 @@ run_install() {
 {{- with .CodexRuntime}}
   queue_artifact install_codex_runtime {{q .Version}} {{q .URL}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
 {{- end}}
+{{- if and .Closure .Claude.Marketplaces}}
+  local known
+  known="$(claude_json plugin marketplace list --json)" || exit
+{{- end}}
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
   checkout {{q .Name}} {{q .GitHub}} {{q .Ref}} {{if .Private}}private{{else}}public{{end}}
@@ -679,6 +700,9 @@ run_natives() {
 
 run_publish() {
   local stamp="${1:?publish needs the ready stamp}"
+{{- if .Closure}}
+  local link_check=resolved
+{{- end}}
   verify_system
 {{- if .Closure}}
   verify_user
@@ -739,6 +763,24 @@ progress() {
   mv -f "$state_dir/verify-progress.partial" "$state_dir/verify-progress"
 }
 
+probe() {
+  local bin="$1"
+  shift
+  case "$link_check" in
+    full)
+      if [ "$#" -gt 0 ]; then
+        "$bin" "$@" > /dev/null
+      fi
+      ;;
+    resolved)
+      if [ ! -x "$(command -v "$bin")" ]; then
+        echo "cc-remote: $bin is not executable" >&2
+        exit 1
+      fi
+      ;;
+  esac
+}
+
 verify_loader() {
   local missing
   missing="$(python3 "$tmp_dir/loader.py" "$1" | awk '$2 == "=>" && $3 == "not" && $4 == "found" { print $1 }')" || exit
@@ -760,6 +802,7 @@ verify_font() {
 verify_closure_bin() {
   if [ -L "$closure_root" ]; then
     verify_link "$system_bin_dir/$1" "$closure_root/usr/bin/$1"
+    probe "$system_bin_dir/$1"
     verify_loader "$system_bin_dir/$1"
   elif ! command -v "$1" > /dev/null; then
     echo "cc-remote: $1 is not on PATH" >&2
@@ -773,9 +816,13 @@ verify_system() {
 {{- range .System}}
 {{- if $.Closure}}
   progress {{q (print "system:" .Name)}}
+{{- range probed . "system_tool_dir" "system_bin_dir"}}
+  {{.}}
 {{- end}}
+{{- else}}
 {{- range verify . "system_tool_dir" "system_bin_dir"}}
   {{.}}
+{{- end}}
 {{- end}}
 {{- end}}
 {{- range .Python.System}}
@@ -783,8 +830,11 @@ verify_system() {
 {{- range .Bins}}
 {{- if $.Closure}}
   progress {{q (print "python_system:" .)}}
-{{- end}}
+  verify_bin {{q .}}
+  probe {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
+{{- else}}
   verify_bin {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
+{{- end}}
 {{- end}}
 {{- end}}
 {{- with .Closure}}
@@ -810,9 +860,13 @@ verify_user_links() {
 {{- range .Tools}}
 {{- if $.Closure}}
   progress {{q (print "tool:" .Name)}}
+{{- range probed . "tool_dir" "bin_dir"}}
+  {{.}}
 {{- end}}
+{{- else}}
 {{- range verify . "tool_dir" "bin_dir"}}
   {{.}}
+{{- end}}
 {{- end}}
 {{- end}}
 {{- range .Links}}
@@ -820,6 +874,9 @@ verify_user_links() {
   progress {{q (print "link:" .)}}
 {{- end}}
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
+{{- if $.Closure}}
+  probe "$bin_dir/"{{q .}}
+{{- end}}
 {{- end}}
 }
 

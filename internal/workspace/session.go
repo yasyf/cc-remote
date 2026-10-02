@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,9 +27,11 @@ import (
 )
 
 const (
-	LabelWorkspace = "cc-remote/workspace"
-	LabelProfile   = "cc-remote/profile"
-	tailnetTimeout = 60 * time.Second
+	LabelWorkspace      = "cc-remote/workspace"
+	LabelProfile        = "cc-remote/profile"
+	tailnetTimeout      = 60 * time.Second
+	urlCommandTimeout   = 60 * time.Second
+	urlCommandWaitDelay = 2 * time.Second
 )
 
 type Session struct {
@@ -53,6 +58,8 @@ type Session struct {
 	privatePlugins   bool
 	tailnetFromTools bool
 	stderr           sync.Mutex
+	timeline         *timeline
+	execs            atomic.Int64
 }
 
 func (s *Session) inPlace() bool {
@@ -220,6 +227,7 @@ func (s *Session) run(ctx context.Context, machine, script string, stdin io.Read
 }
 
 func (s *Session) execute(ctx context.Context, machine string, argv []string, stdin io.Reader) ([]byte, error) {
+	s.execs.Add(1)
 	result, err := s.Provider.Exec(ctx, machine, argv, stdin)
 	if err != nil {
 		return nil, err
@@ -249,6 +257,7 @@ func (s *Session) exec(machine string) images.Exec {
 
 func (s *Session) capture(machine string) images.Capture {
 	return func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
+		s.execs.Add(1)
 		result, err := s.Provider.Exec(ctx, machine, argv, stdin)
 		if err != nil {
 			return nil, err
@@ -294,7 +303,9 @@ func (s *Session) forget(name string) error {
 	return errors.Join(state.Remove(s.State.Workspace(name)), state.Remove(s.State.SSH(name)))
 }
 
-func (s *Session) Create(ctx context.Context, name string, source Source) (*Result, error) {
+func (s *Session) Create(ctx context.Context, name string, source Source) (result *Result, err error) {
+	s.begin()
+	defer func() { s.summarize(name, err) }()
 	if err := state.ValidateName(name); err != nil {
 		return nil, err
 	}
@@ -319,13 +330,20 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 	if err := s.unbound(name); err != nil {
 		return nil, err
 	}
+	stage, err := s.payloadSource(ctx, name)
+	if err != nil {
+		return nil, err
+	}
 	now := s.Now()
 	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: name, Image: s.image, ImageSpec: s.imageSpec, Unverified: true, CreatedAt: now}
 	if err := s.save(record); err != nil {
 		return nil, err
 	}
 	s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
-	if _, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelWorkspace: name})); err != nil {
+	if err := s.timed(laneMain, "machine.create", name, func() error {
+		_, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelWorkspace: name}))
+		return err
+	}); err != nil {
 		return nil, s.unmade(record, err)
 	}
 	record.Unverified = false
@@ -333,7 +351,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (*Resu
 		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 	}
 	s.Log.Info("created", "machine", name)
-	result, err := s.provision(ctx, held, record)
+	result, err = s.provision(ctx, held, record, stage)
 	if err == nil {
 		err = s.save(record)
 	}
@@ -371,7 +389,7 @@ func (s *Session) unbound(name string) error {
 	return nil
 }
 
-func (s *Session) provision(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
+func (s *Session) provision(ctx context.Context, held *state.Held, record *Record, stage payloadStage) (*Result, error) {
 	machine := record.Machine
 	env, err := s.forwards(record)
 	if err != nil {
@@ -381,8 +399,7 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		return nil, err
 	}
 	run := newLanes(ctx)
-	packages := run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
-	tools := run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
+	packages, tools := s.installLanes(run, machine, stage)
 	loader := run.Go(func(ctx context.Context) error {
 		if err := run.after(packages, tools); err != nil {
 			return err
@@ -420,19 +437,29 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if err := run.Wait(); err != nil {
 		return nil, err
 	}
-	if err := s.publish(ctx, machine); err != nil {
+	tail := newLanes(ctx)
+	var target providers.Target
+	tail.Go(func(ctx context.Context) error { return s.publish(ctx, machine) })
+	tail.Go(func(ctx context.Context) (err error) {
+		target, err = s.sshTarget(ctx, machine)
+		return err
+	})
+	if err := tail.Wait(); err != nil {
 		return nil, err
 	}
-	return s.connect(ctx, record)
+	return s.deliverTarget(record, target)
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
+	stage, err := s.payloadSource(ctx, machine)
+	if err != nil {
+		return err
+	}
 	if err := s.installPrerequisites(ctx, machine); err != nil {
 		return err
 	}
 	run := newLanes(ctx)
-	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
-	run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
+	s.installLanes(run, machine, stage)
 	if err := run.Wait(); err != nil {
 		return err
 	}
@@ -442,11 +469,32 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 	return s.publish(ctx, machine)
 }
 
+func (s *Session) installLanes(run *lanes, machine string, stage payloadStage) (packages, tools <-chan struct{}) {
+	mounted := run.Go(func(ctx context.Context) error { return s.mountPayload(ctx, machine, stage) })
+	packages = run.Go(func(ctx context.Context) error {
+		if s.closure {
+			if err := run.after(mounted); err != nil {
+				return err
+			}
+		}
+		return s.installPackages(ctx, machine)
+	})
+	tools = run.Go(func(ctx context.Context) error {
+		if err := run.after(mounted); err != nil {
+			return err
+		}
+		return s.installPlugins(ctx, machine)
+	})
+	return packages, tools
+}
+
 func (s *Session) installPrerequisites(ctx context.Context, machine string) error {
 	if !s.inPlace() {
 		return nil
 	}
-	return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePrerequisites)
+	return s.timed(laneMain, "prerequisites", machine, func() error {
+		return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePrerequisites)
+	})
 }
 
 func (s *Session) installPackages(ctx context.Context, machine string) error {
@@ -454,10 +502,15 @@ func (s *Session) installPackages(ctx context.Context, machine string) error {
 		return nil
 	}
 	var mode []string
-	if s.payload != nil {
+	switch {
+	case s.closure:
+		mode = []string{images.PackagesResident, s.payload.SHA256}
+	case s.payload != nil:
 		mode = []string{images.PackagesResident}
 	}
-	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...); err != nil {
+	if err := s.timed(lanePackages, "packages", machine, func() error {
+		return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...)
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("installed the packages", "machine", machine)
@@ -468,7 +521,9 @@ func (s *Session) registerClosure(ctx context.Context, machine string) error {
 	if !s.inPlace() || s.payload == nil || !s.closure {
 		return nil
 	}
-	if err := s.Scripts.Provision(ctx, s.exec(machine), images.PhaseLoader); err != nil {
+	if err := s.timed(laneLoader, "loader", machine, func() error {
+		return s.Scripts.Provision(ctx, s.exec(machine), images.PhaseLoader)
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("registered the payload's closure with the loader", "machine", machine)
@@ -479,16 +534,12 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 	run := s.exec(machine)
 	var payload string
 	if s.payload != nil {
-		if err := s.mountPayload(ctx, machine, run); err != nil {
-			return err
-		}
-		if err := s.Scripts.EnablePayloadPlugins(ctx, run, s.payload.SHA256); err != nil {
-			return err
-		}
 		payload = s.payload.SHA256
 	}
 	if s.inPlace() {
-		if err := s.Scripts.Provision(ctx, run, images.PhaseTools); err != nil {
+		if err := s.timed(laneTools, "tools.provision", machine, func() error {
+			return s.Scripts.Provision(ctx, run, images.PhaseTools)
+		}); err != nil {
 			return err
 		}
 		s.Log.Info("provisioned", "machine", machine)
@@ -500,17 +551,89 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 			return err
 		}
 	}
-	if err := s.Scripts.StagePlugins(ctx, run); err != nil {
+	if err := s.timed(laneTools, "plugins.stage", machine, func() error {
+		return s.Scripts.StagePlugins(ctx, run, payload)
+	}); err != nil {
 		return err
 	}
-	if err := s.Scripts.Install(ctx, run, token, payload); err != nil {
+	if err := s.timed(laneTools, "tools.install", machine, func() error {
+		return s.Scripts.Install(ctx, run, token, payload)
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("installed the tools", "machine", machine, "stamp", s.Stamp[:12])
 	return nil
 }
 
-func (s *Session) mountPayload(ctx context.Context, machine string, run images.Exec) (err error) {
+type payloadStage func(ctx context.Context, machine string, run images.Exec) error
+
+func (s *Session) payloadSource(ctx context.Context, machine string) (payloadStage, error) {
+	switch {
+	case s.payload == nil:
+		return nil, nil
+	case s.payload.Path != "":
+		return s.streamPayload, nil
+	}
+	var source images.PayloadURL
+	if err := s.timed(laneMain, "payload.url", machine, func() error {
+		var err error
+		source, err = s.payloadURL(ctx)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, machine string, run images.Exec) error {
+		if err := s.timed(laneMount, "payload.fetch", machine, func() error {
+			return s.Scripts.FetchPayload(ctx, run, source, s.payload.SHA256, s.payload.Size)
+		}); err != nil {
+			return err
+		}
+		s.Log.Info("fetched the payload", "sha256", s.payload.SHA256[:12])
+		return nil
+	}, nil
+}
+
+func (s *Session) payloadURL(ctx context.Context) (images.PayloadURL, error) {
+	ctx, cancel := context.WithTimeout(ctx, urlCommandTimeout)
+	defer cancel()
+	command := s.payload.URLCommand
+	cmd := exec.CommandContext(ctx, s.Config.ScriptPath(command[0]), slices.Concat(command[1:], []string{s.payload.SHA256, strconv.FormatInt(s.payload.Size, 10)})...)
+	cmd.Dir = filepath.Dir(s.Config.Path)
+	cmd.WaitDelay = urlCommandWaitDelay
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return images.PayloadURL{}, fmt.Errorf("payload url_command %s: %w", command[0], err)
+	}
+	line, _, more := strings.Cut(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if more {
+		return images.PayloadURL{}, fmt.Errorf("payload url_command %s printed more than one line", command[0])
+	}
+	source, err := images.ParsePayloadURL(line)
+	if err != nil {
+		return images.PayloadURL{}, fmt.Errorf("payload url_command %s: %w", command[0], err)
+	}
+	return source, nil
+}
+
+func (s *Session) mountPayload(ctx context.Context, machine string, stage payloadStage) error {
+	if s.payload == nil {
+		return nil
+	}
+	run := s.exec(machine)
+	if err := stage(ctx, machine, run); err != nil {
+		return err
+	}
+	if err := s.timed(laneMount, "payload.mount", machine, func() error {
+		return s.Scripts.Provision(ctx, run, images.PhasePayload, s.payload.SHA256, s.Scripts.Fingerprint())
+	}); err != nil {
+		return err
+	}
+	s.Log.Info("mounted the payload", "machine", machine, "sha256", s.payload.SHA256[:12])
+	return nil
+}
+
+func (s *Session) streamPayload(ctx context.Context, machine string, run images.Exec) (err error) {
 	// O_NONBLOCK keeps a FIFO from blocking the open until a writer appears, so the fstat can reject it.
 	image, err := os.OpenFile(s.Config.ScriptPath(s.payload.Path), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -530,18 +653,15 @@ func (s *Session) mountPayload(ctx context.Context, machine string, run images.E
 	if owner := info.Sys().(*syscall.Stat_t).Uid; int(owner) != os.Getuid() {
 		return fmt.Errorf("open payload: %s is owned by uid %d, not by this user (uid %d)", image.Name(), owner, os.Getuid())
 	}
-	if err = s.Scripts.StagePayload(ctx, run, image, s.payload.SHA256); err != nil {
-		return err
-	}
-	if err = s.Scripts.Provision(ctx, run, images.PhasePayload, s.payload.SHA256, s.Scripts.Fingerprint()); err != nil {
-		return err
-	}
-	s.Log.Info("mounted the payload", "machine", machine, "sha256", s.payload.SHA256[:12])
-	return nil
+	return s.timed(laneMount, "payload.stage", machine, func() error {
+		return s.Scripts.StagePayload(ctx, run, image, s.payload.SHA256)
+	})
 }
 
 func (s *Session) publish(ctx context.Context, machine string) error {
-	if err := s.Scripts.Publish(ctx, s.exec(machine), s.Stamp); err != nil {
+	if err := s.timed(lanePublish, "tools.publish", machine, func() error {
+		return s.Scripts.Publish(ctx, s.exec(machine), s.Stamp)
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("published the tools", "machine", machine, "stamp", s.Stamp[:12])
@@ -571,7 +691,10 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.run(ctx, machine, CheckoutScript(root, s.Config.Repository, record.Source, s.profile.Checkout == config.Shallow), strings.NewReader(token+"\n")); err != nil {
+	if err := s.timed(laneCheckout, "checkout", machine, func() error {
+		_, err := s.run(ctx, machine, CheckoutScript(root, s.Config.Repository, record.Source, s.profile.Checkout == config.Shallow), strings.NewReader(token+"\n"))
+		return err
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("checked out", "machine", machine, "ref", record.Source.Ref, "head", record.Source.Head)
@@ -579,7 +702,10 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 }
 
 func (s *Session) prepare(ctx context.Context, record *Record, env map[string]string) error {
-	if _, err := s.run(ctx, record.Machine, RefreshScript(s.ProjectRoot(), ExportEnv(env), s.profile.Prepare), nil); err != nil {
+	if err := s.timed(laneCheckout, "prepare", record.Machine, func() error {
+		_, err := s.run(ctx, record.Machine, RefreshScript(s.ProjectRoot(), ExportEnv(env), s.profile.Prepare), nil)
+		return err
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("prepared", "machine", record.Machine)
@@ -587,7 +713,9 @@ func (s *Session) prepare(ctx context.Context, record *Record, env map[string]st
 }
 
 func (s *Session) configure(ctx context.Context, record *Record, env map[string]string) error {
-	if err := s.Scripts.Configure(ctx, s.exec(record.Machine), env); err != nil {
+	if err := s.timed(laneConfigure, "configure", record.Machine, func() error {
+		return s.Scripts.Configure(ctx, s.exec(record.Machine), env)
+	}); err != nil {
 		return err
 	}
 	s.Log.Info("configured", "machine", record.Machine)
@@ -614,16 +742,32 @@ func (s *Session) enroll(ctx context.Context, held *state.Held, record *Record) 
 	if s.Enroller == nil {
 		return nil
 	}
-	node, err := s.Enroller.Enroll(ctx, held, runner{s, record.Machine})
-	record.Tailnet = node
-	return err
+	return s.timed(laneEnroll, "tailnet.enroll", record.Machine, func() error {
+		node, err := s.Enroller.Enroll(ctx, held, runner{s, record.Machine})
+		record.Tailnet = node
+		return err
+	})
 }
 
 func (s *Session) connect(ctx context.Context, record *Record) (*Result, error) {
-	target, err := s.Provider.SSHTarget(ctx, record.Machine)
+	target, err := s.sshTarget(ctx, record.Machine)
 	if err != nil {
 		return nil, err
 	}
+	return s.deliverTarget(record, target)
+}
+
+func (s *Session) sshTarget(ctx context.Context, machine string) (providers.Target, error) {
+	var target providers.Target
+	err := s.timed(laneSSH, "ssh.target", machine, func() error {
+		var err error
+		target, err = s.Provider.SSHTarget(ctx, machine)
+		return err
+	})
+	return target, err
+}
+
+func (s *Session) deliverTarget(record *Record, target providers.Target) (*Result, error) {
 	fragment := s.State.SSH(record.Name)
 	if err := state.Write(fragment, SSHFragment(record.Name, target)); err != nil {
 		return nil, err
@@ -679,6 +823,7 @@ func (s *Session) discard(ctx context.Context, machine, owner string) error {
 }
 
 func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
+	s.begin()
 	held, err := s.State.Hold(name)
 	if err != nil {
 		return nil, err
