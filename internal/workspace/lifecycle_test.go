@@ -44,6 +44,7 @@ const (
 	packagesPhase = "sudo bash -s packages"
 	toolsPhase    = "sudo bash -s tools"
 	payloadPhase  = "sudo --preserve-env=PATH bash -s payload "
+	loaderPhase   = "sudo bash -s loader"
 	mergesPlugins = "enable-payload-plugins "
 	stagesPayload = "stage-payload "
 	payloadBytes  = "hsqs squashfs payload bytes"
@@ -58,6 +59,7 @@ const (
 	debTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.deb, sha256: " + sha + ", format: deb, bins: { tailscale: /usr/bin/tailscale, tailscaled: /usr/sbin/tailscaled } }\n"
 	cliTailnet    = "  - { name: tailscale, version: 1.90.0, url: https://example.com/tailscale.tgz, sha256: " + sha + ", format: tar.gz, bins: { tailscale: tailscale/tailscale } }\n"
 	configureEnv  = "configure:\n  env: [WEB_PORT]\n"
+	closureApt    = "apt:\n  install: [openssh-server, libnss3]\n  payload:\n    resident: [bubblewrap]\n    closure: [libnss3]\n    bins: [certutil]\n"
 	imaged        = "version: 1\nimage:\n  name: agent-host\n  base: ubuntu:24.04@sha256:" + sha + "\n  user: agent\n  workspaceDir: /workspaces\nconfigure:\n  env: [WEB_PORT]\n"
 	sha           = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3"
 	commit        = "008173c23f95b170204355c12626cb5a965d779a"
@@ -350,6 +352,15 @@ func newPayloadHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	return build(t, false, inventory, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+}
+
+func newClosureHarness(t *testing.T) *harness {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agent.sqfs")
+	if err := os.WriteFile(path, []byte(payloadBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s } }", path, sha), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
 }
 
 func build(t *testing.T, withTailnet bool, tools, machineSpec string, facts providers.Traits) *harness {
@@ -1774,5 +1785,61 @@ func TestDestroyRefusesALegacySpareOwnershipLabel(t *testing.T) {
 	}
 	if _, found := h.record("ws-1"); !found {
 		t.Fatal("the legacy workspace record was removed")
+	}
+}
+
+func TestTheClosureLoaderRunsOnceAfterThePackagesAndTheToolInstall(t *testing.T) {
+	tests := []struct {
+		name    string
+		release []string
+	}{
+		{name: "the packages finish first", release: []string{packagesPhase, installs}},
+		{name: "the tool install finishes first", release: []string{installs, packagesPhase}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newClosureHarness(t)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
+			loading, preparing, configuring := h.machine.hold(t, loaderPhase), h.machine.hold(t, prepares), h.machine.hold(t, configures)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			upstream[packagesPhase].awaitEntered(t)
+			upstream[installs].awaitEntered(t)
+			loading.stillParked(t, "while the packages and the tool install were still running")
+			upstream[tt.release[0]].release <- providers.Result{}
+			loading.stillParked(t, "once only "+tt.release[0]+" had finished")
+			upstream[tt.release[1]].release <- providers.Result{}
+			loading.awaitEntered(t)
+			preparing.stillParked(t, "while the loader was still registering the closure")
+			configuring.stillParked(t, "while the loader was still registering the closure")
+			loading.release <- providers.Result{}
+			preparing.awaitEntered(t)
+			preparing.release <- providers.Result{}
+			configuring.awaitEntered(t)
+			configuring.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, packagesPhase+" resident", loaderPhase, prepares, publishes)
+			h.ordered(0, installs, loaderPhase, configures, publishes)
+			if h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 || h.machine.ran("ws-1", packagesPhase+" full") != 0 {
+				t.Errorf("the create ran the loader %d times and the resident packages %d times: %q", h.machine.ran("ws-1", loaderPhase), h.machine.ran("ws-1", packagesPhase+" resident"), h.machine.scripts["ws-1"])
+			}
+		})
+	}
+}
+
+func TestAPayloadWithoutAClosureNeverRunsTheLoader(t *testing.T) {
+	h := newPayloadHarness(t)
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.machine.ran("ws-1", loaderPhase) != 0 {
+		t.Errorf("a payload without apt.payload registered a closure: %q", h.machine.scripts["ws-1"])
 	}
 }

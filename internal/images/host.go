@@ -17,6 +17,7 @@ const (
 	PayloadRoot  = "/opt/cc-remote/payload"
 	PayloadStore = "/var/lib/cc-remote/payload"
 	PackPath     = "/var/lib/cc-remote/build/payload.sqfs"
+	ClosurePath  = "/opt/cc-remote/closure"
 )
 
 const (
@@ -24,7 +25,11 @@ const (
 	PhasePackages      = "packages"
 	PhaseTools         = "tools"
 	PhasePayload       = "payload"
+	PhaseLoader        = "loader"
 	PhasePack          = "pack"
+
+	PackagesFull     = "full"
+	PackagesResident = "resident"
 )
 
 const stagePlugins = `set -eu

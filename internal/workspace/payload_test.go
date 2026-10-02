@@ -176,18 +176,18 @@ func TestBuildPayloadPacksTheFullInventoryAndRemovesTheMachine(t *testing.T) {
 				t.Errorf("wrote %q, want %q", out.String(), provider.payload)
 			}
 			pack := "provision pack " + scripts.Fingerprint()
-			steps := []string{"provision packages", "provision tools", "stage plugins", "plugins install", "plugins natives", "plugins verify", pack}
+			steps := []string{"provision packages full", "provision tools", "stage plugins", "plugins install", "plugins natives", "plugins verify", pack}
 			if !slices.Equal(machine.steps, steps) {
 				t.Errorf("steps = %q, want %q", machine.steps, steps)
 			}
 			stdins := map[string]string{
-				"provision packages": string(scripts.ProvisionScript),
-				"provision tools":    string(scripts.ProvisionScript),
-				"stage plugins":      string(scripts.Plugins),
-				"plugins install":    tt.install,
-				"plugins natives":    "",
-				"plugins verify":     "",
-				pack:                 string(scripts.ProvisionScript),
+				"provision packages full": string(scripts.ProvisionScript),
+				"provision tools":         string(scripts.ProvisionScript),
+				"stage plugins":           string(scripts.Plugins),
+				"plugins install":         tt.install,
+				"plugins natives":         "",
+				"plugins verify":          "",
+				pack:                      string(scripts.ProvisionScript),
 			}
 			if !maps.Equal(machine.stdins, stdins) {
 				t.Errorf("stdins = %q, want %q", machine.stdins, stdins)

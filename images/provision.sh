@@ -12,6 +12,14 @@ tool_dir=/opt/cc-remote/tools
 bin_dir=/usr/local/bin
 payload_root=/opt/cc-remote/payload
 payload_store=/var/lib/cc-remote/payload
+{{- with .Closure}}
+closure_root=/opt/cc-remote/closure
+closure_loader_conf=/etc/ld.so.conf.d/zz-cc-remote-closure.conf
+closure_fonts_conf=/etc/fonts/conf.d/99-cc-remote-closure.conf
+closure_lock=/var/lib/cc-remote/ldconfig.lock
+build_dir=/var/lib/cc-remote/build
+closure_packages=({{range $i, $name := .Closure}}{{if $i}} {{end}}{{q $name}}{{end}})
+{{- end}}
 prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)
 tmp_dir="$(mktemp -d)"
 trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
@@ -55,6 +63,60 @@ provision_prerequisites() {
   apt-get install -y -qq --no-install-recommends "${prerequisites[@]}" > /dev/null
 }
 
+{{- with .Closure}}
+
+installed_packages() {
+  dpkg-query -W -f '${db:Status-Abbrev}\t${Package}\n'
+}
+
+closure_package() {
+  local package
+  for package in "${closure_packages[@]}"; do
+    if [ "$package" = "$1" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+resident_packages() {
+  local package
+{{- if .Resident}}
+  printf '%s\n'{{range .Resident}} {{q .}}{{end}}
+{{- end}}
+  for package in "$@"; do
+    if ! closure_package "$package"; then
+      printf '%s\n' "$package"
+    fi
+  done
+}
+
+provision_packages() {
+  local mode="${1:-full}" status package shadowed=""
+  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages
+  case "$mode" in
+    full | resident) ;;
+    *)
+      echo "provision: packages takes full or resident, not $mode" >&2
+      exit 2
+      ;;
+  esac
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
+  packages+=("${t64_packages[@]}")
+  if [ "$mode" = resident ]; then
+    mapfile -t packages < <(resident_packages "${packages[@]}")
+    apt-get install -y -qq --no-install-recommends "${packages[@]}" > /dev/null
+  else
+    install -d -m 0755 "$build_dir"
+    resident_packages "${packages[@]}" > "$build_dir/seeds"
+    installed_packages > "$build_dir/packages.before"
+    apt-get install -y -qq --no-install-recommends "${packages[@]}" > /dev/null
+    installed_packages > "$build_dir/packages.after"
+  fi
+{{- else}}
+
 provision_packages() {
   local -a t64_packages
   export DEBIAN_FRONTEND=noninteractive
@@ -62,6 +124,7 @@ provision_packages() {
   mapfile -t t64_packages < <(t64{{range .Apt.T64}} {{q .}}{{end}})
   apt-get install -y -qq --no-install-recommends "${prerequisites[@]}"{{range .Apt.Install}} {{q .}}{{end}} \
     "${t64_packages[@]}" > /dev/null
+{{- end}}
 {{- range .Apt.Remove}}
   if dpkg -s {{q .}} > /dev/null 2>&1; then
     apt-get remove -y -qq {{q .}} > /dev/null
@@ -81,8 +144,88 @@ provision_packages() {
 {{- end}}
 {{- end}}
 {{- end}}
+{{- with .Closure}}
+  if [ "$mode" = resident ]; then
+    while IFS=$'\t' read -r status package; do
+      if [ "${status#ii}" != "$status" ] && closure_package "$package"; then
+        shadowed="$shadowed $package"
+      fi
+    done < <(installed_packages)
+    if [ -n "$shadowed" ]; then
+      echo "cc-remote: the resident install left closure packages installed:$shadowed; their system copies would shadow the payload, so move them to apt.payload.resident" >&2
+      exit 1
+    fi
+  fi
+{{- end}}
   rm -rf /var/lib/apt/lists/*
 }
+
+{{- with .Closure}}
+
+provision_loader() {
+  install -d -m 0755 "$(dirname "$closure_lock")"
+  flock "$closure_lock" ldconfig
+}
+
+closure_link() {
+  if [ "$(readlink "$1")" != "$2" ]; then
+    echo "cc-remote: $1 is not a link to $2, so the payload cannot own it" >&2
+    exit 1
+  fi
+}
+
+closure_project() {
+  local target="$closure_root$1"
+  if [ ! -d "$target" ]; then
+    echo "cc-remote: the closure has no directory $1 to project" >&2
+    exit 1
+  fi
+  if [ -L "$1" ]; then
+    closure_link "$1" "$target"
+    return
+  fi
+  if [ -e "$1" ]; then
+    echo "cc-remote: $1 exists and is not the closure's link, so the payload cannot project it" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$1")"
+  ln -s "$target" "$1"
+}
+
+write_conf() {
+  local path="$1" content="$2"
+  if [ -L "$path" ] || { [ -e "$path" ] && [ "$(cat "$path")" != "$content" ]; }; then
+    echo "cc-remote: $path exists and is not the closure configuration this payload writes" >&2
+    exit 1
+  fi
+  install -d -m 0755 "$(dirname "$path")"
+  printf '%s\n' "$content" > "$path.tmp"
+  chmod 0644 "$path.tmp"
+  mv -f "$path.tmp" "$path"
+}
+
+fonts_conf() {
+  cat <<XML
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>$closure_root/usr/share/fonts</dir>
+  <cachedir>$closure_root/var/cache/fontconfig</cachedir>
+</fontconfig>
+XML
+}
+
+provision_capture() {
+  cat > "$tmp_dir/closure.json" <<'JSON'
+{{json .}}
+JSON
+  cat > "$tmp_dir/capture.py" <<'PY'
+{{template "capture.py"}}PY
+  cat > "$tmp_dir/loader.py" <<'PY'
+{{template "loader.py"}}PY
+  python3 "$tmp_dir/capture.py" "$tmp_dir/closure.json" / "$closure_root" "$build_dir" "$1" "$tmp_dir/loader.py"
+}
+{{- end}}
 
 provision_tools() {
   :
@@ -170,9 +313,12 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
     verify "$sha256" "$device"
   else
     verify "$sha256" "$image"
-    mount -t squashfs -o ro,loop "$image" "$dir"
+    mount -t squashfs -o ro{{if .Closure}},nosuid,nodev{{end}},loop "$image" "$dir"
   fi
 done
+{{- if .Closure}}
+ldconfig
+{{- end}}
 SH
   mkdir -p "$payload"
   install -m 0755 "$tmp_dir/payload-mount.sh" /opt/cc-remote/payload-mount.sh
@@ -188,7 +334,7 @@ SH
       device="$(findmnt -no SOURCE "$payload")"
       verify_payload "$sha256" "$device"
     else
-      mount -t squashfs -o ro,loop "$image" "$payload"
+      mount -t squashfs -o ro{{if .Closure}},nosuid,nodev{{end}},loop "$image" "$payload"
     fi
   ) 9> "$payload_store/.lock"
   if ! jq -se 'length == 1 and (.[0] | type == "object")' "$payload/cc-remote-payload.json" > /dev/null; then
@@ -217,6 +363,17 @@ SH
   fi
 {{- range .SystemTrees}}
   expose {{.Kind}} {{.Requirement}} {{q .Path}}
+{{- end}}
+{{- with .Closure}}
+  closure_link "$closure_root" "$payload$closure_root"
+{{- range .Links}}
+  closure_link {{q .Path}} "$closure_root/"{{q .Target}}
+{{- end}}
+{{- range .Projections}}
+  closure_project {{q .}}
+{{- end}}
+  write_conf "$closure_loader_conf" "$closure_root/usr/lib/$(uname -m)-linux-gnu"
+  write_conf "$closure_fonts_conf" "$(fonts_conf)"
 {{- end}}
   drain_artifacts
 }
@@ -264,6 +421,9 @@ provision_pack() {
   apt-get install -y -qq --no-install-recommends squashfs-tools > /dev/null
   user_home="$(passwd_home)"
   version="$(os_version)"
+{{- if .Closure}}
+  provision_capture "$user_home"
+{{- end}}
 {{- range .SystemTrees}}
   pack_path {{.Requirement}} {{q .Path}}
 {{- end}}
@@ -282,12 +442,17 @@ provision_pack() {
 
 case "$phase" in
   prerequisites) provision_prerequisites ;;
+{{- if .Closure}}
+  packages) provision_packages "${2:-}" ;;
+  loader) provision_loader ;;
+{{- else}}
   packages) provision_packages ;;
+{{- end}}
   tools) provision_tools ;;
   payload) provision_payload "${2:-}" "${3:-}" ;;
   pack) provision_pack "${2:-}" ;;
   *)
-    echo "usage: provision.sh prerequisites|packages|tools|payload SHA256 FINGERPRINT|pack FINGERPRINT" >&2
+    echo "usage: provision.sh prerequisites|packages{{if .Closure}} [full|resident]|loader{{end}}|tools|payload SHA256 FINGERPRINT|pack FINGERPRINT" >&2
     exit 2
     ;;
 esac

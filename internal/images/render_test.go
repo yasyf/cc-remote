@@ -413,6 +413,7 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 		{"image name", func(i *Inventory) { i.Image.Name = "other" }, false, false},
 		{"image layer", func(i *Inventory) { i.Image.Layer = append(i.Image.Layer, "RUN true") }, false, true},
 		{"prepare step", func(i *Inventory) { i.Prepare = []string{"true"} }, true, false},
+		{"apt payload", func(i *Inventory) { i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}} }, true, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -429,6 +430,58 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 				t.Errorf("Sprites ready stamp moved = %v, want %v", moved, tt.toolsMove)
 			}
 		})
+	}
+}
+
+func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
+	plain := validInventory()
+	payload := validInventory()
+	payload.Apt.Payload = &AptPayload{Resident: []string{"bubblewrap"}, Closure: []string{"libnss3"}, Bins: []string{"certutil"}, Projections: []string{"/usr/share/X11/xkb"}}
+	for name, inv := range map[string]Inventory{"plain": plain, "image": payload} {
+		scripts, err := Render(inv, "agents")
+		if err != nil {
+			t.Fatalf("Render %s: %v", name, err)
+		}
+		context, err := RenderImage(inv)
+		if err != nil {
+			t.Fatalf("RenderImage %s: %v", name, err)
+		}
+		for _, rendered := range [][]byte{context.Provision, context.Dockerfile} {
+			if bytes.Contains(rendered, []byte("closure")) || bytes.Contains(rendered, []byte("nosuid")) {
+				t.Errorf("the %s image context renders the closure", name)
+			}
+		}
+		if name == "plain" {
+			for _, rendered := range [][]byte{scripts.ProvisionScript, scripts.Plugins} {
+				if bytes.Contains(rendered, []byte("closure")) || bytes.Contains(rendered, []byte("nosuid")) || bytes.Contains(rendered, []byte("loader")) {
+					t.Errorf("an inventory without apt.payload renders the closure")
+				}
+			}
+			if !bytes.Contains(scripts.ProvisionScript, []byte("mount -t squashfs -o ro,loop ")) || !bytes.Contains(scripts.ProvisionScript, []byte("  packages) provision_packages ;;\n")) {
+				t.Errorf("an inventory without apt.payload changed the payload mount or the packages phase")
+			}
+		}
+	}
+	with, err := Render(payload, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"closure_packages=('libnss3')\n",
+		"  printf '%s\\n' 'bubblewrap'\n",
+		"  expose link required '/opt/cc-remote/closure'\n  expose copy required '/usr/local/bin/certutil'\n  expose copy required '/usr/local/share/mime'\n  expose copy required '/usr/local/share/glib-2.0/schemas'\n  expose copy required '/usr/local/share/icons'\n",
+		"  closure_link \"$closure_root\" \"$payload$closure_root\"\n  closure_link '/usr/local/bin/certutil' \"$closure_root/\"'usr/bin/certutil'\n",
+		"  closure_project '/usr/share/X11/xkb'\n  write_conf \"$closure_loader_conf\"",
+		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\ndone\nldconfig\nSH\n",
+		"  pack_path required '/opt/cc-remote/closure'\n  pack_path required '/usr/local/bin/certutil'\n",
+		"  packages) provision_packages \"${2:-}\" ;;\n  loader) provision_loader ;;\n",
+	} {
+		if !bytes.Contains(with.ProvisionScript, []byte(want)) {
+			t.Errorf("provision.sh with apt.payload lacks\n%s", want)
+		}
+	}
+	if !bytes.Contains(with.Plugins, []byte("  verify_closure_bin 'certutil'\n")) {
+		t.Errorf("plugins.sh with apt.payload does not verify the exposed bins")
 	}
 }
 

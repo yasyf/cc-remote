@@ -33,7 +33,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | Section | Fields | Meaning |
 | --- | --- | --- |
 | `image` | `name`, `base`, `user`, `workspaceDir`, `layer` | Optional Namespace image. `base` requires an `@sha256:` digest; `workspaceDir` is an absolute path. `layer` adds single-line Dockerfile instructions after provisioning and forbids `FROM`, continuations, and heredocs. |
-| `apt` | `install`, `t64`, `remove` | Root package lists. `t64` accommodates the distribution's package suffix. |
+| `apt` | `install`, `t64`, `remove`, `payload` | Root package lists. `t64` accommodates the distribution's package suffix. `payload` is optional and applies only to machines mounting a verified payload. `resident` names the packages every machine installs with their maintainer scripts; `closure` names the packages the payload build captures from a full install into `/opt/cc-remote/closure`, which a machine loads through `ld.so.conf.d` and `fonts/conf.d` entries; `bins` are closure executables linked into `/usr/local/bin`; `fonts` are families readiness proves with `fc-match`; `consumers` are home-relative or `/opt/cc-remote` executables whose libraries readiness lists with the real loader; `projections` are closure directories linked at their compiled-in paths. Without `payload`, the rendered scripts are unchanged. |
 | `system` | Artifact list | Root artifacts under `/opt/cc-remote/tools`, linked into `/usr/local/bin`. |
 | `tools` | Artifact list | User artifacts under `$HOME/.local/share/cc-remote/tools`, or their explicit `dest`, linked into `$HOME/.local/bin`. |
 | `links` | Executable names | Adds user links to installed system executables. |

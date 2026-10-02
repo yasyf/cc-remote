@@ -1,0 +1,123 @@
+version: 1
+
+apt:
+  install:
+    - git-lfs
+    - openssh-server
+    - tmux
+    - tzdata
+  t64:
+    - libasound2
+  remove:
+    - watchman
+  payload:
+    resident:
+      - openssh-server
+      - git-lfs
+      - ruby
+      - tmux
+      - tzdata
+      - bubblewrap
+      - dbus-user-session
+      - dconf-service
+      - libpam-systemd
+      - systemd-sysv
+      - fontconfig-config
+    closure:
+      - libclosure-01
+      - libclosure-02
+      - libclosure-03
+      - libclosure-04
+      - libclosure-05
+      - libclosure-06
+      - libclosure-07
+      - libclosure-08
+      - libclosure-09
+      - libclosure-10
+      - libclosure-11
+      - libclosure-12
+      - libclosure-13
+      - libclosure-14
+      - libclosure-15
+      - libclosure-16
+      - libclosure-17
+      - libclosure-18
+      - libclosure-19
+      - libclosure-20
+      - libclosure-21
+      - libclosure-22
+      - libclosure-23
+      - libclosure-24
+      - libclosure-25
+      - libclosure-26
+      - libclosure-27
+      - libclosure-28
+      - libclosure-29
+      - libclosure-30
+      - libclosure-31
+      - libclosure-32
+      - libclosure-33
+      - libclosure-34
+      - libclosure-35
+      - libclosure-36
+      - libclosure-37
+      - libclosure-38
+      - libclosure-39
+      - libclosure-40
+      - libclosure-41
+      - libclosure-42
+      - libclosure-43
+      - libclosure-44
+      - libclosure-45
+      - libclosure-46
+      - libclosure-47
+      - libclosure-48
+      - libclosure-49
+      - libclosure-50
+      - libclosure-51
+      - libclosure-52
+      - libclosure-53
+      - libclosure-54
+      - libclosure-55
+      - libclosure-56
+      - libclosure-57
+      - libclosure-58
+      - libclosure-59
+      - libclosure-60
+      - libclosure-61
+      - libclosure-62
+      - libclosure-63
+      - libclosure-64
+      - libclosure-65
+      - libclosure-66
+      - libclosure-67
+      - libclosure-68
+      - libclosure-69
+      - libclosure-70
+      - libclosure-71
+      - libclosure-72
+      - libclosure-73
+      - libclosure-74
+      - libclosure-75
+      - libclosure-76
+      - libclosure-77
+      - libclosure-78
+      - libclosure-79
+      - libclosure-80
+      - libclosure-81
+      - libclosure-82
+      - libclosure-83
+      - libclosure-84
+      - libclosure-85
+      - libclosure-86
+      - libclosure-87
+      - libclosure-88
+      - libclosure-89
+      - libclosure-90
+      - libclosure-91
+      - libclosure-92
+    bins: [certutil, pk12util, modutil, fc-list, fc-match, fc-cache]
+    fonts: ["Noto Sans CJK JP", "Noto Color Emoji", "Liberation Sans", "FreeSans"]
+    consumers:
+      - .agent-browser/browsers/chrome-154.0.8037.92/chrome-linux64/chrome
+      - .cache/codex-runtimes/codex-primary-runtime/office/program/soffice.bin
