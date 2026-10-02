@@ -404,7 +404,7 @@ verify_payload() {
 provision_payload() {
   local sha256="${1:?payload needs the image sha256}" fingerprint="${2:?payload needs the tools fingerprint}"
 {{- if .Closure}}
-  local packages="${3:?payload needs the packages archive sha256}"
+  local packages_sha256="${3:?payload needs the packages archive sha256}"
 {{- end}}
   local image="$payload_store/$sha256.sqfs" payload="$payload_root/$sha256" user_home version mismatch device
 {{- if .Closure}}
@@ -493,7 +493,7 @@ SH
   fi
   user_home="$(passwd_home)"
   version="$(os_version)"
-  mismatch="$(jq -r --arg dir "$payload" --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages"{{end}} '
+  mismatch="$(jq -r --arg dir "$payload" --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages_sha256"{{end}} '
     . as $have
     | {schemaVersion: {{if .Closure}}2{{else}}1{{end}}, tools: $tools, home: $home, arch: $arch, os: $os{{if .Closure}}, packages: $packages{{end}}}
     | to_entries[]
@@ -570,7 +570,7 @@ pack_native() {
 }
 
 provision_pack() {
-  local fingerprint="${1:?pack needs the tools fingerprint}" user_home version{{if .Closure}} packages{{end}}
+  local fingerprint="${1:?pack needs the tools fingerprint}" user_home version{{if .Closure}} packages_sha256{{end}}
   local -a paths=()
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
@@ -580,8 +580,8 @@ provision_pack() {
 {{- if .Closure}}
   provision_capture "$user_home"
   tar -C "$debs_dir" --numeric-owner -cf "$packages_pack" .
-  packages="$(sha256sum "$packages_pack")"
-  packages="${packages%% *}"
+  packages_sha256="$(sha256sum "$packages_pack")"
+  packages_sha256="${packages_sha256%% *}"
 {{- end}}
 {{- range .SystemTrees}}
   pack_path {{.Requirement}} {{q .Path}}
@@ -592,7 +592,7 @@ provision_pack() {
 {{- range .Natives}}
   pack_native {{under "user_home" .Dir}} {{q .Bin}}
 {{- end}}
-  jq -n --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages"{{end}} \
+  jq -n --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages_sha256"{{end}} \
     '{schemaVersion: {{if .Closure}}2{{else}}1{{end}}, tools: $tools, home: $home, arch: $arch, os: $os{{if .Closure}}, packages: $packages{{end}}}' > "$tmp_dir/cc-remote-payload.json"
   install -d /var/lib/cc-remote/build
   tar -C / --numeric-owner --exclude=.in_use --exclude=.orphaned_at --exclude=.lock -cpf - "${paths[@]}" -C "$tmp_dir" cc-remote-payload.json \

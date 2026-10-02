@@ -1005,7 +1005,7 @@ func TestAPayloadIsStagedAndMountedBeforeTheToolsAndHandedToTheInstall(t *testin
 	if staged := h.machine.stdins["ws-1"][order[0]]; staged != payloadBytes {
 		t.Errorf("the staging read %q on stdin, want the payload file", staged)
 	}
-	if mount := h.machine.scripts["ws-1"][order[1]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint() {
+	if mount := h.machine.scripts["ws-1"][order[1]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
 		t.Errorf("the payload phase ran as %q", mount)
 	}
 	if merge := h.machine.scripts["ws-1"][order[3]]; !strings.HasPrefix(merge, "sh -c ") || !strings.Contains(merge, stages) || !strings.HasSuffix(merge, " "+mergesPlugins+images.PayloadRoot+"/"+sha) {
@@ -1049,7 +1049,7 @@ func TestADirectPayloadIsFetchedOverStdinAndMountedWithoutTheURLLeaking(t *testi
 	if got := h.machine.stdins["ws-1"][order[1]]; got != `url = "`+payloadURL+`"` {
 		t.Errorf("the fetch read %q on stdin, want the curl config carrying the URL", got)
 	}
-	if mount := h.machine.scripts["ws-1"][order[2]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint() {
+	if mount := h.machine.scripts["ws-1"][order[2]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
 		t.Errorf("the payload phase ran as %q", mount)
 	}
 	if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", fetchesPayload) != 1 || h.machine.ran("ws-1", payloadPhase) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
@@ -1172,7 +1172,7 @@ func TestAResumeAtANewStampFetchesTheDirectPayloadAgain(t *testing.T) {
 	if err := os.Remove(recorded + ".args"); err != nil {
 		t.Fatal(err)
 	}
-	drifted := h.drift(strings.NewReplacer("1.8.2", "1.8.3", sha, strings.Repeat("ab", 32)).Replace(inventory))
+	drifted := h.drift(strings.NewReplacer("1.8.2", "1.8.3", sha, strings.Repeat("ab", 32)).Replace(inventory + closureApt))
 	before := len(h.machine.scripts["ws-1"])
 	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
@@ -1294,7 +1294,7 @@ func TestResumeRemountsThePayloadOnlyWhenItsDigestChanged(t *testing.T) {
 				}
 				path = moved
 			}
-			machine.Payload = &config.Payload{Source: config.Source{Path: path, SHA256: tt.sha256}}
+			machine.Payload = &config.Payload{Source: config.Source{Path: path, SHA256: tt.sha256}, Packages: machine.Payload.Packages}
 			h.cfg.Profiles["lean"].Machine["fake"] = machine
 			repaid := h.open()
 			if (repaid.Stamp != h.session.Stamp) != tt.remount {
