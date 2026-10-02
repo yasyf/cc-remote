@@ -396,13 +396,14 @@ def capture():
         if not os.path.isfile(os.path.join(build, record)):
             fatal(f"{build}/{record} is missing, so this machine did not run packages full")
     base = installed(os.path.join(build, "packages.before"))
-    new = installed(os.path.join(build, "packages.after")) - base
+    after = installed(os.path.join(build, "packages.after"))
+    new = after - base
     if not new:
         fatal("packages full installed nothing new, so there is no transaction to capture")
     with open(os.path.join(build, "seeds"), encoding="utf-8") as fh:
         seeds = fh.read().split()
     consumers = resolve_consumers(payload["consumers"])
-    resident = partition(seeds, new, base)
+    resident = partition(seeds, new, base & after)
     if new - resident != closure:
         fatal(f"apt.payload.closure differs from the measured partition: resident or absent {sorted(closure - (new - resident))}, undeclared {sorted((new - resident) - closure)}")
     packages = versions(sorted(closure))

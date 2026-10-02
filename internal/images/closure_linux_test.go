@@ -1135,6 +1135,9 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			h.dpkg.Packages["base-files"].Provides = "base-virtual"
 			h.dpkg.Packages["openssh-server"].Depends += ", libc6 | libfoo1, base-virtual | libfoo1"
 		}},
+		{name: "a base package removed during provisioning is absent from the partition query", mutate: func(h *captureHost) {
+			h.record(map[string]string{"packages.before": "ii \twatchman\n"})
+		}},
 		{name: "a seeded deb artifact keeps its dependencies resident", mutate: func(h *captureHost) {
 			h.dpkg.Packages["orca-ide"] = &fakePackage{Version: "1.4.215", Depends: "libnew1", Files: []string{"/opt/Orca/orca-ide"}}
 			h.dpkg.Packages["libnew1"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew.so.1"}}
