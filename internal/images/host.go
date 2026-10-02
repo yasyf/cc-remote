@@ -3,6 +3,7 @@ package images
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 )
 
 type Exec func(ctx context.Context, argv []string, stdin io.Reader) error
+
+type Capture func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error)
 
 const (
 	PayloadRoot  = "/opt/cc-remote/payload"
@@ -56,6 +59,58 @@ edited="$(mktemp "$settings.XXXXXX")"
 trap 'rm -f "$edited"' EXIT
 jq --slurpfile image "$image" '.enabledPlugins = (.enabledPlugins // {}) + ($image[0].enabledPlugins // {})' "$settings" > "$edited"
 mv "$edited" "$settings"`
+
+const diagnoseMemory = `set -euo pipefail
+root="${1:-}"
+home="${2:-$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
+hierarchy="$root/sys/fs/cgroup"
+amount='^([0-9]+|max)$'
+probe='^[a-z][a-z_]*(:[A-Za-z0-9][A-Za-z0-9._@-]{0,127})?$'
+
+read_amount() {
+  local text
+  text="$(cat "$dir/$1" 2> /dev/null)" || return 0
+  if [[ $text =~ $amount ]]; then
+    printf '%s' "$text"
+  fi
+}
+
+cgroup="$(sed -n 's/^0:://p' "$root/proc/self/cgroup")"
+dir="$hierarchy${cgroup%/}"
+while [ ! -e "$dir/memory.current" ] && [ "$dir" != "$hierarchy" ]; do
+  dir="${dir%/*}"
+done
+events="$(cat "$dir/memory.events" 2> /dev/null)" || events=""
+oom=null
+if [ -r "$root/dev/kmsg" ]; then
+  oom="$({ dd if="$root/dev/kmsg" iflag=nonblock bs=8192 2> /dev/null || true; } \
+    | sed -n 's/^[0-9]*,[0-9]*,[0-9]*,[^;]*;//p' \
+    | { grep -F -e oom-kill -e 'Out of memory' -e 'Killed process' || true; } \
+    | tail -n 20 \
+    | jq -Rsc 'split("\n") | map(select(. != ""))')"
+fi
+progress="$(head -c 160 "$root$home/.cc-remote/verify-progress" 2> /dev/null)" || progress=""
+if [[ ! $progress =~ $probe ]]; then
+  progress=""
+fi
+jq -cn \
+  --arg cgroup "${dir#"$root"}" \
+  --arg current "$(read_amount memory.current)" \
+  --arg max "$(read_amount memory.max)" \
+  --arg peak "$(read_amount memory.peak)" \
+  --arg events "$events" \
+  --argjson oom "$oom" \
+  --arg progress "$progress" \
+  'def amount: if . == "" then null elif . == "max" then . else tonumber end;
+  {
+    cgroup: $cgroup,
+    "memory.current": ($current | amount),
+    "memory.max": ($max | amount),
+    "memory.peak": ($peak | amount),
+    "memory.events": ([$events | splits("\n") | select(test("^[a-z_]+ [0-9]+$")) | split(" ") | {(.[0]): (.[1] | tonumber)}] | add),
+    oom: $oom,
+    progress: (if $progress == "" then null else $progress end)
+  }'`
 
 func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ...string) error {
 	sudo := []string{"sudo"}
@@ -142,6 +197,18 @@ func (s Scripts) Configure(ctx context.Context, exec Exec, env map[string]string
 
 func (s Scripts) Verify(ctx context.Context, exec Exec) error {
 	return runPlugins(ctx, exec, []string{"verify"}, nil, nil)
+}
+
+func (s Scripts) DiagnoseMemory(ctx context.Context, capture Capture) (json.RawMessage, error) {
+	out, err := capture(ctx, []string{"sudo", "bash", "-s"}, strings.NewReader(diagnoseMemory))
+	if err != nil {
+		return nil, fmt.Errorf("diagnose memory: %w", err)
+	}
+	var evidence bytes.Buffer
+	if err := json.Compact(&evidence, out); err != nil {
+		return nil, fmt.Errorf("diagnose memory: the evidence is not JSON: %w", err)
+	}
+	return evidence.Bytes(), nil
 }
 
 func runPlugins(ctx context.Context, exec Exec, args, env []string, stdin io.Reader) error {

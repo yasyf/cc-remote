@@ -247,6 +247,12 @@ func (s *Session) exec(machine string) images.Exec {
 	}
 }
 
+func (s *Session) capture(machine string) images.Capture {
+	return func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
+		return s.execute(ctx, machine, argv, stdin)
+	}
+}
+
 func (s *Session) verifyTailnet(ctx context.Context) error {
 	if s.Enroller == nil {
 		return nil

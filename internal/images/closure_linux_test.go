@@ -1377,6 +1377,7 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 		family   string
 		wantErr  func(home, closure, bins string) string
 		wantLdso func(home, bins, office string) []string
+		progress string
 	}{
 		{
 			name:   "without a closure link the bins only need to be on PATH",
@@ -1384,6 +1385,7 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			wantLdso: func(home, _, office string) []string {
 				return []string{"ld.so " + home + "/.agent-browser/chrome", "ld.so " + office}
 			},
+			progress: "font:0",
 		},
 		{
 			name:   "with a closure link the bins must be its exposed links",
@@ -1392,6 +1394,7 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			wantLdso: func(home, bins, office string) []string {
 				return []string{"ld.so " + bins + "/certutil", "ld.so " + bins + "/fc-match", "ld.so " + home + "/.agent-browser/chrome", "ld.so " + office}
 			},
+			progress: "font:0",
 		},
 		{
 			name:   "a consumer that is not an ELF is fatal",
@@ -1400,6 +1403,7 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			wantErr: func(home, _, _ string) string {
 				return "cc-remote: " + home + "/.agent-browser/chrome is not a little-endian ELF64 file"
 			},
+			progress: "consumer:0",
 		},
 		{
 			name:    "an exposed bin pointing elsewhere is fatal",
@@ -1409,17 +1413,20 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			wantErr: func(_, closure, bins string) string {
 				return "cc-remote: " + bins + "/fc-match does not point at the pinned " + closure + "/usr/bin/fc-match"
 			},
+			progress: "closure_bin:fc-match",
 		},
 		{
-			name:    "a missing library is fatal",
-			env:     []string{"LDSO_MISSING=libmissing.so.9"},
-			family:  "Noto Sans CJK JP",
-			wantErr: func(_, _, _ string) string { return "cannot load libmissing.so.9" },
+			name:     "a missing library is fatal",
+			env:      []string{"LDSO_MISSING=libmissing.so.9"},
+			family:   "Noto Sans CJK JP",
+			wantErr:  func(_, _, _ string) string { return "cannot load libmissing.so.9" },
+			progress: "consumer:0",
 		},
 		{
-			name:    "an inexact font family is fatal",
-			family:  "DejaVu Sans",
-			wantErr: func(_, _, _ string) string { return "cc-remote: fc-match resolves Noto Sans CJK JP to DejaVu Sans" },
+			name:     "an inexact font family is fatal",
+			family:   "DejaVu Sans",
+			wantErr:  func(_, _, _ string) string { return "cc-remote: fc-match resolves Noto Sans CJK JP to DejaVu Sans" },
+			progress: "font:0",
 		},
 	}
 	scripts, err := Render(scriptInventory(), "agents")
@@ -1469,6 +1476,9 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			cmd := exec.Command("bash", filepath.Join(fakes, "plugins.sh"), "verify")
 			cmd.Env = append(append(os.Environ(), "HOME="+home, "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "FAMILY="+tt.family), tt.env...)
 			out, err := cmd.CombinedOutput()
+			if recorded, readErr := os.ReadFile(filepath.Join(home, ".cc-remote", "verify-progress")); readErr != nil || string(recorded) != tt.progress+"\n" {
+				t.Errorf("verify progress = %q, %v, want %q", recorded, readErr, tt.progress)
+			}
 			if tt.wantErr != nil {
 				if want := tt.wantErr(home, closure, bins); exitCode(err) != 1 || !strings.Contains(string(out), want) {
 					t.Fatalf("verify = %v\n%s\nwant exit 1 with %q", err, out, want)

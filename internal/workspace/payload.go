@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/images"
@@ -18,6 +19,7 @@ import (
 const (
 	LabelPayloadBuild = "cc-remote/payload-build"
 	payloadPrefix     = "cc-remote-payload-"
+	diagnoseTimeout   = 30 * time.Second
 )
 
 type Downloader interface {
@@ -78,6 +80,9 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	slog.Info("created the payload build machine", "machine", name)
 	builder := &Session{Provider: provider, Stderr: stderr}
 	built, err := packPayload(ctx, builder.exec(name), downloader, rendered.scripts, githubToken, name, out)
+	if err != nil {
+		diagnosePayloadBuild(ctx, rendered.scripts, builder.capture(name), name)
+	}
 	if err := errors.Join(err, discardPayloadBuild(context.WithoutCancel(ctx), provider, name)); err != nil {
 		return PayloadBuild{}, err
 	}
@@ -107,6 +112,17 @@ func packPayload(ctx context.Context, run images.Exec, downloader Downloader, sc
 		return PayloadBuild{}, err
 	}
 	return PayloadBuild{SHA256: hex.EncodeToString(digest.Sum(nil)), Size: int64(size), Tools: tools, Machine: machine}, nil
+}
+
+func diagnosePayloadBuild(ctx context.Context, scripts images.Scripts, capture images.Capture, machine string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), diagnoseTimeout)
+	defer cancel()
+	evidence, err := scripts.DiagnoseMemory(ctx, capture)
+	if err != nil {
+		slog.Warn("could not read the failed payload build machine's memory evidence before removing it", "machine", machine, "err", err)
+		return
+	}
+	slog.Warn("memory evidence from the failed payload build machine", "machine", machine, "evidence", evidence)
 }
 
 func discardPayloadBuild(ctx context.Context, provider providers.Provider, machine string) error {

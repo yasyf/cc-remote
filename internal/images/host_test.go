@@ -2,6 +2,7 @@ package images
 
 import (
 	"context"
+	"errors"
 	"io"
 	"slices"
 	"strings"
@@ -77,6 +78,49 @@ func TestHostOperations(t *testing.T) {
 			got := r.calls[0]
 			if !slices.Equal(got.argv, tt.want.argv) || got.stdin != tt.want.stdin {
 				t.Errorf("call = %q stdin %q, want %q stdin %q", got.argv, got.stdin, tt.want.argv, tt.want.stdin)
+			}
+		})
+	}
+}
+
+func TestDiagnoseMemoryReturnsCompactEvidence(t *testing.T) {
+	failed := errors.New("sudo on m exited 1: sudo: a password is required")
+	tests := []struct {
+		name    string
+		out     string
+		err     error
+		want    string
+		message string
+	}{
+		{name: "evidence", out: "{\"cgroup\": \"/sys/fs/cgroup\",\n  \"oom\": []}\n", want: `{"cgroup":"/sys/fs/cgroup","oom":[]}`},
+		{name: "a failed run", out: "{}", err: failed, message: "diagnose memory: sudo on m exited 1: sudo: a password is required"},
+		{name: "output that is not JSON", out: "api_key: hunter2\n", message: "diagnose memory: the evidence is not JSON: invalid character 'a' looking for beginning of value"},
+		{name: "no output", message: "diagnose memory: the evidence is not JSON: unexpected end of JSON input"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r recorder
+			capture := func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
+				if err := r.exec(ctx, argv, stdin); err != nil {
+					return nil, err
+				}
+				return []byte(tt.out), tt.err
+			}
+			got, err := Scripts{}.DiagnoseMemory(context.Background(), capture)
+			if want := (call{[]string{"sudo", "bash", "-s"}, diagnoseMemory}); len(r.calls) != 1 || !slices.Equal(r.calls[0].argv, want.argv) || r.calls[0].stdin != want.stdin {
+				t.Errorf("calls = %q, want one %q fed the diagnosis", r.calls, want.argv)
+			}
+			if tt.message != "" {
+				if err == nil || err.Error() != tt.message || got != nil {
+					t.Errorf("DiagnoseMemory = %s, %v, want %q", got, err, tt.message)
+				}
+				if tt.err != nil && !errors.Is(err, tt.err) {
+					t.Errorf("DiagnoseMemory = %v, want it to wrap %v", err, tt.err)
+				}
+				return
+			}
+			if err != nil || string(got) != tt.want {
+				t.Errorf("DiagnoseMemory = %s, %v, want %s", got, err, tt.want)
 			}
 		})
 	}

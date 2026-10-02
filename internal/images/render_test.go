@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -510,6 +511,52 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		if !bytes.Contains(with.Plugins, []byte(want)) {
 			t.Errorf("plugins.sh with apt.payload lacks\n%s", want)
 		}
+	}
+}
+
+func TestPayloadPluginsRecordEachVerifyProbeByName(t *testing.T) {
+	payload := validInventory()
+	payload.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}, Bins: []string{"certutil", "fc-match"}, Fonts: []string{"Noto Sans CJK JP"}, Consumers: []string{".agent-browser/chrome", "/opt/cc-remote/tools/office/soffice.bin"}}
+	scripts, err := Render(payload, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "progress() {\n  mkdir -p \"$state_dir\"\n  printf '%s\\n' \"$1\" > \"$state_dir/verify-progress.partial\"\n  mv -f \"$state_dir/verify-progress.partial\" \"$state_dir/verify-progress\"\n}\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
+		t.Errorf("plugins.sh with apt.payload lacks\n%s", want)
+	}
+	want := []string{
+		"system:uv", "system:claude", "system:codex", "python_system:cc-transcript",
+		"closure_bin:certutil", "closure_bin:fc-match", "consumer:0", "consumer:1", "font:0",
+		"tool:jq", "tool:cookiesync", "link:claude",
+		"marketplaces", "marketplace:market", "plugins", "plugin:hooks@market", "python_user:example-tool", "codex_runtime", "captain_hook",
+	}
+	probe := regexp.MustCompile(`^  (verify_[a-z_]+ |known="\$\(claude_json |plugins="\$\(claude_json )`)
+	name := regexp.MustCompile(`^[a-z][a-z_]*(:[A-Za-z0-9][A-Za-z0-9._@-]{0,127})?$`)
+	lines := strings.Split(string(scripts.Plugins), "\n")
+	names := make([]string, 0, len(want))
+	for i, line := range lines {
+		word, ok := strings.CutPrefix(line, "  progress ")
+		if !ok {
+			continue
+		}
+		recorded := strings.Trim(word, "'")
+		if !name.MatchString(recorded) {
+			t.Errorf("progress %q is not a probe name", word)
+		}
+		if !probe.MatchString(lines[i+1]) {
+			t.Errorf("progress %s precedes %q, which is no probe", word, lines[i+1])
+		}
+		names = append(names, recorded)
+	}
+	if !slices.Equal(names, want) {
+		t.Errorf("progress names = %q, want %q", names, want)
+	}
+	plain, err := Render(validInventory(), "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(plain.Plugins, []byte("progress")) {
+		t.Errorf("an inventory without apt.payload records verify progress")
 	}
 }
 

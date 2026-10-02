@@ -733,6 +733,12 @@ run_configure() {
 {{- end}}
 }
 {{- with .Closure}}
+progress() {
+  mkdir -p "$state_dir"
+  printf '%s\n' "$1" > "$state_dir/verify-progress.partial"
+  mv -f "$state_dir/verify-progress.partial" "$state_dir/verify-progress"
+}
+
 verify_loader() {
   local missing
   missing="$(python3 "$tmp_dir/loader.py" "$1" | awk '$2 == "=>" && $3 == "not" && $4 == "found" { print $1 }')" || exit
@@ -765,6 +771,9 @@ verify_closure_bin() {
 verify_system() {
   :
 {{- range .System}}
+{{- if $.Closure}}
+  progress {{q (print "system:" .Name)}}
+{{- end}}
 {{- range verify . "system_tool_dir" "system_bin_dir"}}
   {{.}}
 {{- end}}
@@ -772,6 +781,9 @@ verify_system() {
 {{- range .Python.System}}
 {{- $tool := .}}
 {{- range .Bins}}
+{{- if $.Closure}}
+  progress {{q (print "python_system:" .)}}
+{{- end}}
   verify_bin {{q .}}{{range $tool.Verify}} {{q .}}{{end}}
 {{- end}}
 {{- end}}
@@ -779,13 +791,16 @@ verify_system() {
   cat > "$tmp_dir/loader.py" <<'PY'
 {{template "loader.py"}}PY
 {{- range .Bins}}
+  progress {{q (print "closure_bin:" .)}}
   verify_closure_bin {{q .}}
 {{- end}}
-{{- range .Consumers}}
-  verify_loader {{consumer .}}
+{{- range $i, $consumer := .Consumers}}
+  progress {{q (print "consumer:" $i)}}
+  verify_loader {{consumer $consumer}}
 {{- end}}
-{{- range .Fonts}}
-  verify_font {{q .}}
+{{- range $i, $font := .Fonts}}
+  progress {{q (print "font:" $i)}}
+  verify_font {{q $font}}
 {{- end}}
 {{- end}}
 }
@@ -793,11 +808,17 @@ verify_system() {
 verify_user_links() {
   :
 {{- range .Tools}}
+{{- if $.Closure}}
+  progress {{q (print "tool:" .Name)}}
+{{- end}}
 {{- range verify . "tool_dir" "bin_dir"}}
   {{.}}
 {{- end}}
 {{- end}}
 {{- range .Links}}
+{{- if $.Closure}}
+  progress {{q (print "link:" .)}}
+{{- end}}
   verify_link "$bin_dir/"{{q .}} "$system_bin_dir/"{{q .}}
 {{- end}}
 }
@@ -806,9 +827,15 @@ verify_user() {
   verify_user_links
 {{- if .Claude.Marketplaces}}
   local known
+{{- if $.Closure}}
+  progress marketplaces
+{{- end}}
   known="$(claude_json plugin marketplace list --json)" || exit
 {{- end}}
 {{- range .Claude.Marketplaces}}
+{{- if $.Closure}}
+  progress {{q (print "marketplace:" .Name)}}
+{{- end}}
 {{- if .Ref}}
   verify_ref_marketplace {{q .Name}} {{q .Ref}} "$known"
 {{- else}}
@@ -817,10 +844,16 @@ verify_user() {
 {{- end}}
 {{- if .Claude.Plugins}}
   local plugins
+{{- if $.Closure}}
+  progress plugins
+{{- end}}
   plugins="$(claude_json plugin list --json)" || exit
   verify_plugins "$plugins"
 {{- range .Claude.Plugins}}
 {{- $plugin := .}}
+{{- if and $.Closure .Bins}}
+  progress {{q (print "plugin:" .ID)}}
+{{- end}}
 {{- range .Bins}}
   verify_plugin_bin {{q $plugin.ID}} {{q .}} {{q (pluginRef $plugin)}} "$plugins"
 {{- end}}
@@ -829,13 +862,22 @@ verify_user() {
 {{- range .Python.User}}
 {{- $tool := .}}
 {{- range .Bins}}
+{{- if $.Closure}}
+  progress {{q (print "python_user:" .)}}
+{{- end}}
   verify_uv_launcher {{q .}} {{q $.Python.Version}} {{spec $tool}}{{range $tool.Args}} {{q .}}{{end}}
 {{- end}}
 {{- end}}
 {{- with .CodexRuntime}}
+{{- if $.Closure}}
+  progress codex_runtime
+{{- end}}
   verify_codex_runtime {{q .Version}} {{q .SHA256}}{{range .Plugins}} {{q .}}{{end}}
 {{- end}}
 {{- with .CaptainHook}}
+{{- if $.Closure}}
+  progress captain_hook
+{{- end}}
   verify_captain_hook {{q .Version}}
 {{- end}}
 }

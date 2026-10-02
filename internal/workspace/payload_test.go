@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -25,14 +27,18 @@ import (
 var payloadBuildName = regexp.MustCompile(`^cc-remote-payload-[0-9a-f]{8}$`)
 
 type buildMachine struct {
-	failing string
-	steps   []string
-	stdins  map[string]string
+	failing   string
+	failure   providers.Result
+	diagnosis providers.Result
+	steps     []string
+	stdins    map[string]string
 }
 
 func (m *buildMachine) Handle(_ string, cmd []string, stdin []byte) providers.Result {
 	var step string
 	switch {
+	case slices.Equal(cmd, []string{"sudo", "bash", "-s"}):
+		step = "diagnose memory"
 	case slices.Equal(cmd[:3], []string{"sudo", "bash", "-s"}):
 		step = "provision " + strings.Join(cmd[3:], " ")
 	case cmd[0] == "sh":
@@ -45,8 +51,11 @@ func (m *buildMachine) Handle(_ string, cmd []string, stdin []byte) providers.Re
 		m.stdins = map[string]string{}
 	}
 	m.stdins[step] = string(stdin)
-	if step == m.failing {
-		return providers.Result{Stderr: []byte("boom\n"), ExitCode: 1}
+	switch step {
+	case "diagnose memory":
+		return m.diagnosis
+	case m.failing:
+		return m.failure
 	}
 	return providers.Result{Stderr: []byte(step + "\n")}
 }
@@ -226,15 +235,15 @@ func TestBuildPayloadRemovesTheMachineWhenAStepFails(t *testing.T) {
 		is      error
 		message string
 	}{
-		{name: "a phase fails", failing: "provision tools", steps: 2, message: "exited 1: boom"},
-		{name: "the install fails", failing: "plugins install", steps: 4, message: "exited 1: boom"},
-		{name: "the natives phase fails", failing: "plugins natives", steps: 5, message: "exited 1: boom"},
-		{name: "the full verification fails before the pack", failing: "plugins verify", steps: 6, message: "exited 1: boom"},
-		{name: "the download fails", fail: failed, steps: 7, reads: 1, is: failed},
+		{name: "a phase fails", failing: "provision tools", steps: 3, message: "exited 1: boom"},
+		{name: "the install fails", failing: "plugins install", steps: 5, message: "exited 1: boom"},
+		{name: "the natives phase fails", failing: "plugins natives", steps: 6, message: "exited 1: boom"},
+		{name: "the full verification fails before the pack", failing: "plugins verify", steps: 7, message: "exited 1: boom"},
+		{name: "the download fails", fail: failed, steps: 8, reads: 1, is: failed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			machine := &buildMachine{failing: tt.failing}
+			machine := &buildMachine{failing: tt.failing, failure: providers.Result{Stderr: []byte("boom\n"), ExitCode: 1}}
 			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, payload: "hsqs", fail: tt.fail}
 			token := func(context.Context) (string, error) { return buildToken, nil }
 			var out bytes.Buffer
@@ -248,7 +257,7 @@ func TestBuildPayloadRemovesTheMachineWhenAStepFails(t *testing.T) {
 				t.Errorf("BuildPayload = %v, want it to end %q", err, tt.message)
 			}
 			name := provider.created.Name
-			if len(machine.steps) != tt.steps || len(provider.reads) != tt.reads || out.Len() != 0 {
+			if len(machine.steps) != tt.steps || machine.steps[len(machine.steps)-1] != "diagnose memory" || len(provider.reads) != tt.reads || out.Len() != 0 {
 				t.Errorf("steps %q, reads %q, wrote %q", machine.steps, provider.reads, out.String())
 			}
 			if calls := provider.Calls(); calls[len(calls)-1] != "destroy "+name {
@@ -256,6 +265,122 @@ func TestBuildPayloadRemovesTheMachineWhenAStepFails(t *testing.T) {
 			}
 			if _, err := provider.Get(t.Context(), name); !errors.Is(err, providers.ErrNotFound) {
 				t.Errorf("Get after the failed build = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+type logRecord struct {
+	Level    string          `json:"level"`
+	Msg      string          `json:"msg"`
+	Machine  string          `json:"machine"`
+	Evidence json.RawMessage `json:"evidence"`
+	Err      string          `json:"err"`
+}
+
+func recordLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) {
+	const (
+		logged    = "memory evidence from the failed payload build machine"
+		unlogged  = "could not read the failed payload build machine's memory evidence before removing it"
+		evidence  = `{"cgroup":"/sys/fs/cgroup/build","memory.current":734003200,"memory.max":1073741824,"memory.peak":1073741824,"memory.events":{"oom":1,"oom_kill":1},"oom":["Out of memory: Killed process 812 (node)"],"progress":"font:0"}`
+		verifyOut = "model: secret-config\n"
+		strayOut  = "api_key: hunter2\n"
+	)
+	tests := []struct {
+		name      string
+		diagnosis providers.Result
+		message   string
+		evidence  string
+		err       func(machine string) string
+	}{
+		{
+			name:      "the evidence is logged once",
+			diagnosis: providers.Result{Stdout: []byte(evidence + "\n")},
+			message:   logged,
+			evidence:  evidence,
+		},
+		{
+			name:      "a failing diagnostic is logged and still removes the machine",
+			diagnosis: providers.Result{Stderr: []byte("sudo: a password is required\n"), ExitCode: 1},
+			message:   unlogged,
+			err: func(machine string) string {
+				return "diagnose memory: sudo on " + machine + " exited 1: sudo: a password is required"
+			},
+		},
+		{
+			name:      "a diagnostic that prints no JSON is logged without its output",
+			diagnosis: providers.Result{Stdout: []byte(strayOut)},
+			message:   unlogged,
+			err: func(string) string {
+				return "diagnose memory: the evidence is not JSON: invalid character 'a' looking for beginning of value"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := recordLogs(t)
+			machine := &buildMachine{failing: "plugins verify", failure: providers.Result{Stdout: []byte(verifyOut), ExitCode: 137}, diagnosis: tt.diagnosis}
+			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, payload: "hsqs"}
+			token := func(context.Context) (string, error) { return buildToken, nil }
+			_, err := BuildPayload(t.Context(), payloadConfig(t, "", private), provider, "fake", "lean", token, io.Discard, io.Discard)
+			name := provider.created.Name
+			if want := "plugins verify: env on " + name + " exited 137: "; err == nil || err.Error() != want {
+				t.Errorf("BuildPayload = %v, want %q", err, want)
+			}
+			if steps := machine.steps; len(steps) != 7 || steps[5] != "plugins verify" || steps[6] != "diagnose memory" {
+				t.Errorf("steps = %q, want the diagnosis right after the verification", steps)
+			}
+			if script := machine.stdins["diagnose memory"]; !strings.Contains(script, "/proc/self/cgroup") || !strings.Contains(script, "memory.events") {
+				t.Errorf("the diagnosis ran %q", script)
+			}
+			calls := provider.Calls()
+			if want := []string{fmt.Sprintf("exec %s %q", name, []string{"sudo", "bash", "-s"}), "destroy " + name}; !slices.Equal(calls[len(calls)-2:], want) {
+				t.Errorf("calls = %q, want them to end %q", calls, want)
+			}
+			if _, err := provider.Get(t.Context(), name); !errors.Is(err, providers.ErrNotFound) {
+				t.Errorf("Get after the failed build = %v, want ErrNotFound", err)
+			}
+			for _, leaked := range []string{"secret-config", "hunter2"} {
+				if strings.Contains(logs.String(), leaked) || strings.Contains(fmt.Sprint(err), leaked) {
+					t.Errorf("%q left the machine: error %v, logs %s", leaked, err, logs)
+				}
+			}
+			var records []logRecord
+			decoder := json.NewDecoder(logs)
+			for decoder.More() {
+				var record logRecord
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Msg == logged || record.Msg == unlogged {
+					records = append(records, record)
+				}
+			}
+			if len(records) != 1 {
+				t.Fatalf("diagnosis records = %+v, want one", records)
+			}
+			record := records[0]
+			if record.Level != "WARN" || record.Msg != tt.message || record.Machine != name {
+				t.Errorf("record = %+v, want a WARN %q for %s", record, tt.message, name)
+			}
+			if got := string(record.Evidence); got != tt.evidence {
+				t.Errorf("evidence = %s, want %s", got, tt.evidence)
+			}
+			var wantErr string
+			if tt.err != nil {
+				wantErr = tt.err(name)
+			}
+			if record.Err != wantErr {
+				t.Errorf("err = %q, want %q", record.Err, wantErr)
 			}
 		})
 	}
