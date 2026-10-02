@@ -697,7 +697,7 @@ func TestPluginsFailClosedOnPluginReads(t *testing.T) {
 		{name: "plugin list exits non-zero", phase: "verify", tail: "exit 0 9", wantCode: 42},
 		{name: "plugin list prints trailing garbage", phase: "verify", tail: "garbage 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
 		{name: "plugin list prints a second document", phase: "verify", tail: "extra 0 9", wantCode: 1, wantOut: "did not print exactly one JSON document"},
-		{name: "plugin root read exits non-zero", phase: "verify", tail: "exit 1 1", wantCode: 42},
+		{name: "final plugin snapshot read exits non-zero", state: registered("main", "0.7.16"), phase: "install", tail: "exit 4 1", wantCode: 42},
 		{name: "install plugin read exits non-zero once", state: registered("main", "0.7.16"), phase: "install", tail: "exit 1 1", wantCode: 42},
 	}
 	for _, tt := range tests {
