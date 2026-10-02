@@ -1433,6 +1433,21 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	membership, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cgroup string
+	for line := range strings.Lines(string(membership)) {
+		if path, ok := strings.CutPrefix(line, "0::"); ok {
+			cgroup = strings.TrimSuffix(path, "\n")
+		}
+	}
+	verifyContext := "boot_id " + strings.TrimSpace(string(boot)) + "\ncgroup " + cgroup + "\n"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root, fakes, home := t.TempDir(), t.TempDir(), shortHome(t)
@@ -1478,6 +1493,9 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			out, err := cmd.CombinedOutput()
 			if recorded, readErr := os.ReadFile(filepath.Join(home, ".cc-remote", "verify-progress")); readErr != nil || string(recorded) != tt.progress+"\n" {
 				t.Errorf("verify progress = %q, %v, want %q", recorded, readErr, tt.progress)
+			}
+			if recorded, readErr := os.ReadFile(filepath.Join(home, ".cc-remote", "verify-context")); readErr != nil || string(recorded) != verifyContext {
+				t.Errorf("verify context = %q, %v, want %q", recorded, readErr, verifyContext)
 			}
 			if tt.wantErr != nil {
 				if want := tt.wantErr(home, closure, bins); exitCode(err) != 1 || !strings.Contains(string(out), want) {

@@ -521,8 +521,30 @@ func TestPayloadPluginsRecordEachVerifyProbeByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "progress() {\n  mkdir -p \"$state_dir\"\n  printf '%s\\n' \"$1\" > \"$state_dir/verify-progress.partial\"\n  mv -f \"$state_dir/verify-progress.partial\" \"$state_dir/verify-progress\"\n}\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
-		t.Errorf("plugins.sh with apt.payload lacks\n%s", want)
+	for _, want := range []string{
+		"closure_root=/opt/cc-remote/closure\nverify_context=unrecorded\n",
+		`record_verify_context() {
+  local boot cgroup
+  boot="$(cat /proc/sys/kernel/random/boot_id)"
+  cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+  printf 'boot_id %s\ncgroup %s\n' "$boot" "$cgroup" > "$state_dir/verify-context.partial"
+  mv -f "$state_dir/verify-context.partial" "$state_dir/verify-context"
+  verify_context=recorded
+}
+
+progress() {
+  mkdir -p "$state_dir"
+  if [ "$verify_context" = unrecorded ]; then
+    record_verify_context
+  fi
+  printf '%s\n' "$1" > "$state_dir/verify-progress.partial"
+  mv -f "$state_dir/verify-progress.partial" "$state_dir/verify-progress"
+}
+`,
+	} {
+		if !bytes.Contains(scripts.Plugins, []byte(want)) {
+			t.Errorf("plugins.sh with apt.payload lacks\n%s", want)
+		}
 	}
 	want := []string{
 		"system:uv", "system:claude", "system:codex", "python_system:cc-transcript",
@@ -555,8 +577,10 @@ func TestPayloadPluginsRecordEachVerifyProbeByName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(plain.Plugins, []byte("progress")) {
-		t.Errorf("an inventory without apt.payload records verify progress")
+	for _, word := range []string{"progress", "verify_context", "verify-context", "boot_id"} {
+		if bytes.Contains(plain.Plugins, []byte(word)) {
+			t.Errorf("an inventory without apt.payload renders %q", word)
+		}
 	}
 }
 

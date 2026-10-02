@@ -64,15 +64,52 @@ const diagnoseMemory = `set -euo pipefail
 root="${1:-}"
 home="${2:-$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
 hierarchy="$root/sys/fs/cgroup"
+anchor="$(realpath -m "$hierarchy")"
 amount='^([0-9]+|max)$'
+count='^[0-9]+$'
 probe='^[a-z][a-z_]*(:[A-Za-z0-9][A-Za-z0-9._@-]{0,127})?$'
+uuid='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+cgroup_path='^(/|(/[A-Za-z0-9_@:+-][A-Za-z0-9._@:+-]*)+)$'
+
+valid() {
+  if [[ $2 =~ $1 ]]; then
+    printf '%s' "$2"
+  fi
+}
 
 read_amount() {
   local text
-  text="$(cat "$dir/$1" 2> /dev/null)" || return 0
-  if [[ $text =~ $amount ]]; then
-    printf '%s' "$text"
-  fi
+  text="$(cat "$1" 2> /dev/null)" || return 0
+  valid "$amount" "$text"
+}
+
+reading() {
+  local events
+  events="$(cat "$1/memory.events" 2> /dev/null)" || events=""
+  jq -cn \
+    --arg cgroup "${1#"$root"}" \
+    --arg current "$(read_amount "$1/memory.current")" \
+    --arg max "$(read_amount "$1/memory.max")" \
+    --arg peak "$(read_amount "$1/memory.peak")" \
+    --arg events "$events" \
+    'def amount: if . == "" then null elif . == "max" then . else tonumber end;
+    {
+      cgroup: $cgroup,
+      "memory.current": ($current | amount),
+      "memory.max": ($max | amount),
+      "memory.peak": ($peak | amount),
+      "memory.events": ([$events | splits("\n") | select(test("^[a-z_]+ [0-9]+$")) | split(" ") | {(.[0]): (.[1] | tonumber)}] | add)
+    }'
+}
+
+under_hierarchy() {
+  local resolved
+  resolved="$(realpath -m "$1")"
+  [ "$resolved" = "$anchor" ] || [[ $resolved == "$anchor"/* ]]
+}
+
+recorded() {
+  sed -n "s/^$1 //p" <<< "$context"
 }
 
 read_kmsg() {
@@ -92,7 +129,22 @@ dir="$hierarchy${cgroup%/}"
 while [ ! -e "$dir/memory.current" ] && [ "$dir" != "$hierarchy" ]; do
   dir="${dir%/*}"
 done
-events="$(cat "$dir/memory.events" 2> /dev/null)" || events=""
+diagnostic="$(reading "$dir")"
+context="$(head -c 4096 "$root$home/.cc-remote/verify-context" 2> /dev/null)" || context=""
+boot_then="$(valid "$uuid" "$(recorded boot_id)")"
+boot_now="$(cat "$root/proc/sys/kernel/random/boot_id" 2> /dev/null)" || boot_now=""
+boot_now="$(valid "$uuid" "$boot_now")"
+exec_cgroup="$(valid "$cgroup_path" "$(recorded cgroup)")"
+exec_dir=""
+failed_exec=null
+if [ -n "$exec_cgroup" ] && under_hierarchy "$hierarchy${exec_cgroup%/}"; then
+  exec_dir="$hierarchy${exec_cgroup%/}"
+  if [ -d "$exec_dir" ]; then
+    failed_exec="$(reading "$exec_dir")"
+  fi
+fi
+oom_kills="$(sed -n 's/^oom_kill //p' "$root/proc/vmstat" 2> /dev/null)" || oom_kills=""
+oom_kills="$(valid "$count" "$oom_kills")"
 oom=null
 if read_kmsg; then
   oom="$(printf '%s\n' "$kmsg" \
@@ -102,26 +154,25 @@ if read_kmsg; then
     | jq -Rsc 'split("\n") | map(select(. != ""))')"
 fi
 progress="$(head -c 160 "$root$home/.cc-remote/verify-progress" 2> /dev/null)" || progress=""
-if [[ ! $progress =~ $probe ]]; then
-  progress=""
-fi
+progress="$(valid "$probe" "$progress")"
 jq -cn \
-  --arg cgroup "${dir#"$root"}" \
-  --arg current "$(read_amount memory.current)" \
-  --arg max "$(read_amount memory.max)" \
-  --arg peak "$(read_amount memory.peak)" \
-  --arg events "$events" \
-  --argjson oom "$oom" \
+  --arg boot_then "$boot_then" \
+  --arg boot_now "$boot_now" \
   --arg progress "$progress" \
-  'def amount: if . == "" then null elif . == "max" then . else tonumber end;
+  --arg failed_exec_cgroup "${exec_dir#"$root"}" \
+  --argjson failed_exec "$failed_exec" \
+  --argjson diagnostic "$diagnostic" \
+  --arg oom_kills "$oom_kills" \
+  --argjson oom "$oom" \
+  'def text: if . == "" then null else . end;
   {
-    cgroup: $cgroup,
-    "memory.current": ($current | amount),
-    "memory.max": ($max | amount),
-    "memory.peak": ($peak | amount),
-    "memory.events": ([$events | splits("\n") | select(test("^[a-z_]+ [0-9]+$")) | split(" ") | {(.[0]): (.[1] | tonumber)}] | add),
-    oom: $oom,
-    progress: (if $progress == "" then null else $progress end)
+    bootId: {"then": ($boot_then | text), "now": ($boot_now | text)},
+    sameBoot: (if $boot_then == "" or $boot_now == "" then null else $boot_then == $boot_now end),
+    progress: ($progress | text),
+    failedExecCgroup: ($failed_exec_cgroup | text),
+    cgroups: {failedExec: $failed_exec, diagnostic: $diagnostic},
+    "vmstat.oom_kill": ($oom_kills | if . == "" then null else tonumber end),
+    oom: $oom
   }'`
 
 func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ...string) error {

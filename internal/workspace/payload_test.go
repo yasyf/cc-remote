@@ -291,7 +291,7 @@ func TestBuildPayloadLogsMemoryEvidenceBeforeRemovingAKilledBuild(t *testing.T) 
 	const (
 		logged    = "memory evidence from the failed payload build machine"
 		unlogged  = "could not read the failed payload build machine's memory evidence before removing it"
-		evidence  = `{"cgroup":"/sys/fs/cgroup/build","memory.current":734003200,"memory.max":1073741824,"memory.peak":1073741824,"memory.events":{"oom":1,"oom_kill":1},"oom":["Out of memory: Killed process 812 (node)"],"progress":"font:0"}`
+		evidence  = `{"bootId":{"then":"0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d","now":"0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"},"sameBoot":true,"progress":"font:0","failedExecCgroup":"/sys/fs/cgroup/build","cgroups":{"failedExec":{"cgroup":"/sys/fs/cgroup/build","memory.current":734003200,"memory.max":1073741824,"memory.peak":1073741824,"memory.events":{"oom":1,"oom_kill":1}},"diagnostic":{"cgroup":"/sys/fs/cgroup","memory.current":null,"memory.max":null,"memory.peak":null,"memory.events":null}},"vmstat.oom_kill":1,"oom":["Out of memory: Killed process 812 (node)"]}`
 		verifyOut = "model: secret-config\n"
 		strayOut  = "api_key: hunter2\n"
 		strayErr  = "Authorization: Bearer s3cret\n"

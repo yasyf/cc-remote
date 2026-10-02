@@ -13,6 +13,7 @@ system_tool_dir=/opt/cc-remote/tools
 system_bin_dir=/usr/local/bin
 {{- with .Closure}}
 closure_root=/opt/cc-remote/closure
+verify_context=unrecorded
 {{- end}}
 tmp_dir="$(mktemp -d)"
 trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
@@ -733,8 +734,20 @@ run_configure() {
 {{- end}}
 }
 {{- with .Closure}}
+record_verify_context() {
+  local boot cgroup
+  boot="$(cat /proc/sys/kernel/random/boot_id)"
+  cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+  printf 'boot_id %s\ncgroup %s\n' "$boot" "$cgroup" > "$state_dir/verify-context.partial"
+  mv -f "$state_dir/verify-context.partial" "$state_dir/verify-context"
+  verify_context=recorded
+}
+
 progress() {
   mkdir -p "$state_dir"
+  if [ "$verify_context" = unrecorded ]; then
+    record_verify_context
+  fi
   printf '%s\n' "$1" > "$state_dir/verify-progress.partial"
   mv -f "$state_dir/verify-progress.partial" "$state_dir/verify-progress"
 }
