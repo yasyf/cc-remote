@@ -192,7 +192,11 @@ func runtimeTestArchive(t *testing.T) ([]byte, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	t.Cleanup(func() {
+		if err := reader.Close(); err != nil {
+			t.Errorf("close runtime archive: %v", err)
+		}
+	})
 	cmd := exec.Command("xz", "-c")
 	cmd.Stdin = reader
 	archive, err := cmd.Output()
