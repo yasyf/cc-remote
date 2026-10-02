@@ -108,6 +108,8 @@ type lazyLayout struct {
 	untracked    []string
 	unexecutable []string
 	descriptor   []byte
+	files        map[string]string
+	services     []Service
 }
 
 var lazyLayouts = []struct {
@@ -316,8 +318,11 @@ func lazyPluginHost(t *testing.T, plugin, launcher string, layout lazyLayout) pl
 			t.Fatal(err)
 		}
 	}
+	for rel, content := range layout.files {
+		writePluginTestFile(t, filepath.Join(source, rel), []byte(content), 0o755)
+	}
 	ref := commitPin(t, source, layout)
-	inventory := Inventory{Version: SchemaVersion, Claude: Claude{Marketplaces: []Marketplace{{Name: "tools-market", GitHub: "owner/tools-market", Ref: ref}}, Plugins: []Plugin{{ID: plugin + "@tools-market", Version: "1.0.0", Bins: []string{"bin/tool"}}}}}
+	inventory := Inventory{Version: SchemaVersion, Claude: Claude{Marketplaces: []Marketplace{{Name: "tools-market", GitHub: "owner/tools-market", Ref: ref}}, Plugins: []Plugin{{ID: plugin + "@tools-market", Version: "1.0.0", Bins: []string{"bin/tool"}}}}, Services: layout.services}
 	catalog := map[string]any{"dir:tools-market": map[string]any{"name": "tools-market", "plugins": map[string]string{plugin: "1.0.0"}}}
 	h := newPluginsHost(t, inventory, catalog, fakeState{}, nil)
 	if err := os.Mkdir(filepath.Join(h.fakes, "sources"), 0o755); err != nil {

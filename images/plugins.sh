@@ -57,31 +57,34 @@ pinned_blob() {
   esac
 }
 
+pinned_bin() {
+  local root="$1" id="$2" bin="$3" ref="$4" dir source launcher descriptor
+  dir="$marketplace_dir/${id#*@}"
+  source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')"
+  if ! launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")"; then
+    echo "cc-remote: plugin $id $bin is not a committed file at $ref" >&2
+    exit 1
+  fi
+  git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher"
+  binrun_launcher "$tmp_dir/launcher" "$bin" || return 1
+  if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
+    || [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
+    || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
+    echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
+    exit 1
+  fi
+  binrun_entry "$root/$bin.binrun" > /dev/null
+}
+
 verify_plugin_bin() {
-  local id="$1" bin="$2" ref="$3" root dir source launcher descriptor
+  local id="$1" bin="$2" ref="$3" root
   root="$(plugin_path "$4" "$id")"
   if [ ! -x "$root/$bin" ]; then
     echo "cc-remote: plugin $id has no executable $bin" >&2
     exit 1
   fi
-  if [ -n "$ref" ] && [ "${id%@*}" != captain-hook ]; then
-    dir="$marketplace_dir/${id#*@}"
-    source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')"
-    if ! launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")"; then
-      echo "cc-remote: plugin $id $bin is not a committed file at $ref" >&2
-      exit 1
-    fi
-    git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher"
-    if binrun_launcher "$tmp_dir/launcher" "$bin"; then
-      if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
-        || [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
-        || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
-        echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
-        exit 1
-      fi
-      binrun_entry "$root/$bin.binrun" > /dev/null
-      return
-    fi
+  if [ -n "$ref" ] && [ "${id%@*}" != captain-hook ] && pinned_bin "$root" "$id" "$bin" "$ref"; then
+    return
   fi
   "$root/$bin" --version > /dev/null
 }
@@ -107,6 +110,10 @@ prepare_runner() {
   asset="binrun_${pin[1]#v}_linux_$(runner_arch).tar.gz"
   fetch "https://github.com/${pin[0]}/releases/download/${pin[1]}/$asset" "$stage/$asset" sha256 "${pin[2]}"
   tar -xzf "$stage/$asset" -C "$stage" binrun
+  if [ ! -f "$stage/binrun" ] || [ -L "$stage/binrun" ]; then
+    echo "cc-remote: binrun in $asset is not a regular file" >&2
+    exit 1
+  fi
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     if ! runner_tree "$dir" || ! cmp -s "$stage/binrun" "$dir/binrun"; then
       echo "cc-remote: $dir is not the binrun ${pin[1]} release" >&2
@@ -120,10 +127,19 @@ prepare_runner() {
   printf '%s\n' "$dir/binrun"
 }
 
+prove_native() {
+  local id="$1" bin="$2" ref="$3" dir="$4"
+  pinned_bin "$dir" "$id" "$bin" "$ref" || return 0
+  if [ ! -x "$dir/$bin" ]; then
+    echo "cc-remote: plugin $id has no executable $bin" >&2
+    exit 1
+  fi
+}
+
 prepare_native() {
-  local dir="$1" bin="$2" text root runner
+  local id="$1" bin="$2" ref="$3" dir="$4" text root runner
   local -a entry
-  binrun_launcher "$dir/$bin" "$bin" || return 0
+  pinned_bin "$dir" "$id" "$bin" "$ref" || return 0
   text="$(binrun_entry "$dir/$bin.binrun")" || exit
   mapfile -t entry <<< "$text"
   runner="$(prepare_runner "$dir/$bin")" || exit
@@ -173,8 +189,17 @@ expose_native() {
   runner="$(runner_dir "$HOME" "$payload$dir/$bin")" || exit
   expose link required "$root"
   expose link required "$runner"
+  native_link "$root"
+  native_link "$runner"
   if ! native_hit "$payload$root" "${entry[2]}" "${entry[1]}" "${entry[3]}" "${entry[4]}" || ! runner_tree "$payload$runner"; then
     echo "cc-remote: payload $payload lacks a verified ${entry[3]} ${entry[4]} native at $root" >&2
+    exit 1
+  fi
+}
+
+native_link() {
+  if [ ! -L "$1" ] || [ "$(readlink "$1")" != "$payload$1" ]; then
+    echo "cc-remote: $1 is not a link to the payload copy $payload$1, so the payload cannot own it" >&2
     exit 1
   fi
 }
@@ -616,7 +641,10 @@ run_natives() {
   native_home
 {{- end}}
 {{- range .Natives}}
-  prepare_native {{home .Dir}} {{q .Bin}}
+  prove_native {{q .ID}} {{q .Bin}} {{q .Ref}} {{home .Dir}}
+{{- end}}
+{{- range .Natives}}
+  prepare_native {{q .ID}} {{q .Bin}} {{q .Ref}} {{home .Dir}}
 {{- end}}
 }
 

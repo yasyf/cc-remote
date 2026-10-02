@@ -65,6 +65,8 @@ type tree struct {
 var readyTimeout = 30 * time.Second
 
 type native struct {
+	ID  string
+	Ref string
 	Dir string
 	Bin string
 }
@@ -167,14 +169,14 @@ func pluginCacheDir(plugin Plugin) string {
 }
 
 func natives(inv Inventory) []native {
-	pinned := map[string]bool{}
+	refs := map[string]string{}
 	for _, marketplace := range inv.Claude.Marketplaces {
-		pinned[marketplace.Name] = marketplace.Ref != ""
+		refs[marketplace.Name] = marketplace.Ref
 	}
 	var candidates []native
 	for _, plugin := range inv.Claude.Plugins {
 		name, marketplace, _ := strings.Cut(plugin.ID, "@")
-		if name == "captain-hook" || !pinned[marketplace] {
+		if name == "captain-hook" || refs[marketplace] == "" {
 			continue
 		}
 		bins := slices.Clone(plugin.Bins)
@@ -184,7 +186,7 @@ func natives(inv Inventory) []native {
 			}
 		}
 		for _, bin := range bins {
-			candidate := native{pluginCacheDir(plugin), bin}
+			candidate := native{plugin.ID, refs[marketplace], pluginCacheDir(plugin), bin}
 			if !slices.Contains(candidates, candidate) {
 				candidates = append(candidates, candidate)
 			}

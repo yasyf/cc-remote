@@ -89,6 +89,9 @@ elif tamper == "symlink-member":
 elif tamper == "entrypoint-bytes":
     with open(os.path.join(root, entry["path"]), "a") as f:
         f.write("\n")
+elif tamper == "symlink-entrypoint":
+    os.remove(os.path.join(root, entry["path"]))
+    os.symlink("LICENSE", os.path.join(root, entry["path"]))
 with open(os.path.join(root, "meta.json"), "w") as f:
     json.dump(meta, f)
 `
@@ -131,6 +134,23 @@ func tarGz(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
+func tarGzLink(t *testing.T, name, target string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: name, Linkname: target, Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -141,16 +161,26 @@ func nativeAssets(t *testing.T) (asset, runner []byte) {
 	return tarGz(t, nativeMembers), tarGz(t, map[string]string{"binrun": fakeRunner})
 }
 
-func nativeHost(t *testing.T, edit func(map[string]any)) nativeFixture {
+type nativeOptions struct {
+	edit   func(map[string]any)
+	layout lazyLayout
+	runner []byte
+}
+
+func nativeHost(t *testing.T, opts nativeOptions) nativeFixture {
 	t.Helper()
 	asset, runner := nativeAssets(t)
+	if opts.runner != nil {
+		runner = opts.runner
+	}
 	digest := sha256Hex(asset)
 	descriptor := releaseBinary(digest)
-	if edit != nil {
-		edit(descriptor)
+	if opts.edit != nil {
+		opts.edit(descriptor)
 	}
 	launcher := fmt.Sprintf(nativeLauncher, sha256Hex(runner))
-	layout := lazyLayout{descriptor: append([]byte("#!/usr/bin/env binrun\n"), mustJSON(t, descriptor)...)}
+	layout := opts.layout
+	layout.descriptor = append([]byte("#!/usr/bin/env binrun\n"), mustJSON(t, descriptor)...)
 	h := lazyPluginHost(t, "hook", launcher, layout)
 	for name, data := range map[string][]byte{
 		"curl": []byte(servingCurl),
@@ -198,7 +228,7 @@ func curlCalls(h pluginsHost) []string {
 }
 
 func TestPluginsNativesMaterializeAndVerifyEveryPinnedLauncher(t *testing.T) {
-	f := nativeHost(t, nil)
+	f := nativeHost(t, nativeOptions{})
 	for _, phase := range []string{"install", "natives", "natives", "verify"} {
 		if out, err := f.h.plugins(phase); err != nil {
 			t.Fatalf("%s: %v\n%s", phase, err, out)
@@ -242,9 +272,12 @@ func TestPluginsNativesRejectAMismatchedRoot(t *testing.T) {
 		name    string
 		tamper  string
 		edit    func(map[string]any)
+		runner  []byte
 		prepare func(t *testing.T, f nativeFixture)
 		wantErr string
 	}{
+		{name: "runner archive symlink member", runner: tarGzLink(t, "binrun", "nowhere"), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not a regular file"},
+		{name: "symlink entrypoint", tamper: "symlink-entrypoint", wantErr: "is not a daemonkit cache entry"},
 		{name: "meta.json digest", tamper: "meta-digest", wantErr: "is not a daemonkit cache entry"},
 		{name: "meta.json name", tamper: "meta-name", wantErr: "is not a daemonkit cache entry"},
 		{name: "meta.json tag", tamper: "meta-tag", wantErr: "is not a daemonkit cache entry"},
@@ -286,7 +319,7 @@ func TestPluginsNativesRejectAMismatchedRoot(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := nativeHost(t, tt.edit)
+			f := nativeHost(t, nativeOptions{edit: tt.edit, runner: tt.runner})
 			if tt.tamper != "" {
 				writePluginTestFile(t, filepath.Join(f.h.fakes, "tamper"), []byte(tt.tamper), 0o644)
 			}
@@ -299,6 +332,50 @@ func TestPluginsNativesRejectAMismatchedRoot(t *testing.T) {
 			}
 			if exitCode(err) != 1 || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("natives = %v\n%s\nwant exit 1 mentioning %q", err, out, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPluginsNativesProvePinsBeforeTheRunner(t *testing.T) {
+	unpinned := strings.Repeat("0", 64)
+	serviceLauncher := fmt.Sprintf(strings.ReplaceAll(nativeLauncher, "bin/tool.binrun", "bin/svc.binrun"), unpinned)
+	tests := []struct {
+		name    string
+		layout  lazyLayout
+		drift   func(t *testing.T, f nativeFixture)
+		wantErr string
+	}{
+		{name: "installed launcher drift", wantErr: "cc-remote: plugin hook@tools-market bin/tool differs from its pinned launcher or descriptor", drift: func(t *testing.T, f nativeFixture) {
+			writePluginTestFile(t, filepath.Join(f.h.home, nativeCache, "bin/tool"), []byte(f.launcher+"exit 7\n"), 0o755)
+		}},
+		{name: "installed descriptor drift", wantErr: "cc-remote: plugin hook@tools-market bin/tool differs from its pinned launcher or descriptor", drift: func(t *testing.T, f nativeFixture) {
+			writePluginTestFile(t, filepath.Join(f.h.home, nativeCache, "bin/tool.binrun"), binrunDescriptor(t, unpinned), 0o644)
+		}},
+		{name: "untracked service command", wantErr: "cc-remote: plugin hook@tools-market bin/svc is not a committed file at ", layout: lazyLayout{
+			files:     map[string]string{"plugin/bin/svc": serviceLauncher, "plugin/bin/svc.binrun": string(binrunDescriptor(t, unpinned))},
+			untracked: []string{"plugin/bin/svc", "plugin/bin/svc.binrun"},
+			services:  []Service{{Name: "svc", Plugin: "hook@tools-market", Command: []string{"bin/svc"}}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := nativeHost(t, nativeOptions{layout: tt.layout})
+			if out, err := f.h.plugins("install"); err != nil {
+				t.Fatalf("install: %v\n%s", err, out)
+			}
+			if tt.drift != nil {
+				tt.drift(t, f)
+			}
+			out, err := f.h.plugins("natives")
+			if exitCode(err) != 1 || !strings.Contains(out, tt.wantErr) {
+				t.Fatalf("natives = %v\n%s\nwant exit 1 with %q", err, out, tt.wantErr)
+			}
+			if _, err := os.Lstat(filepath.Join(f.h.fakes, "calls.log.binrun")); !os.IsNotExist(err) {
+				t.Errorf("the runner ran before the pin proof: %v", err)
+			}
+			if calls := curlCalls(f.h); len(calls) != 0 {
+				t.Errorf("natives downloaded before the pin proof:\n%s", strings.Join(calls, "\n"))
 			}
 		})
 	}
@@ -322,19 +399,49 @@ func TestPluginsNativesSkipNonBinrunBins(t *testing.T) {
 
 func TestPluginsInstallExposesNativeRoots(t *testing.T) {
 	tests := []struct {
-		name string
-		omit string
+		name   string
+		omit   string
+		poison string
+		linked bool
 	}{
 		{name: "every native root"},
+		{name: "existing links into the payload", linked: true},
 		{name: "missing root", omit: "root"},
 		{name: "root without meta.json", omit: "meta.json"},
 		{name: "missing runner", omit: "runner"},
+		{name: "a directory at the root", poison: "root-dir"},
+		{name: "an unrelated link at the root", poison: "root-link"},
+		{name: "a directory at the runner", poison: "runner-dir"},
+		{name: "an unrelated link at the runner", poison: "runner-link"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := nativeHost(t, nil)
+			f := nativeHost(t, nativeOptions{})
 			payload := filepath.Join(t.TempDir(), f.digest)
 			root, runner := nativeRoot(f.h.home, f.digest), filepath.Join(f.h.home, ".daemonkit/binrun", nativeRunnerTag)
+			elsewhere := filepath.Join(f.h.home, "elsewhere")
+			poisoned := map[bool]string{true: root, false: runner}[strings.HasPrefix(tt.poison, "root")]
+			switch {
+			case strings.HasSuffix(tt.poison, "-dir"):
+				writePluginTestFile(t, filepath.Join(poisoned, "owner-data"), []byte("keep\n"), 0o600)
+			case strings.HasSuffix(tt.poison, "-link"):
+				if err := os.MkdirAll(filepath.Dir(poisoned), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(elsewhere, poisoned); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.linked {
+				for _, path := range []string{root, runner} {
+					if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.Join(payload, path), path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			writePluginTestFile(t, filepath.Join(payload, f.h.home, nativeCache, "bin/tool"), []byte(f.launcher), 0o755)
 			writePluginTestFile(t, filepath.Join(payload, f.h.home, nativeCache, "bin/tool.binrun"), binrunDescriptor(t, f.digest), 0o644)
 			if tt.omit != "root" {
@@ -360,17 +467,32 @@ func TestPluginsInstallExposesNativeRoots(t *testing.T) {
 			writePluginTestFile(t, filepath.Join(f.h.fakes, "expose.sh"), []byte(functions+"\npayload=\"$2\"\nnative_home\n"+expose+expose), 0o700)
 			out, err := f.h.run("bash", filepath.Join(f.h.fakes, "expose.sh"), "install", payload)
 			var wantErr string
-			switch tt.omit {
-			case "root":
+			switch {
+			case tt.omit == "root":
 				wantErr = "cc-remote: payload " + payload + " lacks " + root
-			case "runner":
+			case tt.omit == "runner":
 				wantErr = "cc-remote: payload " + payload + " lacks " + runner
-			case "meta.json":
+			case tt.omit == "meta.json":
 				wantErr = "cc-remote: payload " + payload + " lacks a verified tool v1.0.0 native at " + root
+			case tt.poison != "":
+				wantErr = "cc-remote: " + poisoned + " is not a link to the payload copy " + filepath.Join(payload, poisoned)
 			}
 			if wantErr != "" {
 				if exitCode(err) != 1 || !strings.Contains(out, wantErr) {
 					t.Fatalf("expose = %v\n%s\nwant exit 1 with %q", err, out, wantErr)
+				}
+				switch {
+				case strings.HasSuffix(tt.poison, "-dir"):
+					if info, err := os.Lstat(poisoned); err != nil || !info.IsDir() {
+						t.Errorf("the poisoned directory %s became %v, %v", poisoned, info, err)
+					}
+					if got, err := os.ReadFile(filepath.Join(poisoned, "owner-data")); err != nil || string(got) != "keep\n" {
+						t.Errorf("owner data under %s = %q, %v; want it untouched", poisoned, got, err)
+					}
+				case strings.HasSuffix(tt.poison, "-link"):
+					if got, err := os.Readlink(poisoned); err != nil || got != elsewhere {
+						t.Errorf("the unrelated link %s became %q, %v", poisoned, got, err)
+					}
 				}
 				return
 			}

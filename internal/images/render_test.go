@@ -220,7 +220,14 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
   install_plugin 'hooks@market' '1.0.0' "$1"
   install_plugin 'vault@secret' '2.0.0' "$1"
 `
-	for _, want := range []string{home, stale} {
+	natives := `run_natives() {
+  :
+  native_home
+  prove_native 'hooks@market' 'bin/hooks' '` + commit + `' "$HOME/"'.claude/plugins/cache/market/hooks/1.0.0'
+  prepare_native 'hooks@market' 'bin/hooks' '` + commit + `' "$HOME/"'.claude/plugins/cache/market/hooks/1.0.0'
+}
+`
+	for _, want := range []string{home, stale, natives} {
 		if !bytes.Contains(scripts.Plugins, []byte(want)) {
 			t.Errorf("plugins.sh lacks\n%s", want)
 		}
@@ -246,9 +253,9 @@ func TestNativesSelectsPinnedLaunchers(t *testing.T) {
 		},
 	}
 	want := []native{
-		{".claude/plugins/cache/market/hooks/1.0.0", "bin/hooks"},
-		{".claude/plugins/cache/market/hooks/1.0.0", "bin/hooks-ctl"},
-		{".claude/plugins/cache/market/notes/3.0.0", "bin/notesd"},
+		{"hooks@market", commit, ".claude/plugins/cache/market/hooks/1.0.0", "bin/hooks"},
+		{"hooks@market", commit, ".claude/plugins/cache/market/hooks/1.0.0", "bin/hooks-ctl"},
+		{"notes@market", commit, ".claude/plugins/cache/market/notes/3.0.0", "bin/notesd"},
 	}
 	if got := natives(inventory); !slices.Equal(got, want) {
 		t.Errorf("natives = %v, want %v", got, want)
