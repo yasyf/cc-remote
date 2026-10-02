@@ -65,14 +65,19 @@ def clauses(field):
     return [[re.sub(r"[\s(:].*$", "", alt.strip()) for alt in clause.split("|") if alt.strip()] for clause in field.split(",") if clause.strip()]
 
 
+def candidates(clause, new, providers):
+    return [c for alt in clause for c in ([alt] if alt in new else providers.get(alt, []))]
+
+
 def partition(seeds, new, base):
-    meta, providers, satisfied = {}, {}, set(base)
+    meta, providers, satisfiers = {}, {}, {}
     for line in dpkg("-W", "-f", "${Package}\t${Depends}\t${Pre-Depends}\t${Provides}\n", *sorted(new | base)).splitlines():
         pkg, depends, predepends, provides = line.split("\t")
         provided = [re.sub(r"[\s(].*$", "", name.strip()) for name in provides.split(",") if name.strip()]
         meta[pkg] = (clauses(depends) + clauses(predepends), provided)
         if pkg in base:
-            satisfied.update(provided)
+            for name in [pkg, *provided]:
+                satisfiers.setdefault(name, set()).add(pkg)
     for pkg in sorted(new):
         for provided in meta[pkg][1]:
             providers.setdefault(provided, []).append(pkg)
@@ -83,11 +88,23 @@ def partition(seeds, new, base):
             continue
         resident.add(pkg)
         for clause in meta[pkg][0]:
-            if any(alt in satisfied for alt in clause):
+            if any(alt in satisfiers for alt in clause):
                 continue
-            candidates = [c for alt in clause for c in ([alt] if alt in new else providers.get(alt, []))]
-            if candidates and not any(c in resident for c in candidates):
-                queue.append(candidates[0])
+            found = candidates(clause, new, providers)
+            if found and not any(c in resident for c in found):
+                queue.append(found[0])
+    reached, queue = set(resident), [(pkg,) for pkg in sorted(resident)]
+    while queue:
+        chain = queue.pop()
+        for clause in meta[chain[-1]][0]:
+            through = {b for alt in clause for b in satisfiers.get(alt, ())}
+            if through:
+                queue.extend(chain + (b,) for b in sorted(through - reached))
+                reached |= through
+                continue
+            found = candidates(clause, new, providers)
+            if found and not any(c in resident for c in found):
+                fatal(f"apt.payload.resident: {chain[0]} reaches the new package {found[0]} through the base package {chain[-1]} ({' -> '.join(chain + (found[0],))}), and packages.before records no versions to show whether a resident install upgrades {chain[-1]}; move {found[0]} to apt.payload.resident")
     return resident & new
 
 
