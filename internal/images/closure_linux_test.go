@@ -161,12 +161,23 @@ case "$1" in
   -v)
     if [ -n "${FC_PROOF:-}" ]; then
       sed "s|@FONTS@|$dir|g" "$FC_PROOF"
+    elif [ -n "${FC_LOOP_ONLY:-}" ]; then
+      echo "$dir: skipping, looped directory detected"
     elif [ -n "${FC_STALE:-}" ]; then
       echo "$dir: caching, new cache contents: 1 fonts, 1 dirs"
     else
       find "$dir" -type d | sort | while read -r d; do
+        if [ -n "${FC_MISSING:-}" ] && [ "$d" != "$dir" ]; then
+          continue
+        fi
         echo "$d: skipping, existing cache is valid: 1 fonts, 0 dirs"
+        if [ -n "${FC_LOOP:-}" ]; then
+          echo "$d: skipping, looped directory detected"
+        fi
       done
+      if [ -n "${FC_UNKNOWN:-}" ]; then
+        echo "$dir/unknown: skipping, existing cache is valid: 1 fonts, 0 dirs"
+      fi
     fi
     echo "$cachedir: not cleaning unwritable cache directory"
     echo "fc-cache: succeeded"
@@ -1022,7 +1033,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			h.file("/etc/libfoo-redirected", "x", 0o644)
 			h.dpkg.Packages["libfoo1"].Files = append(h.dpkg.Packages["libfoo1"].Files, "/usr/share/libfoo", "/usr/share/libfoo/libfoo-redirected")
 		}, wantErr: func(h *captureHost) string {
-			return "cc-remote: /usr/share/libfoo/libfoo-redirected would be written through " + h.closure + "/usr/share/libfoo, which is not a directory inside the closure"
+			return "cc-remote: /usr/share/libfoo would be written through " + h.closure + "/usr/share/libfoo, which is not a directory inside the closure"
 		}},
 		{name: "a missing generated mime database is fatal", mutate: func(h *captureHost) {
 			if err := os.Remove(filepath.Join(h.host, "usr/share/mime/mime.cache")); err != nil {
@@ -1044,17 +1055,27 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			return "cc-remote: " + lib + "/gtk-3.0/3.0.0/immodules.cache was not generated on the build machine"
 		}},
 		{name: "a stale font cache is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_STALE=1"} }, wantErr: func(h *captureHost) string {
-			return "cc-remote: the font cache is not valid for " + h.closure + "/usr/share/fonts: caching, new cache contents: 1 fonts, 1 dirs"
+			return "cc-remote: the font cache is not valid for every closure font directory: ['" + h.closure + "/usr/share/fonts: caching, new cache contents: 1 fonts, 1 dirs']"
+		}},
+		{name: "a duplicate loop after a valid font directory scan is accepted", mutate: func(h *captureHost) { h.env = []string{"FC_LOOP=1"} }},
+		{name: "a font directory loop without a valid scan is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_LOOP_ONLY=1"} }, wantErr: func(h *captureHost) string {
+			return "cc-remote: the font cache is not valid for every closure font directory: ['" + h.closure + "/usr/share/fonts: skipping, looped directory detected']"
+		}},
+		{name: "a font directory omitted from the proof is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_MISSING=1"} }, wantErr: func(h *captureHost) string {
+			return "cc-remote: the font cache has no valid scan for closure font directories: ['" + h.closure + "/usr/share/fonts/truetype', '" + h.closure + "/usr/share/fonts/truetype/x']"
+		}},
+		{name: "a font directory absent from the closure is fatal", mutate: func(h *captureHost) { h.env = []string{"FC_UNKNOWN=1"} }, wantErr: func(h *captureHost) string {
+			return "cc-remote: the font cache is not valid for every closure font directory: ['" + h.closure + "/usr/share/fonts/unknown: skipping, existing cache is valid: 1 fonts, 0 dirs']"
 		}},
 		{name: "a looped directory before its valid scan is fatal", mutate: func(h *captureHost) {
 			h.env = []string{"FC_PROOF=" + h.proof("@FONTS@/truetype/x: skipping, looped directory detected\n@FONTS@: skipping, existing cache is valid: 0 fonts, 1 dirs\n@FONTS@/truetype: skipping, existing cache is valid: 0 fonts, 1 dirs\n@FONTS@/truetype/x: skipping, existing cache is valid: 1 fonts, 0 dirs\n")}
 		}, wantErr: func(h *captureHost) string {
-			return "cc-remote: the font cache is not valid for " + h.closure + "/usr/share/fonts/truetype/x: skipping, looped directory detected"
+			return "cc-remote: the font cache is not valid for every closure font directory: ['" + h.closure + "/usr/share/fonts/truetype/x: skipping, looped directory detected']"
 		}},
 		{name: "a closure font directory fc-cache never scanned is fatal", mutate: func(h *captureHost) {
 			h.env = []string{"FC_PROOF=" + h.proof("@FONTS@: skipping, existing cache is valid: 0 fonts, 1 dirs\n@FONTS@/truetype: skipping, existing cache is valid: 0 fonts, 1 dirs\n")}
 		}, wantErr: func(h *captureHost) string {
-			return "cc-remote: fc-cache -v never scanned " + h.closure + "/usr/share/fonts/truetype/x"
+			return "cc-remote: the font cache has no valid scan for closure font directories: ['" + h.closure + "/usr/share/fonts/truetype/x']"
 		}},
 		{name: "the live fc-cache output with covered loops passes", mutate: func(h *captureHost) {
 			h.liveFonts()

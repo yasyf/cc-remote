@@ -140,24 +140,24 @@ def walk(directory, base=None):
             yield directory + os.path.join(d, name)[len(top):]
 
 
-def confine(directory, subject):
-    existing = directory
+def confine(path):
+    existing = path
     while not os.path.lexists(existing):
         existing = os.path.dirname(existing)
     if os.path.realpath(existing) != existing or not os.path.isdir(existing):
-        fatal(f"{subject} would be written through {existing}, which is not a directory inside the closure")
+        fatal(f"{path[len(root):]} would be written through {existing}, which is not a directory inside the closure")
 
 
 def confined_directories(top):
     for d, names, _ in os.walk(top):
-        confine(d, d[len(root):])
+        confine(d)
         for name in names:
-            confine(os.path.join(d, name), os.path.join(d, name)[len(root):])
+            confine(os.path.join(d, name))
         yield d
 
 
 def directory(path):
-    confine(path, path[len(root):])
+    confine(path)
     os.makedirs(path, exist_ok=True)
 
 
@@ -213,7 +213,7 @@ def capture_files(paths_by_package, captured, new):
     for package, paths in paths_by_package.items():
         for path in paths:
             source = hostpath(path)
-            confine(os.path.dirname(root + canonical(path)), canonical(path))
+            confine(os.path.dirname(root + canonical(path)))
             if not os.path.lexists(source):
                 continue
             info = os.lstat(source)
@@ -317,11 +317,10 @@ def seal_fonts(generated):
     directory(cache)
     if not os.path.lexists(fonts):
         return
-    directories = []
-    for d in confined_directories(fonts):
+    directories = set(confined_directories(fonts))
+    for d in directories:
         info = os.lstat(d)
         os.utime(d, (int(info.st_atime), int(info.st_mtime)))
-        directories.append(d)
     built = run(["fc-cache", "-f"], FONTCONFIG_FILE=conf)
     if built.returncode != 0:
         fatal(f"fc-cache -f exited {built.returncode}: {built.stderr.strip()}")
@@ -331,32 +330,28 @@ def seal_fonts(generated):
     proof = run(["runuser", "-u", user, "--", "env", "FONTCONFIG_FILE=" + conf, "fc-cache", "-v"])
     if proof.returncode != 0:
         fatal(f"unprivileged fc-cache -v exited {proof.returncode}: {proof.stderr.strip()}")
-    check_font_scan(proof.stdout, fonts, directories)
+    scanned = [line for line in proof.stdout.splitlines() if line.startswith(fonts + ":") or line.startswith(fonts + "/")]
+    valid, stale = set(), []
+    for line in scanned:
+        name, separator, status = line.partition(": ")
+        if separator and name in directories and status.startswith("skipping, existing cache is valid:"):
+            valid.add(name)
+        elif separator and name in valid and status == "skipping, looped directory detected":
+            continue
+        else:
+            stale.append(line)
+    if not scanned or stale:
+        fatal(f"the font cache is not valid for every closure font directory: {stale or 'no directory was scanned'}")
+    missing = sorted(directories - valid)
+    if missing:
+        fatal(f"the font cache has no valid scan for closure font directories: {missing}")
     for path in walk("/var/cache/fontconfig", root):
         generated[path] = "fontconfig"
 
 
-def check_font_scan(output, fonts, directories):
-    valid, looped = "skipping, existing cache is valid", "skipping, looped directory detected"
-    first = {}
-    for line in output.splitlines():
-        path, sep, status = line.partition(": ")
-        if not sep or not (path == fonts or path.startswith(fonts + "/")):
-            continue
-        if path not in first:
-            first[path] = status
-            if status.split(":")[0] != valid:
-                fatal(f"the font cache is not valid for {path}: {status}")
-        elif status != looped:
-            fatal(f"fc-cache -v scanned {path} again: {status}")
-    missing = [d for d in directories if d not in first]
-    if missing:
-        fatal(f"fc-cache -v never scanned {' '.join(missing)}")
-
-
 def settle_icon_caches(themes):
     for theme in themes:
-        confine(f"{root}/usr/share/icons/{theme}", f"/usr/share/icons/{theme}")
+        confine(f"{root}/usr/share/icons/{theme}")
         stamp = int(os.lstat(f"{root}/usr/share/icons/{theme}").st_mtime) + 1
         os.utime(f"{root}/usr/share/icons/{theme}/icon-theme.cache", (stamp, stamp))
 
