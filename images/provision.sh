@@ -26,7 +26,7 @@ t64() {
   if [ "${#aliases[@]}" -eq 0 ]; then
     return
   fi
-  packages="$(apt-cache show "${aliases[@]}" 2> /dev/null)" || packages=""
+  packages="$(apt-cache -o APT::Cache::ShowVirtuals=true show "${aliases[@]}" 2> /dev/null)" || packages=""
   for name in "$@"; do
     if grep -qFx "Package: ${name}t64" <<< "$packages"; then
       echo "${name}t64"

@@ -20,10 +20,12 @@ func TestT64LoadsPackageCacheOnce(t *testing.T) {
 		name      string
 		args      []string
 		records   map[string]string
+		virtuals  []string
 		cacheExit string
 		want      string
 	}{
 		{name: "mixed aliases and regular names", args: []string{"libalpha", "libbeta", "libgamma"}, records: records, want: "libalphat64\nlibbeta\nlibgammat64\n"},
+		{name: "known virtual alias", args: []string{"libvirtual", "libbeta", "libalpha"}, records: records, virtuals: []string{"libvirtualt64"}, want: "libvirtualt64\nlibbeta\nlibalphat64\n"},
 		{name: "all aliases missing", args: []string{"libbeta", "libdelta"}, records: map[string]string{}, want: "libbeta\nlibdelta\n"},
 		{name: "successful empty metadata", args: []string{"libbeta", "libdelta"}, records: map[string]string{}, cacheExit: "0", want: "libbeta\nlibdelta\n"},
 		{name: "empty input", records: map[string]string{}},
@@ -56,14 +58,22 @@ import sys
 args = sys.argv[1:]
 with open(os.environ["CACHE_CALLS"], "a") as log:
     log.write(json.dumps(args) + "\n")
+show_virtuals = args[:2] == ["-o", "APT::Cache::ShowVirtuals=true"]
+if show_virtuals:
+    args = args[2:]
 if args[0] != "show":
     sys.exit(91)
 records = json.loads(os.environ["CACHE_RECORDS"])
+virtuals = os.environ["CACHE_VIRTUALS"].splitlines()
 found = False
 for name in reversed(args[1:]):
     if name in records:
         sys.stdout.write(records[name])
         found = True
+    elif name in virtuals:
+        found = True
+        if show_virtuals:
+            sys.stdout.write("Package: " + name + "\n\n")
 sys.stderr.write("fixture cache diagnostic\n")
 forced = os.environ["CACHE_EXIT"]
 sys.exit(int(forced) if forced else (0 if found else 100))
@@ -77,7 +87,7 @@ sys.exit(int(forced) if forced else (0 if found else 100))
 			}
 			args := append([]string{"-c", "set -euo pipefail\n" + helper + "t64 \"$@\"\n", "t64-fixture"}, tt.args...)
 			cmd := exec.Command("bash", args...)
-			cmd.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "CACHE_CALLS="+log, "CACHE_RECORDS="+string(encoded), "CACHE_EXIT="+tt.cacheExit)
+			cmd.Env = append(os.Environ(), "PATH="+root+":"+os.Getenv("PATH"), "CACHE_CALLS="+log, "CACHE_RECORDS="+string(encoded), "CACHE_EXIT="+tt.cacheExit, "CACHE_VIRTUALS="+strings.Join(tt.virtuals, "\n"))
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			if err := cmd.Run(); err != nil {
@@ -107,7 +117,7 @@ sys.exit(int(forced) if forced else (0 if found else 100))
 			if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"show"}
+			want := []string{"-o", "APT::Cache::ShowVirtuals=true", "show"}
 			for _, name := range tt.args {
 				want = append(want, name+"t64")
 			}
