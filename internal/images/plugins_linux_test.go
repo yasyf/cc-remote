@@ -198,7 +198,7 @@ if [ -f "$XDG_CONFIG_HOME/synckit/state.json" ]; then
 fi
 echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
 case "$2" in
-  get) if [ -f "${FAKE_LOG%/*}/services/$3" ]; then [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")"; fi ;;
+  get) [ -f "${FAKE_LOG%/*}/services/$3" ] || exit 1; [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")" ;;
   create) mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3" ;;
 esac
 `
@@ -1060,6 +1060,10 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 					spriteEnv++
 				}
 			}
+			wantCreates := 2
+			if tt.existing || tt.namespace {
+				wantCreates = 0
+			}
 			if tt.wantErr {
 				match := notReady.FindStringSubmatch(out)
 				if exitCode(err) != 1 || match == nil || match[1] != filepath.Join(h.home, ".s", "capt") || match[2] != filepath.Join(h.home, ".cc-remote", "services", "capt.log") {
@@ -1068,17 +1072,13 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 				if elapsed < tt.timeout || elapsed > tt.timeout+probe+2*time.Second {
 					t.Errorf("configure failed closed after %v, want within [%v, %v]", elapsed, tt.timeout, tt.timeout+probe+2*time.Second)
 				}
-				if installs != 0 {
-					t.Errorf("cookiesync install ran %d times although a service never became ready:\n%s", installs, strings.Join(calls, "\n"))
+				if installs != 0 || creates != wantCreates || mutations != 0 {
+					t.Errorf("installs=%d creates=%d start/restart=%d although a service never became ready, want 0 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("configure failed: %v\n%s", err, out)
-			}
-			wantCreates := 2
-			if tt.existing || tt.namespace {
-				wantCreates = 0
 			}
 			if installs != 1 || creates != wantCreates || mutations != 0 {
 				t.Errorf("installs=%d creates=%d start/restart=%d, want 1 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
