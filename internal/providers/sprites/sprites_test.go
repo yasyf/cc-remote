@@ -109,6 +109,56 @@ func TestCreateRejectsAnInvalidName(t *testing.T) {
 	}
 }
 
+func TestExecAsksTheAPIOnlyAfterAFailedCommand(t *testing.T) {
+	failing := []string{"sh", "-c", "printf err >&2; exit 3"}
+	tests := []struct {
+		name       string
+		id         string
+		cmd        []string
+		canceled   bool
+		apiStatus  int
+		wantVerbs  []string
+		wantExit   int
+		wantStderr string
+		wantErr    error
+	}{
+		{"success", "alpha", []string{"true"}, false, 0, []string{"exec"}, 0, "", nil},
+		{"remote failure", "alpha", failing, false, 0, []string{"exec", "api"}, 3, "err", nil},
+		{"missing sprite", "missing", []string{"true"}, false, 0, []string{"exec", "api"}, 0, "", providers.ErrNotFound},
+		{"runner error", "alpha", []string{"true"}, true, 0, []string{"exec"}, 0, "", context.Canceled},
+		{"api failure after a remote failure", "alpha", failing, false, 500, []string{"exec", "api"}, 3, "err", nil},
+		{"invalid name", "Alpha", []string{"true"}, false, 0, []string{}, 0, "", providers.ErrNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+				t.Fatal(err)
+			}
+			fake.status = tt.apiStatus
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.canceled {
+				cancel()
+			}
+			before := len(fake.verbs())
+			result, err := p.Exec(ctx, tt.id, tt.cmd, nil)
+			if verbs := fake.verbs()[before:]; !slices.Equal(verbs, tt.wantVerbs) {
+				t.Errorf("Exec ran %v, want %v", verbs, tt.wantVerbs)
+			}
+			switch {
+			case tt.wantErr == nil && err != nil:
+				t.Fatalf("Exec = %v", err)
+			case !errors.Is(err, tt.wantErr):
+				t.Fatalf("Exec = %v, want %v", err, tt.wantErr)
+			}
+			if result.ExitCode != tt.wantExit || string(result.Stderr) != tt.wantStderr {
+				t.Errorf("Exec = exit %d, stderr %q; want exit %d, stderr %q", result.ExitCode, result.Stderr, tt.wantExit, tt.wantStderr)
+			}
+		})
+	}
+}
+
 func TestCheck(t *testing.T) {
 	tests := []struct {
 		name  string

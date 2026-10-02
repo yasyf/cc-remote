@@ -158,9 +158,16 @@ func (p *Provider) machine(s sprite) (providers.Machine, error) {
 	return providers.Machine{ID: s.Name, Provider: Name, State: state, CreatedAt: s.CreatedAt, Labels: labels}, nil
 }
 
-func (p *Provider) Get(ctx context.Context, id string) (providers.Machine, error) {
+func checkID(id string) error {
 	if providers.CheckName(id, nameLimit) != nil {
-		return providers.Machine{}, fmt.Errorf("sprite %q: %w", id, providers.ErrNotFound)
+		return fmt.Errorf("sprite %q: %w", id, providers.ErrNotFound)
+	}
+	return nil
+}
+
+func (p *Provider) Get(ctx context.Context, id string) (providers.Machine, error) {
+	if err := checkID(id); err != nil {
+		return providers.Machine{}, err
 	}
 	status, body, err := p.api(ctx, "/v1/sprites/"+id)
 	if err != nil {
@@ -252,14 +259,21 @@ func (p *Provider) Destroy(ctx context.Context, id string) error {
 }
 
 func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {
-	if _, err := p.Get(ctx, id); err != nil {
+	if err := checkID(id); err != nil {
 		return providers.Result{}, err
 	}
 	args := []string{"exec", "-o", p.Org, "-s", id, "--no-port-forward"}
 	if stdin == nil {
 		args = append(args, "--no-stdin")
 	}
-	return p.Runner.Run(ctx, p.command(stdin, append(append(args, "--"), cmd...)...))
+	result, err := p.Runner.Run(ctx, p.command(stdin, append(append(args, "--"), cmd...)...))
+	if err != nil || result.ExitCode == 0 {
+		return result, err
+	}
+	if _, err := p.Get(ctx, id); errors.Is(err, providers.ErrNotFound) {
+		return providers.Result{}, err
+	}
+	return result, nil
 }
 
 func (p *Provider) Download(ctx context.Context, id, path string, w io.Writer) error {
