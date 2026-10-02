@@ -395,8 +395,8 @@ def capture():
     for record in ("packages.before", "packages.after", "seeds"):
         if not os.path.isfile(os.path.join(build, record)):
             fatal(f"{build}/{record} is missing, so this machine did not run packages full")
-    base = installed(os.path.join(build, "packages.before"))
-    new = installed(os.path.join(build, "packages.after")) - base
+    before, after = installed(os.path.join(build, "packages.before")), installed(os.path.join(build, "packages.after"))
+    base, new = before & after, after - before
     if not new:
         fatal("packages full installed nothing new, so there is no transaction to capture")
     with open(os.path.join(build, "seeds"), encoding="utf-8") as fh:

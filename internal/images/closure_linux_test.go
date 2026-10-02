@@ -29,6 +29,8 @@ import sys
 with open(os.environ["FAKE_DPKG"]) as fh:
     data = json.load(fh)
 packages, owners, args = data["packages"], data["owners"], sys.argv[1:]
+with open(os.path.join(os.environ["TEST_ROOT"], "dpkg-query.log"), "a") as log:
+    log.write(" ".join(args) + "\n")
 if args[0] == "-W" and len(args) == 3:
     for name in sorted(packages):
         print(packages[name].get("status", "ii ") + "\t" + name)
@@ -1151,6 +1153,17 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		}, check: func(t *testing.T, h *captureHost) {
 			if got, want := h.resident(t), []string{"libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
 				t.Errorf("resident = %v, want %v", got, want)
+			}
+		}},
+		{name: "a base package removed during the transaction is neither queried nor a satisfier", mutate: func(h *captureHost) {
+			h.record(map[string]string{"packages.before": "ii \twatchman\n"})
+		}, check: func(t *testing.T, h *captureHost) {
+			if got, want := h.resident(t), []string{"libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
+				t.Errorf("resident = %v, want %v", got, want)
+			}
+			queries := logLines(t, filepath.Join(h.root, "dpkg-query.log"))
+			if len(queries) == 0 || slices.ContainsFunc(queries, func(query string) bool { return strings.Contains(query, "watchman") }) {
+				t.Errorf("dpkg-query was asked about the removed package: %q", queries)
 			}
 		}},
 		{name: "a resident root reaching a new package through an upgraded base package is fatal", mutate: func(h *captureHost) {
