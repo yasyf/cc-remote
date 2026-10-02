@@ -75,6 +75,10 @@ pinned_bin() {
     echo "cc-remote: plugin $id $bin.binrun is not a committed file at $ref" >&2
     exit 1
   fi
+  if [ ! -f "$root/$bin" ] || [ ! -f "$root/$bin.binrun" ]; then
+    echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
+    exit 1
+  fi
   installed="$(git -C "$dir" hash-object --no-filters "$root/$bin")" \
     || { echo "cc-remote: cannot hash the installed $bin of plugin $id" >&2; exit 1; }
   if [ "$launcher" != "100755 $installed" ]; then

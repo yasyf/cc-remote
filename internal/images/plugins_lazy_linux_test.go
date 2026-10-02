@@ -254,7 +254,7 @@ func TestPluginsRejectLazyLaunchersTheirPinDoesNotCommit(t *testing.T) {
 		outside string
 		wantErr string
 	}{
-		{name: "untracked-descriptor", layout: lazyLayout{untracked: []string{"plugin/bin/tool.binrun"}}, wantErr: "differs from its pinned launcher or descriptor"},
+		{name: "untracked-descriptor", layout: lazyLayout{untracked: []string{"plugin/bin/tool.binrun"}}, wantErr: "bin/tool.binrun is not a committed file at"},
 		{name: "untracked-target", layout: lazyLayout{link: "../scripts/launch.sh", untracked: []string{"plugin/scripts/launch.sh"}}, wantErr: "is not a committed file at"},
 		{name: "escaping-target", layout: lazyLayout{link: "../../../launch.sh"}, outside: ".local/share/cc-remote/marketplaces/launch.sh", wantErr: "is not a committed file at"},
 		{name: "absolute-target", layout: lazyLayout{link: filepath.Join(t.TempDir(), "launch.sh")}, wantErr: "is not a committed file at"},
