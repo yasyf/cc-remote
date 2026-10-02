@@ -879,13 +879,13 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts followed by a locked ldconfig once the loader has registered the closure", helper, err)
 			}
 			marker, lock, bootFakes := filepath.Join(root, "closure.registered"), filepath.Join(root, "ldconfig.lock"), filepath.Join(root, "boot-fakes")
-			boot := strings.NewReplacer(
+			bootScript := strings.NewReplacer(
 				"/var/lib/cc-remote/payload", store,
 				"/opt/cc-remote/payload", payloads,
 				"/var/lib/cc-remote/closure.registered", marker,
 				"/var/lib/cc-remote/ldconfig.lock", lock,
 			).Replace(string(helper))
-			writePluginTestFile(t, filepath.Join(root, "boot.sh"), []byte(boot), 0o700)
+			writePluginTestFile(t, filepath.Join(root, "boot.sh"), []byte(bootScript), 0o700)
 			writeFakes(t, bootFakes, map[string]string{"flock": fakeFlock})
 			wantCalls := []string{"flock 9"}
 			for _, registered := range []bool{false, true} {
