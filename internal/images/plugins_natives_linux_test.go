@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -97,6 +98,7 @@ with open(os.path.join(root, "meta.json"), "w") as f:
 `
 
 const nativeLauncher = `#!/bin/sh
+echo "launcher $*" >> "$FAKE_LOG"
 RUNNER_REPO="owner/binrun"
 RUNNER_TAG="v0.8.0"
 RUNNER_SHA_linux_amd64="%s"
@@ -134,13 +136,15 @@ func tarGz(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-func tarGzLink(t *testing.T, name, target string) []byte {
+func tarGzMembers(t *testing.T, headers ...tar.Header) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: name, Linkname: target, Mode: 0o777}); err != nil {
-		t.Fatal(err)
+	for _, header := range headers {
+		if err := tw.WriteHeader(&header); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatal(err)
@@ -276,7 +280,11 @@ func TestPluginsNativesRejectAMismatchedRoot(t *testing.T) {
 		prepare func(t *testing.T, f nativeFixture)
 		wantErr string
 	}{
-		{name: "runner archive symlink member", runner: tarGzLink(t, "binrun", "nowhere"), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not a regular file"},
+		{name: "runner archive symlink member", runner: tarGzMembers(t, tar.Header{Typeflag: tar.TypeSymlink, Name: "binrun", Linkname: "nowhere", Mode: 0o777}), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not one regular archive member"},
+		{name: "runner archive hardlink member", runner: tarGzMembers(t, tar.Header{Typeflag: tar.TypeLink, Name: "binrun", Linkname: filepath.Base(runnerAssetURL), Mode: 0o755}), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not one regular archive member"},
+		{name: "runner archive directory member", runner: tarGzMembers(t, tar.Header{Typeflag: tar.TypeDir, Name: "binrun", Mode: 0o755}), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not one regular archive member"},
+		{name: "runner archive duplicate member", runner: tarGzMembers(t, tar.Header{Typeflag: tar.TypeReg, Name: "binrun", Mode: 0o755}, tar.Header{Typeflag: tar.TypeReg, Name: "binrun", Mode: 0o755}), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not one regular archive member"},
+		{name: "runner archive without the member", runner: tarGzMembers(t, tar.Header{Typeflag: tar.TypeReg, Name: "README", Mode: 0o644}), wantErr: "binrun in " + filepath.Base(runnerAssetURL) + " is not one regular archive member"},
 		{name: "symlink entrypoint", tamper: "symlink-entrypoint", wantErr: "is not a daemonkit cache entry"},
 		{name: "meta.json digest", tamper: "meta-digest", wantErr: "is not a daemonkit cache entry"},
 		{name: "meta.json name", tamper: "meta-name", wantErr: "is not a daemonkit cache entry"},
@@ -333,6 +341,15 @@ func TestPluginsNativesRejectAMismatchedRoot(t *testing.T) {
 			if exitCode(err) != 1 || !strings.Contains(out, tt.wantErr) {
 				t.Fatalf("natives = %v\n%s\nwant exit 1 mentioning %q", err, out, tt.wantErr)
 			}
+			if tt.runner == nil {
+				return
+			}
+			if _, err := os.Lstat(filepath.Join(f.h.fakes, "calls.log.binrun")); !os.IsNotExist(err) {
+				t.Errorf("a rejected runner archive still ran: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(f.h.home, ".daemonkit/binrun")); !os.IsNotExist(err) {
+				t.Errorf("a rejected runner archive was still installed: %v", err)
+			}
 		})
 	}
 }
@@ -378,6 +395,38 @@ func TestPluginsNativesProvePinsBeforeTheRunner(t *testing.T) {
 				t.Errorf("natives downloaded before the pin proof:\n%s", strings.Join(calls, "\n"))
 			}
 		})
+	}
+}
+
+func blobOID(content string) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content)))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestPluginsPinProofFailsClosedOnAnUnreadableBlob(t *testing.T) {
+	f := nativeHost(t, nativeOptions{})
+	if out, err := f.h.plugins("install"); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	oid := blobOID(f.launcher)
+	object := filepath.Join(f.h.home, ".local/share/cc-remote/marketplaces/tools-market/.git/objects", oid[:2], oid[2:])
+	if err := os.Remove(object); err != nil {
+		t.Fatalf("the committed launcher is not a loose object: %v", err)
+	}
+	want := "cc-remote: cannot read the committed bin/tool of plugin hook@tools-market at "
+	for _, phase := range []string{"natives", "verify"} {
+		out, err := f.h.plugins(phase)
+		if exitCode(err) != 1 || !strings.Contains(out, want) {
+			t.Fatalf("%s = %v\n%s\nwant exit 1 with %q", phase, err, out, want)
+		}
+	}
+	for _, call := range f.h.calls() {
+		if strings.HasPrefix(call, "launcher ") || strings.HasPrefix(call, "curl ") {
+			t.Errorf("an unreadable committed blob still led to %q", call)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(f.h.fakes, "calls.log.binrun")); !os.IsNotExist(err) {
+		t.Errorf("an unreadable committed blob still ran the runner: %v", err)
 	}
 }
 
@@ -466,6 +515,9 @@ func TestPluginsInstallExposesNativeRoots(t *testing.T) {
 			expose := "expose_native \"$HOME/\"" + quote(nativeCache) + " 'bin/tool'\n"
 			writePluginTestFile(t, filepath.Join(f.h.fakes, "expose.sh"), []byte(functions+"\npayload=\"$2\"\nnative_home\n"+expose+expose), 0o700)
 			out, err := f.h.run("bash", filepath.Join(f.h.fakes, "expose.sh"), "install", payload)
+			if _, err := os.Lstat(filepath.Join(f.h.fakes, "calls.log.binrun")); !os.IsNotExist(err) {
+				t.Errorf("exposing the payload ran the runner: %v", err)
+			}
 			var wantErr string
 			switch {
 			case tt.omit == "root":
@@ -506,9 +558,6 @@ func TestPluginsInstallExposesNativeRoots(t *testing.T) {
 			}
 			if entries, err := os.ReadDir(filepath.Dir(root)); err != nil || len(entries) != 1 {
 				t.Errorf("the shard holds %v, %v; want the one shared link", entries, err)
-			}
-			if _, err := os.Lstat(filepath.Join(f.h.fakes, "calls.log.binrun")); !os.IsNotExist(err) {
-				t.Errorf("exposing the payload ran the runner: %v", err)
 			}
 		})
 	}

@@ -42,14 +42,16 @@ plugin_path() {
 }
 
 pinned_blob() {
-  local dir="$1" ref="$2" path="$3" mode oid target
-  read -r mode _ oid _ <<< "$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "$path")"
+  local dir="$1" ref="$2" path="$3" rows mode oid target
+  rows="$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "$path")" || { echo "cc-remote: cannot list $path at $ref in $dir" >&2; exit 1; }
+  read -r mode _ oid _ <<< "$rows"
   if [ "$mode" = 120000 ]; then
-    target="$(git -C "$dir" cat-file blob "$oid")"
+    target="$(git -C "$dir" cat-file blob "$oid")" || { echo "cc-remote: cannot read the link $path at $ref in $dir" >&2; exit 1; }
     case "$target" in
       "" | /* | */ | . | .. | */. | */..) return 1 ;;
     esac
-    read -r mode _ oid _ <<< "$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "${path%/*}/$target")"
+    rows="$(GIT_LITERAL_PATHSPECS=1 git -C "$dir" ls-tree "$ref" -- "${path%/*}/$target")" || { echo "cc-remote: cannot list ${path%/*}/$target at $ref in $dir" >&2; exit 1; }
+    read -r mode _ oid _ <<< "$rows"
   fi
   case "$mode" in
     100644 | 100755) printf '%s %s\n' "$mode" "$oid" ;;
@@ -58,18 +60,30 @@ pinned_blob() {
 }
 
 pinned_bin() {
-  local root="$1" id="$2" bin="$3" ref="$4" dir source launcher descriptor
+  local root="$1" id="$2" bin="$3" ref="$4" dir source launcher descriptor installed
   dir="$marketplace_dir/${id#*@}"
-  source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')"
+  source="$(git -C "$dir" cat-file blob "$ref:.claude-plugin/marketplace.json" | jq -er --arg name "${id%@*}" '.plugins[] | select(.name == $name) | .source | select(type == "string")')" \
+    || { echo "cc-remote: plugin $id has no source in the marketplace manifest at $ref" >&2; exit 1; }
   if ! launcher="$(pinned_blob "$dir" "$ref" "$source/$bin")"; then
     echo "cc-remote: plugin $id $bin is not a committed file at $ref" >&2
     exit 1
   fi
-  git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher"
+  git -C "$dir" cat-file blob "${launcher#* }" > "$tmp_dir/launcher" \
+    || { echo "cc-remote: cannot read the committed $bin of plugin $id at $ref" >&2; exit 1; }
   binrun_launcher "$tmp_dir/launcher" "$bin" || return 1
-  if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")" \
-    || [ "$launcher" != "100755 $(git -C "$dir" hash-object --no-filters "$root/$bin")" ] \
-    || [ "$descriptor" != "${descriptor% *} $(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" ]; then
+  if ! descriptor="$(pinned_blob "$dir" "$ref" "$source/$bin.binrun")"; then
+    echo "cc-remote: plugin $id $bin.binrun is not a committed file at $ref" >&2
+    exit 1
+  fi
+  installed="$(git -C "$dir" hash-object --no-filters "$root/$bin")" \
+    || { echo "cc-remote: cannot hash the installed $bin of plugin $id" >&2; exit 1; }
+  if [ "$launcher" != "100755 $installed" ]; then
+    echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
+    exit 1
+  fi
+  installed="$(git -C "$dir" hash-object --no-filters "$root/$bin.binrun")" \
+    || { echo "cc-remote: cannot hash the installed $bin.binrun of plugin $id" >&2; exit 1; }
+  if [ "$descriptor" != "${descriptor% *} $installed" ]; then
     echo "cc-remote: plugin $id $bin differs from its pinned launcher or descriptor" >&2
     exit 1
   fi
@@ -106,10 +120,14 @@ prepare_runner() {
   text="$(runner_pin "$launcher")" || exit
   mapfile -t pin <<< "$text"
   dir="$HOME/.daemonkit/binrun/${pin[1]}"
-  stage="$(mktemp -d "$tmp_dir/runner.XXXXXX")"
+  stage="$(mktemp -d "$tmp_dir/runner.XXXXXX")" || { echo "cc-remote: cannot stage the binrun runner" >&2; exit 1; }
   asset="binrun_${pin[1]#v}_linux_$(runner_arch).tar.gz"
   fetch "https://github.com/${pin[0]}/releases/download/${pin[1]}/$asset" "$stage/$asset" sha256 "${pin[2]}"
-  tar -xzf "$stage/$asset" -C "$stage" binrun
+  if [ "$(tar -tvzf "$stage/$asset" binrun 2> /dev/null | cut -c1 | tr -d '\n')" != - ]; then
+    echo "cc-remote: binrun in $asset is not one regular archive member" >&2
+    exit 1
+  fi
+  tar -xzf "$stage/$asset" -C "$stage" binrun || { echo "cc-remote: cannot extract binrun from $asset" >&2; exit 1; }
   if [ ! -f "$stage/binrun" ] || [ -L "$stage/binrun" ]; then
     echo "cc-remote: binrun in $asset is not a regular file" >&2
     exit 1
@@ -120,8 +138,8 @@ prepare_runner() {
       exit 1
     fi
   else
-    mkdir -p "$dir"
-    install -m 0755 "$stage/binrun" "$dir/binrun"
+    mkdir -p "$dir" && install -m 0755 "$stage/binrun" "$dir/binrun" \
+      || { echo "cc-remote: cannot install binrun ${pin[1]} at $dir" >&2; exit 1; }
   fi
   rm -rf "$stage"
   printf '%s\n' "$dir/binrun"

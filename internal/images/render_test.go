@@ -474,7 +474,7 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	}
 	var system []string
 	for line := range strings.Lines(string(scripts.ProvisionScript)) {
-		if !strings.HasPrefix(line, "  pack_path ") || !strings.Contains(line, `"$user_home/"`) {
+		if (!strings.HasPrefix(line, "  pack_path ") && !strings.HasPrefix(line, "  pack_native ")) || !strings.Contains(line, `"$user_home/"`) {
 			system = append(system, line)
 		}
 	}

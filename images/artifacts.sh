@@ -142,11 +142,17 @@ expose() {
 }
 
 binrun_launcher() {
+  local status=0
   if [ ! -f "$1" ]; then
     echo "cc-remote: $1 is not a file" >&2
     exit 1
   fi
-  grep -qF "DESCRIPTOR=\"\$ROOT/$2.binrun\"" "$1" && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" "$1"
+  grep -qF "DESCRIPTOR=\"\$ROOT/$2.binrun\"" "$1" && grep -qF "exec \"\$RUNNER_BIN\" \"\$DESCRIPTOR\" \"\$@\"" "$1" || status=$?
+  if [ "$status" -gt 1 ]; then
+    echo "cc-remote: cannot read $1" >&2
+    exit 1
+  fi
+  [ "$status" -eq 0 ]
 }
 
 native_platform() {
@@ -201,7 +207,10 @@ native_root() {
 }
 
 native_tree() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ -z "$(find "$1" -mindepth 1 ! -type f ! -type d -print -quit)" ]
+  local foreign
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  foreign="$(find "$1" -mindepth 1 ! -type f ! -type d -print -quit)" || { echo "cc-remote: cannot list $1" >&2; exit 1; }
+  [ -z "$foreign" ]
 }
 
 native_hit() {
@@ -213,7 +222,7 @@ native_hit() {
 
 launcher_var() {
   local value
-  value="$(sed -n "s/^$2=\"\\([^\"]*\\)\"\$/\\1/p" "$1")"
+  value="$(sed -n "s/^$2=\"\\([^\"]*\\)\"\$/\\1/p" "$1")" || { echo "cc-remote: cannot read $1" >&2; exit 1; }
   case "$value" in
     "" | *$'\n'*) ;;
     *)
@@ -242,6 +251,8 @@ runner_dir() {
 }
 
 runner_tree() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ -f "$1/binrun" ] && [ -x "$1/binrun" ] && [ ! -L "$1/binrun" ] \
-    && [ -z "$(find "$1" -mindepth 1 ! -path "$1/binrun" -print -quit)" ]
+  local extra
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -f "$1/binrun" ] && [ -x "$1/binrun" ] && [ ! -L "$1/binrun" ] || return 1
+  extra="$(find "$1" -mindepth 1 ! -path "$1/binrun" -print -quit)" || { echo "cc-remote: cannot list $1" >&2; exit 1; }
+  [ -z "$extra" ]
 }
