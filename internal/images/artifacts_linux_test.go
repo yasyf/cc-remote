@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"testing"
+	"time"
 
 	assets "github.com/yasyf/cc-remote/images"
 )
@@ -134,7 +134,9 @@ func TestArtifactQueueOverlapsAndCapsDownloads(t *testing.T) {
 		}
 		arrivals <- r.URL.Path
 		<-release
-		fmt.Fprint(w, "#!/bin/sh\n")
+		if _, err := fmt.Fprint(w, "#!/bin/sh\n"); err != nil {
+			t.Errorf("write download: %v", err)
+		}
 	}))
 	defer server.Close()
 	root := t.TempDir()
@@ -178,7 +180,9 @@ func TestArtifactQueueStagesRepeatedNamesSeparately(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		arrivals <- r.URL.Path
 		<-release
-		fmt.Fprint(w, payloads[r.URL.Path])
+		if _, err := fmt.Fprint(w, payloads[r.URL.Path]); err != nil {
+			t.Errorf("write download: %v", err)
+		}
 	}))
 	defer server.Close()
 	root := t.TempDir()
@@ -219,7 +223,9 @@ func TestArtifactQueueDrainsFailuresBeforeCleanup(t *testing.T) {
 				if r.URL.Path != "/0" {
 					<-release
 				}
-				fmt.Fprint(w, "#!/bin/sh\n")
+				if _, err := fmt.Fprint(w, "#!/bin/sh\n"); err != nil {
+					t.Errorf("write download: %v", err)
+				}
 			}))
 			defer server.Close()
 			root := t.TempDir()
@@ -337,7 +343,9 @@ func TestProvisionDrainsArtifactsAtDebianBarriers(t *testing.T) {
 				t.Errorf("third artifact preceded second apt completion: %v", err)
 			}
 		}
-		fmt.Fprint(w, payload)
+		if _, err := fmt.Fprint(w, payload); err != nil {
+			t.Errorf("write download: %v", err)
+		}
 	}))
 	defer server.Close()
 	inventory := Inventory{Version: SchemaVersion}
