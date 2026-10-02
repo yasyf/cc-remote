@@ -74,6 +74,53 @@ type scripted struct {
 	scripts  map[string][]string
 	stdins   map[string][]string
 	ready    map[string]string
+	holds    map[string]*hold
+}
+
+type hold struct {
+	fragment string
+	entered  chan struct{}
+	release  chan providers.Result
+}
+
+func (m *scripted) hold(t *testing.T, fragment string) *hold {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.holds == nil {
+		m.holds = map[string]*hold{}
+	}
+	h := &hold{fragment: fragment, entered: make(chan struct{}), release: make(chan providers.Result, 1)}
+	m.holds[fragment] = h
+	t.Cleanup(func() { close(h.release) })
+	return h
+}
+
+func (h *hold) awaitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%q never ran", h.fragment)
+	}
+}
+
+func (h *hold) stillParked(t *testing.T, stage string) {
+	t.Helper()
+	select {
+	case <-h.entered:
+		t.Fatalf("%q ran %s", h.fragment, stage)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func (h *hold) ran() bool {
+	select {
+	case <-h.entered:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *scripted) setStatus(status string) {
@@ -97,6 +144,12 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
 	failAll, joined := m.failAll, m.joined
+	var held *hold
+	for fragment, h := range m.holds {
+		if strings.Contains(script, fragment) {
+			held = h
+		}
+	}
 	stamp := cmd[len(cmd)-1]
 	switch {
 	case strings.Contains(script, publishes):
@@ -106,6 +159,10 @@ func (m *scripted) Handle(id string, cmd []string, stdin []byte) providers.Resul
 		return providers.Result{Stderr: []byte("plugins: this host was not prepared from stamp " + stamp), ExitCode: 1}
 	}
 	m.mu.Unlock()
+	if held != nil {
+		close(held.entered)
+		return <-held.release
+	}
 	if failAll {
 		return providers.Result{Stderr: []byte("the machine went away"), ExitCode: 1}
 	}
@@ -891,14 +948,27 @@ func TestAMissingPayloadFileFailsTheCreateBeforeAnythingIsPublished(t *testing.T
 }
 
 func TestAPayloadPathMustResolveToARegularFile(t *testing.T) {
+	notRegular := func(path string, info os.FileInfo) string {
+		return fmt.Sprintf("open payload: %s is not a regular file (mode %v)", path, info.Mode())
+	}
+	shared := func(path string, info os.FileInfo) string {
+		return fmt.Sprintf("open payload: %s is readable by others (mode %v); only its owner may read a payload", path, info.Mode())
+	}
 	tests := []struct {
 		name    string
 		replace func(path, staged string) error
-		refused bool
+		refused func(path string, info os.FileInfo) string
 	}{
-		{name: "a symlink to the payload is followed", replace: func(path, staged string) error { return os.Symlink(staged, path) }},
-		{name: "a directory is refused", replace: func(path, _ string) error { return os.Mkdir(path, 0o700) }, refused: true},
-		{name: "a fifo is refused without waiting for a writer", replace: func(path, _ string) error { return syscall.Mkfifo(path, 0o600) }, refused: true},
+		{name: "a private payload is accepted", replace: func(path, staged string) error { return os.Rename(staged, path) }},
+		{name: "a symlink to a private payload is followed", replace: func(path, staged string) error { return os.Symlink(staged, path) }},
+		{name: "a directory is refused", replace: func(path, _ string) error { return os.Mkdir(path, 0o700) }, refused: notRegular},
+		{name: "a fifo is refused without waiting for a writer", replace: func(path, _ string) error { return syscall.Mkfifo(path, 0o600) }, refused: notRegular},
+		{name: "a payload readable by others is refused", replace: func(path, staged string) error {
+			if err := os.Rename(staged, path); err != nil {
+				return err
+			}
+			return os.Chmod(path, 0o644)
+		}, refused: shared},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -916,17 +986,17 @@ func TestAPayloadPathMustResolveToARegularFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
-			if !tt.refused {
+			if tt.refused == nil {
 				if err != nil {
 					t.Fatal(err)
 				}
 				order := h.ordered(0, stagesPayload, payloadPhase, publishes)
 				if got := h.machine.stdins["ws-1"][order[0]]; got != payloadBytes {
-					t.Errorf("the staging read %q through the symlink, want the payload file", got)
+					t.Errorf("the staging read %q, want the payload file", got)
 				}
 				return
 			}
-			if want := fmt.Sprintf("open payload: %s is not a regular file (mode %v)", path, info.Mode()); err == nil || err.Error() != want {
+			if want := tt.refused(path, info); err == nil || err.Error() != want {
 				t.Fatalf("Create = %v, want %q", err, want)
 			}
 			if h.machine.ran("ws-1", stagesPayload) != 0 || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
@@ -1018,6 +1088,88 @@ func TestAFailedLaneCancelsItsSiblingsBeforeAnythingIsPublished(t *testing.T) {
 	}
 	if h.machine.ran("ws-1", publishes) != 0 || h.machine.ready["ws-1"] != "" {
 		t.Errorf("a failed create published stamp %q", h.machine.ready["ws-1"])
+	}
+}
+
+func TestAProfilePrepareWaitsForThePackagesAndTheToolInstall(t *testing.T) {
+	tests := []struct {
+		name    string
+		empty   bool
+		release []string
+		fails   string
+	}{
+		{name: "prepare runs once the packages and then the tool install finish", release: []string{packagesPhase, installs}},
+		{name: "prepare runs once the tool install and then the packages finish", release: []string{installs, packagesPhase}},
+		{name: "an empty prepare runs nothing and waits for nothing", empty: true, release: []string{packagesPhase, installs}},
+		{name: "a failed packages lane never prepares", release: []string{packagesPhase, installs}, fails: packagesPhase},
+		{name: "a failed tool install never prepares", release: []string{installs, packagesPhase}, fails: installs},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, false)
+			if tt.empty {
+				profile := h.cfg.Profiles["lean"]
+				profile.Prepare = nil
+				h.cfg.Profiles["lean"] = profile
+				h.session = h.open()
+			}
+			upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
+			checkingOut, preparing := h.machine.hold(t, checkout), h.machine.hold(t, prepares)
+			release := func(fragment string) {
+				result := providers.Result{}
+				if fragment == tt.fails {
+					result = providers.Result{Stderr: []byte(fragment + " held back the create"), ExitCode: 1}
+				}
+				upstream[fragment].release <- result
+			}
+			created := make(chan error, 1)
+			go func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			}()
+			upstream[packagesPhase].awaitEntered(t)
+			upstream[installs].awaitEntered(t)
+			checkingOut.awaitEntered(t)
+			checkingOut.release <- providers.Result{}
+			preparing.stillParked(t, "while the packages and the tool install were still running")
+			release(tt.release[0])
+			preparing.stillParked(t, "once only "+tt.release[0]+" had finished")
+			release(tt.release[1])
+			if tt.fails != "" {
+				if err := <-created; err == nil || !strings.Contains(err.Error(), tt.fails+" held back the create") {
+					t.Fatalf("Create = %v", err)
+				}
+				if preparing.ran() || h.machine.ran("ws-1", publishes) != 0 {
+					t.Errorf("a create whose %q failed ran %q", tt.fails, h.machine.scripts["ws-1"])
+				}
+				if _, ok := h.record("ws-1"); ok {
+					t.Error("the failed create kept its record")
+				}
+				return
+			}
+			if tt.empty {
+				if err := <-created; err != nil {
+					t.Fatal(err)
+				}
+				if preparing.ran() || h.machine.ran("ws-1", prepares) != 0 || h.machine.ran("ws-1", publishes) != 1 {
+					t.Errorf("a create with no prepare steps ran %q", h.machine.scripts["ws-1"])
+				}
+				return
+			}
+			preparing.awaitEntered(t)
+			preparing.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, checkout, prepares, publishes)
+			h.ordered(0, packagesPhase, prepares)
+			h.ordered(0, installs, prepares)
+			h.ordered(0, packagesPhase, configures, publishes)
+			h.ordered(0, installs, configures, publishes)
+			if h.machine.ran("ws-1", prepares) != 1 || h.machine.ran("ws-1", publishes) != 1 {
+				t.Errorf("the create prepared %d times and published %d times: %q", h.machine.ran("ws-1", prepares), h.machine.ran("ws-1", publishes), h.machine.scripts["ws-1"])
+			}
+		})
 	}
 }
 

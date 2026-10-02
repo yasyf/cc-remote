@@ -352,15 +352,22 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		return nil, err
 	}
 	run := newLanes(ctx)
-	run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
+	packages := run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine) })
+	tools := run.Go(func(ctx context.Context) error { return s.installPlugins(ctx, machine) })
 	run.Go(func(ctx context.Context) error {
 		if err := s.checkout(ctx, record); err != nil {
+			return err
+		}
+		if len(s.profile.Prepare) == 0 {
+			return nil
+		}
+		if err := run.after(packages, tools); err != nil {
 			return err
 		}
 		return s.prepare(ctx, record, env)
 	})
 	run.Go(func(ctx context.Context) error {
-		if err := s.installPlugins(ctx, machine); err != nil {
+		if err := run.after(packages, tools); err != nil {
 			return err
 		}
 		if err := s.configure(ctx, record, env); err != nil {
@@ -456,6 +463,12 @@ func (s *Session) mountPayload(ctx context.Context, machine string, run images.E
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("open payload: %s is not a regular file (mode %v)", image.Name(), info.Mode())
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("open payload: %s is readable by others (mode %v); only its owner may read a payload", image.Name(), info.Mode())
+	}
+	if owner := info.Sys().(*syscall.Stat_t).Uid; int(owner) != os.Getuid() {
+		return fmt.Errorf("open payload: %s is owned by uid %d, not by this user (uid %d)", image.Name(), owner, os.Getuid())
 	}
 	if err = s.Scripts.StagePayload(ctx, run, image, s.payload.SHA256); err != nil {
 		return err

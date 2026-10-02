@@ -1028,7 +1028,8 @@ except urllib.error.HTTPError:
 			finishArtifactScript(t, done, fail)
 			lock.Lock()
 			defer lock.Unlock()
-			wantGets := []string{"cc-remote-payload"}
+			wantGets := make([]string, 0, 1+len(names))
+			wantGets = append(wantGets, "cc-remote-payload")
 			for _, name := range names {
 				wantGets = append(wantGets, "cc-remote-"+name)
 			}

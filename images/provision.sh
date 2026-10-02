@@ -134,7 +134,7 @@ verify_payload() {
 
 provision_payload() {
   local sha256="${1:?payload needs the image sha256}" fingerprint="${2:?payload needs the tools fingerprint}"
-  local image="$payload_store/$sha256.sqfs" payload="$payload_root/$sha256" user_home version mismatch
+  local image="$payload_store/$sha256.sqfs" payload="$payload_root/$sha256" user_home version mismatch device
   if [ ! -f "$image.partial" ] && [ ! -f "$image" ]; then
     echo "cc-remote: no payload is staged at $image.partial" >&2
     exit 1
@@ -142,6 +142,12 @@ provision_payload() {
   cat > "$tmp_dir/payload-mount.sh" <<'SH'
 #!/bin/sh
 set -eu
+verify() {
+  if ! echo "$1  $2" | sha256sum -c --status -; then
+    echo "cc-remote: $2 does not match its sha256 $1" >&2
+    exit 1
+  fi
+}
 exec 9> /var/lib/cc-remote/payload/.lock
 flock 9
 for image in /var/lib/cc-remote/payload/*.sqfs; do
@@ -151,11 +157,11 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
   sha256="$(basename "$image" .sqfs)"
   dir="/opt/cc-remote/payload/$sha256"
   mkdir -p "$dir"
-  if ! mountpoint -q "$dir"; then
-    if ! echo "$sha256  $image" | sha256sum -c --status -; then
-      echo "cc-remote: $image does not match its sha256 $sha256" >&2
-      exit 1
-    fi
+  if mountpoint -q "$dir"; then
+    device="$(findmnt -no SOURCE "$dir")"
+    verify "$sha256" "$device"
+  else
+    verify "$sha256" "$image"
     mount -t squashfs -o ro,loop "$image" "$dir"
   fi
 done
@@ -170,7 +176,10 @@ SH
     elif ! mountpoint -q "$payload"; then
       verify_payload "$sha256" "$image"
     fi
-    if ! mountpoint -q "$payload"; then
+    if mountpoint -q "$payload"; then
+      device="$(findmnt -no SOURCE "$payload")"
+      verify_payload "$sha256" "$device"
+    else
       mount -t squashfs -o ro,loop "$image" "$payload"
     fi
   ) 9> "$payload_store/.lock"

@@ -326,9 +326,11 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 		toolsMove, imgMove bool
 	}{
 		{"user tool digest", func(i *Inventory) { i.Tools[0].SHA256 = strings.Repeat("3", 64) }, true, false},
+		{"user tool version", func(i *Inventory) { i.Tools[0].Version = "1.8.3" }, true, false},
 		{"system tool version", func(i *Inventory) { i.System[1].Version = "2.0.1" }, true, true},
 		{"plugin version", func(i *Inventory) { i.Claude.Plugins[0].Version = "1.0.1" }, true, false},
 		{"marketplace ref", func(i *Inventory) { i.Claude.Marketplaces[0].Ref = strings.Repeat("4", 40) }, true, false},
+		{"captain hook version", func(i *Inventory) { i.CaptainHook.Version = "1.0.1" }, true, false},
 		{"image user", func(i *Inventory) { i.Image.User = "dev" }, false, true},
 		{"image base", func(i *Inventory) { i.Image.Base = "ubuntu:26.04@sha256:" + strings.Repeat("5", 64) }, false, true},
 		{"image name", func(i *Inventory) { i.Image.Name = "other" }, false, false},
@@ -346,13 +348,16 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 			if moved := got.image != base.image; moved != tt.imgMove {
 				t.Errorf("image fingerprint moved = %v, want %v", moved, tt.imgMove)
 			}
+			if moved := got.stamp != base.stamp; moved != tt.toolsMove {
+				t.Errorf("Sprites ready stamp moved = %v, want %v", moved, tt.toolsMove)
+			}
 		})
 	}
 }
 
-type fingerprintPair struct{ tools, image string }
+type fingerprintSet struct{ tools, image, stamp string }
 
-func fingerprints(t *testing.T, inventory Inventory) fingerprintPair {
+func fingerprints(t *testing.T, inventory Inventory) fingerprintSet {
 	t.Helper()
 	scripts, err := Render(inventory, "agents")
 	if err != nil {
@@ -362,7 +367,7 @@ func fingerprints(t *testing.T, inventory Inventory) fingerprintPair {
 	if err != nil {
 		t.Fatalf("RenderImage: %v", err)
 	}
-	return fingerprintPair{scripts.Fingerprint(), context.Fingerprint()}
+	return fingerprintSet{scripts.Fingerprint(), context.Fingerprint(), Stamp(scripts, nil, digest)}
 }
 
 func TestRenderImageDockerfile(t *testing.T) {
@@ -390,7 +395,13 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if !bytes.Equal(context.Provision, scripts.ProvisionScript) {
-		t.Errorf("the image context's provision.sh differs from the rendered one")
+	var system []string
+	for line := range strings.Lines(string(scripts.ProvisionScript)) {
+		if !strings.HasPrefix(line, "  pack_path ") || !strings.Contains(line, `"$user_home/"`) {
+			system = append(system, line)
+		}
+	}
+	if got, want := string(context.Provision), strings.Join(system, ""); got != want {
+		t.Errorf("the image context's provision.sh is not the rendered one without its user-home packing:\n%s", got)
 	}
 }

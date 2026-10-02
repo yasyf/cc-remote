@@ -131,7 +131,7 @@ provisioned in place with the `sprite-env` supervisor and exclude `image`.
 
 | Field | Contract |
 | --- | --- |
-| `path` | Must resolve to a local regular file; symlinks are followed, and relative paths resolve from the config file's directory. Other file types fail creation before streaming. |
+| `path` | Must resolve to a local regular file owned by the current user, with no group or other permissions; symlinks are followed, and relative paths resolve from the config file's directory. Other file types fail creation before streaming. |
 | `sha256` | File digest as 64 lowercase hexadecimal characters. |
 
 With a configured Sprites provider and `lean` profile, a build command is:
@@ -157,12 +157,14 @@ Sprite and confirms its absence before returning success. Its returned `path` an
 Create streams the local file into the Sprite as a staged file; the payload phase
 checks its SHA-256, atomically renames it over the cached `<sha256>.sqfs`, and mounts
 it read-only under `/opt/cc-remote/payload/<sha256>`. Without a staged file, it
-verifies the cached image before mounting, or reuses an existing mount without
-hashing again. A digest mismatch fails creation. The manifest
-`cc-remote-payload.json` must have `schemaVersion: 1` and match the rendered tools
-fingerprint, the target account's passwd home directory, `uname -m`, and the OS
-`VERSION_ID`. A mismatch or missing required tree fails creation. Packing also
-fails when a required tree is missing on the build Sprite.
+verifies the cached image before mounting. An existing mount is accepted only
+when the loop device behind it hashes to the digest, even if a staged file
+replaced the image. A digest mismatch fails creation.
+
+The manifest `cc-remote-payload.json` must have `schemaVersion: 1` and match the
+rendered tools fingerprint, the target account's passwd home directory, `uname -m`,
+and the OS `VERSION_ID`. A mismatch or missing required tree fails creation.
+Packing also fails when a required tree is missing on the build Sprite.
 
 The allowlist uses the following exposure rules for entries in the inventory:
 
@@ -185,8 +187,9 @@ and Claude writes `.in_use` there. The allowlist excludes owner state: agent
 authentication and sessions, plugin data, daemon locks, cc-remote workspace state,
 and SSH/tailnet state. Packing also excludes `.in_use` and `.orphaned_at`.
 
-The `cc-remote-payload` service checks stored payload digests and remounts the
-files at boot. Inventory services registered with `sprite-env` depend on it.
+The `cc-remote-payload` service checks each stored payload, or the loop device
+behind its existing mount, against its digest and remounts the files at boot.
+Inventory services registered with `sprite-env` depend on it.
 
 ## Script phases
 
@@ -213,7 +216,7 @@ Namespace image builds run `packages` followed by `tools`.
 | Value | Inputs |
 | --- | --- |
 | Tool fingerprint | Rendered `provision.sh` and `plugins.sh` for the selected profile, including its tool and prepare additions. |
-| Image fingerprint | Rendered `Dockerfile`, root `provision.sh`, and `start.sh`. |
+| Image fingerprint | Rendered `Dockerfile`, system-only `provision.sh`, and `start.sh`; user artifact and plugin versions are excluded. |
 | Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host or the configured payload `sha256` for a machine with a payload; payload `path` is excluded. |
 
 Each uses SHA-256 with its own domain and file-name/length framing. The image
@@ -221,9 +224,10 @@ description includes `cc-remote-image=<fingerprint>`.
 
 Installation clears readiness and never writes the stamp. Create first runs
 `prerequisites` on machines provisioned in place. It then runs packages,
-checkout and profile preparation, and tools in concurrent lanes. The tools lane
-includes payload mounting when configured, installation, configuration, and
-tailnet enrollment.
+checkout, and tool installation in concurrent lanes. The tools lane includes
+payload mounting when configured. Profile preparation (when nonempty) and
+configuration wait for both installs to succeed; tailnet enrollment follows
+configuration.
 Only after every lane succeeds does `publish` write the stamp; connection follows.
 
 On resume, tool reinstallation also runs `prerequisites` first on machines

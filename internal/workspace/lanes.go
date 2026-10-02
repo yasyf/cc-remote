@@ -18,8 +18,10 @@ func newLanes(ctx context.Context) *lanes {
 	return &lanes{ctx: ctx, cancel: cancel}
 }
 
-func (l *lanes) Go(run func(ctx context.Context) error) {
+func (l *lanes) Go(run func(ctx context.Context) error) <-chan struct{} {
+	done := make(chan struct{})
 	l.wg.Go(func() {
+		defer close(done)
 		if err := run(l.ctx); err != nil {
 			l.first.Do(func() {
 				l.err = err
@@ -27,6 +29,18 @@ func (l *lanes) Go(run func(ctx context.Context) error) {
 			})
 		}
 	})
+	return done
+}
+
+func (l *lanes) after(upstream ...<-chan struct{}) error {
+	for _, done := range upstream {
+		select {
+		case <-done:
+		case <-l.ctx.Done():
+			return context.Cause(l.ctx)
+		}
+	}
+	return context.Cause(l.ctx)
 }
 
 func (l *lanes) Wait() error {

@@ -41,7 +41,9 @@ func TestHostOperations(t *testing.T) {
 		{"provision payload", func(ctx context.Context, exec Exec) error {
 			return scripts.Provision(ctx, exec, PhasePayload, digest, fingerprint)
 		}, call{[]string{"sudo", "bash", "-s", "payload", digest, fingerprint}, "provision"}},
-		{"provision pack", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhasePack, fingerprint) }, call{[]string{"sudo", "bash", "-s", "pack", fingerprint}, "provision"}},
+		{"provision pack", func(ctx context.Context, exec Exec) error {
+			return scripts.Provision(ctx, exec, PhasePack, fingerprint)
+		}, call{[]string{"sudo", "bash", "-s", "pack", fingerprint}, "provision"}},
 		{"stage payload", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), digest)
 		}, call{[]string{"sudo", "sh", "-c", "install -d -m 0755 /var/lib/cc-remote/payload && cat > /var/lib/cc-remote/payload/$1.sqfs.partial", "stage-payload", digest}, "image"}},

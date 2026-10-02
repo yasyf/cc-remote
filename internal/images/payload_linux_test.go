@@ -23,6 +23,8 @@ const (
 	fakeMount      = `#!/bin/bash
 set -euo pipefail
 printf '%s\n' "$5" >> "$TEST_ROOT/mounts"
+cp "$5" "$TEST_ROOT/loop0"
+printf '%s\n' "$TEST_ROOT/loop0" > "$6/.source"
 jq -n --arg tools "$FINGERPRINT" --arg home "$(getent passwd "$SUDO_USER" | cut -d: -f6)" --arg arch "$(uname -m)" --arg os "$(. /etc/os-release && printf '%s' "$VERSION_ID")" \
   '{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}' > "$6/cc-remote-payload.json"
 touch "$6/.mounted"
@@ -145,28 +147,41 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 	good, bad := "hsqs verified payload", "hsqs tampered payload"
 	sum := sha256.Sum256([]byte(good))
 	sha := hex.EncodeToString(sum[:])
+	staged, stored, loop := filepath.Join("store", sha+".sqfs.partial"), filepath.Join("store", sha+".sqfs"), "loop0"
 	tests := []struct {
 		name    string
+		boot    bool
 		partial string
 		cached  string
-		mounted bool
-		hashed  string
+		mounted string
+		hashed  []string
 		mounts  bool
 		wantErr string
 		after   string
 	}{
-		{name: "a staged payload is verified once and mounted", partial: good, hashed: ".sqfs.partial", mounts: true, after: good},
-		{name: "a staged payload replaces a corrupt cached image", partial: good, cached: bad, hashed: ".sqfs.partial", mounts: true, after: good},
-		{name: "a staged payload replaces the file under an existing mount", partial: good, cached: good, mounted: true, hashed: ".sqfs.partial", after: good},
-		{name: "a corrupt staged payload is fatal", partial: bad, hashed: ".sqfs.partial", wantErr: "cc-remote: %[1]s.partial does not match its sha256 %[2]s"},
-		{name: "a cached image is verified before it mounts", cached: good, hashed: ".sqfs", mounts: true, after: good},
-		{name: "a corrupt cached image is fatal", cached: bad, hashed: ".sqfs", wantErr: "cc-remote: %[1]s does not match its sha256 %[2]s", after: bad},
-		{name: "an existing mount is trusted without hashing", cached: bad, mounted: true, after: bad},
+		{name: "a staged payload is verified once and mounted", partial: good, hashed: []string{staged}, mounts: true, after: good},
+		{name: "a staged payload replaces a corrupt cached image", partial: good, cached: bad, hashed: []string{staged}, mounts: true, after: good},
+		{name: "a staged payload replaces the file under a verified mount", partial: good, cached: bad, mounted: good, hashed: []string{staged, loop}, after: good},
+		{name: "a staged payload does not vouch for a tampered mount", partial: good, cached: bad, mounted: bad, hashed: []string{staged, loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
+		{name: "a corrupt staged payload is fatal", partial: bad, hashed: []string{staged}, wantErr: "cc-remote: %[1]s.partial does not match its sha256 %[2]s"},
+		{name: "a cached image is verified before it mounts", cached: good, hashed: []string{stored}, mounts: true, after: good},
+		{name: "a corrupt cached image is fatal", cached: bad, hashed: []string{stored}, wantErr: "cc-remote: %[1]s does not match its sha256 %[2]s", after: bad},
+		{name: "an existing mount is verified through its loop device", cached: good, mounted: good, hashed: []string{loop}, after: good},
+		{name: "a tampered existing mount is fatal", cached: good, mounted: bad, hashed: []string{loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
 		{name: "nothing staged is fatal", wantErr: "cc-remote: no payload is staged at %[1]s.partial"},
+		{name: "boot verifies a stored image before it mounts", boot: true, cached: good, hashed: []string{stored}, mounts: true, after: good},
+		{name: "boot refuses a corrupt stored image", boot: true, cached: bad, hashed: []string{stored}, wantErr: "cc-remote: %[1]s does not match its sha256 %[2]s", after: bad},
+		{name: "boot verifies an existing mount through its loop device", boot: true, cached: good, mounted: good, hashed: []string{loop}, after: good},
+		{name: "boot refuses a tampered existing mount", boot: true, cached: good, mounted: bad, hashed: []string{loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
 	}
 	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
 	if err != nil {
 		t.Fatal(err)
+	}
+	_, helper, opened := strings.Cut(string(scripts.ProvisionScript), "<<'SH'\n")
+	helper, _, closed := strings.Cut(helper, "\nSH\n")
+	if !opened || !closed {
+		t.Fatalf("the provision script writes no boot helper:\n%s", scripts.ProvisionScript)
 	}
 	sha256sum, err := exec.LookPath("sha256sum")
 	if err != nil {
@@ -180,6 +195,7 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 			for name, content := range map[string]string{
 				"id":         "#!/bin/sh\necho 0\n",
 				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
+				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
 				"mount":      fakeMount,
 				"sprite-env": "#!/bin/sh\nexit 0\n",
 				"sha256sum":  "#!/bin/sh\nline=\"$(cat)\"\nprintf '%s\\n' \"$line\" >> \"$TEST_ROOT/hashes\"\nprintf '%s\\n' \"$line\" | exec " + sha256sum + " \"$@\"\n",
@@ -196,11 +212,13 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 				writePluginTestFile(t, image, []byte(tt.cached), 0o644)
 			}
 			env := append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
-			if tt.mounted {
+			if tt.mounted != "" {
+				served := filepath.Join(root, "served.sqfs")
+				writePluginTestFile(t, served, []byte(tt.mounted), 0o644)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				premount := exec.Command(filepath.Join(fakes, "mount"), "-t", "squashfs", "-o", "ro,loop", image, dir)
+				premount := exec.Command(filepath.Join(fakes, "mount"), "-t", "squashfs", "-o", "ro,loop", served, dir)
 				premount.Env = env
 				if out, err := premount.CombinedOutput(); err != nil {
 					t.Fatalf("premount: %v\n%s", err, out)
@@ -209,24 +227,32 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			provision := strings.NewReplacer(
-				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
-				"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
-				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
-			).Replace(string(scripts.ProvisionScript))
-			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
+			var cmd *exec.Cmd
+			if tt.boot {
+				cmd = exec.Command("sh", "-c", strings.NewReplacer(
+					"/var/lib/cc-remote/payload/", store+"/",
+					"/opt/cc-remote/payload/", payloads+"/",
+				).Replace(helper))
+			} else {
+				provision := strings.NewReplacer(
+					"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
+					"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
+					` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
+				).Replace(string(scripts.ProvisionScript))
+				cmd = exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
+			}
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()
 			if tt.wantErr != "" {
-				if want := fmt.Sprintf(tt.wantErr, image, sha); exitCode(err) != 1 || !strings.Contains(string(out), want) {
+				if want := fmt.Sprintf(tt.wantErr, image, sha, filepath.Join(root, loop)); exitCode(err) != 1 || !strings.Contains(string(out), want) {
 					t.Fatalf("payload = %v\n%s\nwant exit 1 with %q", err, out, want)
 				}
 			} else if err != nil {
 				t.Fatalf("payload failed: %v\n%s", err, out)
 			}
 			var hashed []string
-			if tt.hashed != "" {
-				hashed = []string{sha + "  " + filepath.Join(store, sha+tt.hashed)}
+			for _, rel := range tt.hashed {
+				hashed = append(hashed, sha+"  "+filepath.Join(root, rel))
 			}
 			if got := logLines(t, filepath.Join(root, "hashes")); !slices.Equal(got, hashed) {
 				t.Errorf("hashed %q, want %q", got, hashed)

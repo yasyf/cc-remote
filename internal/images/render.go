@@ -80,6 +80,10 @@ func newView(inv Inventory, profile string) view {
 	}
 }
 
+func newSystemView(inv Inventory) view {
+	return view{Inventory: inv, SystemTrees: systemTrees(inv)}
+}
+
 func systemTrees(inv Inventory) []tree {
 	var trees []tree
 	for _, a := range inv.System {
@@ -180,7 +184,7 @@ func RenderImage(inv Inventory) (Context, error) {
 	if err != nil {
 		return Context{}, err
 	}
-	provision, err := execute(bound, "provision.sh", newView(inv, ""))
+	provision, err := execute(bound, "provision.sh", newSystemView(inv))
 	if err != nil {
 		return Context{}, err
 	}
