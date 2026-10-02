@@ -112,7 +112,7 @@ provision_packages() {
     install -d -m 0755 "$build_dir"
     resident_packages "${packages[@]}" > "$build_dir/seeds"
     installed_packages > "$build_dir/packages.before"
-    apt-get install -y -qq --no-install-recommends "${packages[@]}" > /dev/null
+    apt-get install -y -qq --no-install-recommends "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
     installed_packages > "$build_dir/packages.after"
   fi
 {{- else}}
@@ -175,11 +175,19 @@ closure_link() {
 }
 
 closure_project() {
-  local target="$closure_root$1"
+  local target="$closure_root$1" resolved
   if [ ! -d "$target" ]; then
     echo "cc-remote: the closure has no directory $1 to project" >&2
     exit 1
   fi
+  resolved="$(realpath -e "$target")"
+  case "$resolved" in
+    "$(realpath -e "$closure_root")"/*) ;;
+    *)
+      echo "cc-remote: $1 resolves to $resolved, outside the closure, so the payload cannot project it" >&2
+      exit 1
+      ;;
+  esac
   if [ -L "$1" ]; then
     closure_link "$1" "$target"
     return
@@ -188,20 +196,21 @@ closure_project() {
     echo "cc-remote: $1 exists and is not the closure's link, so the payload cannot project it" >&2
     exit 1
   fi
-  mkdir -p "$(dirname "$1")"
+  install -d -m 0755 "$(dirname "$1")"
   ln -s "$target" "$1"
 }
 
 write_conf() {
-  local path="$1" content="$2"
+  local path="$1" content="$2" staged
   if [ -L "$path" ] || { [ -e "$path" ] && [ "$(cat "$path")" != "$content" ]; }; then
     echo "cc-remote: $path exists and is not the closure configuration this payload writes" >&2
     exit 1
   fi
   install -d -m 0755 "$(dirname "$path")"
-  printf '%s\n' "$content" > "$path.tmp"
-  chmod 0644 "$path.tmp"
-  mv -f "$path.tmp" "$path"
+  staged="$(mktemp "$(dirname "$path")/.cc-remote.XXXXXX")"
+  printf '%s\n' "$content" > "$staged"
+  chmod 0644 "$staged"
+  mv -f "$staged" "$path"
 }
 
 fonts_conf() {
@@ -211,6 +220,7 @@ fonts_conf() {
 <fontconfig>
   <dir>$closure_root/usr/share/fonts</dir>
   <cachedir>$closure_root/var/cache/fontconfig</cachedir>
+  <include ignore_missing="yes">$closure_root/etc/fonts/conf.d</include>
 </fontconfig>
 XML
 }
@@ -317,7 +327,8 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
   fi
 done
 {{- if .Closure}}
-ldconfig
+install -d -m 0755 /var/lib/cc-remote
+flock /var/lib/cc-remote/ldconfig.lock ldconfig
 {{- end}}
 SH
   mkdir -p "$payload"
@@ -367,7 +378,13 @@ SH
 {{- with .Closure}}
   closure_link "$closure_root" "$payload$closure_root"
 {{- range .Links}}
+{{- if eq .Requirement "optional"}}
+  if [ -d "$closure_root/"{{q .Target}} ]; then
+    closure_link {{q .Path}} "$closure_root/"{{q .Target}}
+  fi
+{{- else}}
   closure_link {{q .Path}} "$closure_root/"{{q .Target}}
+{{- end}}
 {{- end}}
 {{- range .Projections}}
   closure_project {{q .}}

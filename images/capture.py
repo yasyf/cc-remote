@@ -167,11 +167,18 @@ def check_exposures(payload, captured):
 def check_projections(projections, closure, captured):
     owned = owners(projections)
     for path in projections:
-        if path not in captured or not os.path.isdir(hostpath(path)) or os.path.islink(hostpath(path)):
+        if path not in captured or not os.path.isdir(hostpath(path)):
             fatal(f"apt.payload.projections: {path} is not a directory a closure package ships")
         foreign = sorted(set(owned.get(path, [])) - closure)
         if foreign:
             fatal(f"apt.payload.projections: {path} is also owned by {' '.join(foreign)}, so a link there would hide their files")
+
+
+def check_projected(projections):
+    for path in projections:
+        resolved = os.path.realpath(root + path)
+        if not resolved.startswith(root + "/") or not os.path.isdir(resolved):
+            fatal(f"apt.payload.projections: {path} resolves to {resolved[len(root):] if resolved.startswith(root + '/') else resolved}, outside the closure")
 
 
 def capture_files(paths_by_package, captured, new):
@@ -231,7 +238,7 @@ def generated_paths(captured):
         if any(path.startswith(modules) and path.endswith(suffix) for path in captured):
             paths[cache] = how
     if "/usr/share/mime/mime.cache" in paths:
-        paths.update({path: "copy" for path in walk("/usr/share/mime") if path not in captured})
+        paths.update({path: "copy" for path in walk("/usr/share/mime") if path not in captured and not path.startswith("/usr/share/mime/packages/")})
     for theme in captured_themes(captured):
         paths[f"/usr/share/icons/{theme}/icon-theme.cache"] = "copy"
     for path in paths:
@@ -351,12 +358,14 @@ def capture():
     if os.path.realpath(root) != root:
         fatal(f"{root} resolves to {os.path.realpath(root)}, so consumers would not find the same paths")
     files = capture_files(paths_by_package, captured, new)
+    check_projected(payload["projections"])
     generated = generated_paths(captured)
     capture_generated(generated)
     capture_cursor_theme(generated)
     seal_fonts(generated)
     themes = captured_themes(captured)
     settle_icon_caches(themes)
+    links = [link for link in payload["links"] if link.get("requirement") != "optional" or os.path.isdir(root + "/" + link["target"])]
     bins = ["/usr/bin/" + bin for bin in payload["bins"]]
     consumer_owners = check_consumers(consumers + bins, new)
     with open(hostpath("/etc/os-release"), encoding="utf-8") as fh:
@@ -366,7 +375,7 @@ def capture():
         "resident": sorted(resident),
         "files": files,
         "generated": {path: {"how": how, "sha256": sha256(root + path), "mode": f"{stat.S_IMODE(os.lstat(root + path).st_mode):04o}"} for path, how in sorted(generated.items())},
-        "links": payload["links"],
+        "links": links,
         "projections": payload["projections"],
         "consumers": consumer_owners,
         "os": {key: os_release.get(key, "").strip('"') for key in ("VERSION", "VERSION_ID")},
@@ -375,7 +384,7 @@ def capture():
     with open(destination("/closure.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1, sort_keys=True)
         fh.write("\n")
-    for link in payload["links"]:
+    for link in links:
         path = hostpath(link["path"])
         os.makedirs(os.path.dirname(path), exist_ok=True)
         os.symlink(root + "/" + link["target"], path)

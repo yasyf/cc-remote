@@ -16,7 +16,7 @@ func TestTheExampleConfigRendersItsInventoryForEveryProfileAndProvider(t *testin
 	}
 	for profile, spec := range cfg.Profiles {
 		for provider, machine := range spec.Machine {
-			r, err := render(cfg, profile, machine)
+			r, err := render(cfg, profile, machine, machine.Payload != nil)
 			if err != nil {
 				t.Errorf("%s on %s: %v", profile, provider, err)
 				continue
@@ -51,7 +51,7 @@ func TestOnlyThePayloadDigestMovesTheStamp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, err := render(cfg, "lean", config.Machine{Payload: tt.payload})
+			r, err := render(cfg, "lean", config.Machine{Payload: tt.payload}, tt.payload != nil)
 			if err != nil {
 				t.Fatal(err)
 			}

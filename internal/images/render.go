@@ -68,8 +68,9 @@ var (
 )
 
 type closureLink struct {
-	Path   string `json:"path"`
-	Target string `json:"target"`
+	Path        string      `json:"path"`
+	Target      string      `json:"target"`
+	Requirement requirement `json:"requirement"`
 }
 
 type closureView struct {
@@ -132,7 +133,7 @@ func systemTrees(inv Inventory) []tree {
 	if c := closure(inv); c != nil {
 		trees = append(trees, tree{exposeLink, required, ClosurePath})
 		for _, link := range c.Links {
-			trees = append(trees, tree{exposeCopy, required, link.Path})
+			trees = append(trees, tree{exposeCopy, link.Requirement, link.Path})
 		}
 	}
 	return trees
@@ -145,10 +146,10 @@ func closure(inv Inventory) *closureView {
 	}
 	c := &closureView{AptPayload: *payload}
 	for _, bin := range payload.Bins {
-		c.Links = append(c.Links, closureLink{"/usr/local/bin/" + bin, "usr/bin/" + bin})
+		c.Links = append(c.Links, closureLink{"/usr/local/bin/" + bin, "usr/bin/" + bin, required})
 	}
 	for _, share := range closureShares {
-		c.Links = append(c.Links, closureLink{"/usr/local/share/" + share, "usr/share/" + share})
+		c.Links = append(c.Links, closureLink{"/usr/local/share/" + share, "usr/share/" + share, optional})
 	}
 	return c
 }

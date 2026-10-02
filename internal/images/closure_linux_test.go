@@ -173,7 +173,7 @@ func writeFakes(t *testing.T, dir string, fakes map[string]string) {
 }
 
 func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
-	full := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64\n"
+	full := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
 	resident := "update -qq\ninstall -y -qq --no-install-recommends bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server\n"
 	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\n"
 	tests := []struct {
@@ -308,6 +308,19 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			},
 		},
 		{
+			name: "a projection resolving outside the closure is fatal",
+			foreign: func(_, closure, payloads string) error {
+				link := filepath.Join(payloads, sha, closure, "usr/share/X11/xkb")
+				if err := os.Remove(link); err != nil {
+					return err
+				}
+				return os.Symlink("/etc", link)
+			},
+			wantErr: func(root, _, _ string) string {
+				return "cc-remote: " + root + "/usr/share/X11/xkb resolves to /etc, outside the closure, so the payload cannot project it"
+			},
+		},
+		{
 			name: "a stale closure link from an older payload is replaced",
 			foreign: func(_, closure, payloads string) error {
 				return os.Symlink(filepath.Join(payloads, "older")+closure, closure)
@@ -365,7 +378,10 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 			})
 			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
 			writePluginTestFile(t, filepath.Join(dir, closure, "closure.json"), []byte("{}"), 0o644)
-			writePluginTestFile(t, filepath.Join(dir, closure, "usr/share/X11/xkb/rules/evdev"), []byte("xkb"), 0o644)
+			writePluginTestFile(t, filepath.Join(dir, closure, "usr/share/xkeyboard-config-2/rules/evdev"), []byte("xkb"), 0o644)
+			if err := os.Symlink("../xkeyboard-config-2", filepath.Join(dir, closure, "usr/share/X11/xkb")); err != nil {
+				t.Fatal(err)
+			}
 			for _, bin := range []string{"certutil", "fc-match"} {
 				writePluginTestFile(t, filepath.Join(dir, closure, "usr/bin", bin), []byte("\x7fELF"), 0o755)
 				if err := os.MkdirAll(filepath.Join(dir, root, "usr/local/bin"), 0o755); err != nil {
@@ -421,7 +437,7 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				if _, err := os.Stat(fontsConf); !os.IsNotExist(err) {
 					t.Errorf("a refused activation wrote the fontconfig snippet: %v", err)
 				}
-				if leftovers, _ := filepath.Glob(loaderConf + ".tmp"); len(leftovers) != 0 {
+				if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(loaderConf), ".cc-remote.*")); len(leftovers) != 0 {
 					t.Errorf("left %q", leftovers)
 				}
 				return
@@ -454,13 +470,13 @@ func TestProvisionPayloadActivatesTheClosure(t *testing.T) {
 				if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
 					t.Errorf("%s mode = %v, %v; want 0644", path, info.Mode(), err)
 				}
-				if leftovers, _ := filepath.Glob(path + ".tmp"); len(leftovers) != 0 {
+				if leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".cc-remote.*")); len(leftovers) != 0 {
 					t.Errorf("left %q", leftovers)
 				}
 			}
 			helper, err := os.ReadFile(filepath.Join(root, "payload-mount.sh"))
-			if err != nil || !strings.HasSuffix(string(helper), "done\nldconfig\n") || !strings.Contains(string(helper), "mount -t squashfs -o ro,nosuid,nodev,loop") {
-				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts followed by ldconfig", helper, err)
+			if err != nil || !strings.HasSuffix(string(helper), "done\ninstall -d -m 0755 /var/lib/cc-remote\nflock /var/lib/cc-remote/ldconfig.lock ldconfig\n") || !strings.Contains(string(helper), "mount -t squashfs -o ro,nosuid,nodev,loop") {
+				t.Errorf("the boot helper is %q, %v; want nosuid,nodev mounts followed by a locked ldconfig", helper, err)
 			}
 		})
 	}
@@ -504,11 +520,11 @@ func newCaptureHost(t *testing.T) *captureHost {
 		contents: map[string]string{},
 		payload: AptPayload{
 			Resident:    []string{"bubblewrap"},
-			Closure:     []string{"libfoo1", "fonts-x", "hicolor-icon-theme", "shared-mime-info", "libgtk-3-0t64"},
+			Closure:     []string{"libfoo1", "fonts-x", "hicolor-icon-theme", "shared-mime-info", "libgtk-3-0t64", "xkb-data"},
 			Bins:        []string{"footool"},
 			Fonts:       []string{"X"},
 			Consumers:   []string{".agent-browser/chrome", "/opt/cc-remote/tools/office/soffice.bin"},
-			Projections: []string{"/usr/share/themes"},
+			Projections: []string{"/usr/share/themes", "/usr/share/X11/xkb"},
 		},
 	}
 	lib := h.lib
@@ -519,6 +535,7 @@ func newCaptureHost(t *testing.T) *captureHost {
 			"hicolor-icon-theme":  {Version: "0.18-2", Arch: "all", Files: []string{"/usr/share/icons/hicolor", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme"}},
 			"shared-mime-info":    {Version: "2.4-5", Files: []string{"/usr/share/mime/packages/freedesktop.org.xml"}},
 			"libgtk-3-0t64":       {Version: "3.24.49-1", Files: []string{lib + "/gtk-3.0/3.0.0/immodules/im-x.so", "/usr/share/glib-2.0/schemas/org.x.gschema.xml", "/usr/share/themes", "/usr/share/themes/Default/gtk-3.0/gtk.css"}},
+			"xkb-data":            {Version: "2.44-1", Arch: "all", Files: []string{"/usr/share/X11", "/usr/share/X11/xkb", "/usr/share/xkeyboard-config-2", "/usr/share/xkeyboard-config-2/rules", "/usr/share/xkeyboard-config-2/rules/evdev"}},
 			"openssh-server":      {Version: "1:9.9p1-3", Depends: "libwrap0, ssh-sftp-server | openssh-sftp-server", Files: []string{"/usr/sbin/sshd"}},
 			"libwrap0":            {Version: "7.6.q-35", Files: []string{lib + "/libwrap.so.0"}},
 			"openssh-sftp-server": {Version: "1:9.9p1-3", Provides: "ssh-sftp-server", Files: []string{"/usr/lib/openssh/sftp-server"}},
@@ -542,6 +559,8 @@ func newCaptureHost(t *testing.T) *captureHost {
 	h.file("/usr/share/icons/hicolor/cursor.theme", "[Icon Theme]\nInherits=Adwaita\n", 0o644)
 	h.file("/usr/share/icons/hicolor/icon-theme.cache", "icon cache", 0o644)
 	h.file("/usr/share/mime/packages/freedesktop.org.xml", "<mime-info/>", 0o644)
+	h.file("/usr/share/mime/packages/io.systemd.xml", "<mime-info/>", 0o644)
+	h.file("/usr/share/xkeyboard-config-2/rules/evdev", "evdev", 0o644)
 	h.file("/usr/share/mime/mime.cache", "MIME", 0o644)
 	h.file("/usr/share/mime/globs", "globs", 0o644)
 	h.file("/usr/share/glib-2.0/schemas/gschemas.compiled", "GVariant", 0o644)
@@ -557,13 +576,14 @@ func newCaptureHost(t *testing.T) *captureHost {
 	h.link("/usr/share/doc/libfoo1/NEWS.gz", "../../common-licenses/GPL")
 	h.link("/lib", "usr/lib")
 	h.link("/etc/alternatives/x-cursor-theme", "/usr/share/icons/hicolor/cursor.theme")
+	h.link("/usr/share/X11/xkb", "../xkeyboard-config-2")
 	for _, dir := range []string{"/usr/local/bin", "/usr/local/share"} {
 		if err := os.MkdirAll(filepath.Join(h.host, dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	before := "ii \tbase-files\nii \tlibc6\n"
-	after := before + "ii \tfonts-x\nii \thicolor-icon-theme\nii \tlibfoo1\nii \tlibgtk-3-0t64\nii \tlibwrap0\nii \topenssh-server\nii \topenssh-sftp-server\nii \tshared-mime-info\n"
+	after := before + "ii \tfonts-x\nii \thicolor-icon-theme\nii \tlibfoo1\nii \tlibgtk-3-0t64\nii \tlibwrap0\nii \topenssh-server\nii \topenssh-sftp-server\nii \tshared-mime-info\nii \txkb-data\n"
 	writePluginTestFile(t, filepath.Join(h.build, "packages.before"), []byte(before), 0o644)
 	writePluginTestFile(t, filepath.Join(h.build, "packages.after"), []byte(after), 0o644)
 	writePluginTestFile(t, filepath.Join(h.build, "seeds"), []byte("ca-certificates\nopenssh-server\nbubblewrap\n"), 0o644)
@@ -645,6 +665,32 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 		{name: "a projection no closure package ships as a directory is fatal", mutate: func(h *captureHost) { h.payload.Projections = []string{"/usr/share/nothere"} }, wantErr: func(*captureHost) string {
 			return "cc-remote: apt.payload.projections: /usr/share/nothere is not a directory a closure package ships"
 		}, untouched: true},
+		{name: "a projection resolving outside the closure is fatal", mutate: func(h *captureHost) {
+			if err := os.Remove(filepath.Join(h.host, "usr/share/X11/xkb")); err != nil {
+				t.Fatal(err)
+			}
+			h.link("/usr/share/X11/xkb", "/etc")
+		}, wantErr: func(*captureHost) string {
+			return "cc-remote: apt.payload.projections: /usr/share/X11/xkb resolves to /etc, outside the closure"
+		}},
+		{name: "share trees the closure lacks are not exposed", mutate: func(h *captureHost) {
+			h.dpkg.Packages["libgtk-3-0t64"].Files = slices.DeleteFunc(h.dpkg.Packages["libgtk-3-0t64"].Files, func(path string) bool { return path == "/usr/share/glib-2.0/schemas/org.x.gschema.xml" })
+			if err := os.Remove(filepath.Join(h.host, "usr/share/glib-2.0/schemas/org.x.gschema.xml")); err != nil {
+				t.Fatal(err)
+			}
+		}, check: func(t *testing.T, h *captureHost) {
+			if _, err := os.Lstat(filepath.Join(h.host, "usr/local/share/glib-2.0/schemas")); !os.IsNotExist(err) {
+				t.Errorf("the capture exposed a schemas tree the closure lacks: %v", err)
+			}
+			if _, err := os.Lstat(h.closure + "/usr/share/glib-2.0/schemas/gschemas.compiled"); !os.IsNotExist(err) {
+				t.Errorf("the closure carries a schema cache without any schema: %v", err)
+			}
+			for _, link := range []string{"usr/local/share/mime", "usr/local/share/icons", "usr/local/bin/footool"} {
+				if _, err := os.Readlink(filepath.Join(h.host, link)); err != nil {
+					t.Errorf("%s is not exposed: %v", link, err)
+				}
+			}
+		}},
 		{name: "a captured module without its generated cache is fatal", mutate: func(h *captureHost) {
 			if err := os.Remove(filepath.Join(h.host, lib, "gio/modules/giomodule.cache")); err != nil {
 				t.Fatal(err)
@@ -704,7 +750,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			}
 		}, wantErr: func(h *captureHost) string { return "cc-remote: " + h.closure + " already exists on the build machine" }},
 		{name: "a setuid file is fatal", mutate: func(h *captureHost) {
-			if err := os.Chmod(filepath.Join(h.host, "usr/bin/footool"), 0o4755); err != nil {
+			if err := os.Chmod(filepath.Join(h.host, "usr/bin/footool"), 0o755|os.ModeSetuid); err != nil {
 				t.Fatal(err)
 			}
 		}, wantErr: func(*captureHost) string { return "cc-remote: libfoo1 ships setuid or setgid /usr/bin/footool" }},
@@ -804,7 +850,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 
 func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	t.Helper()
-	lib, closure := h.lib, h.closure
+	lib, tree := h.lib, h.closure
 	captured := map[string]string{
 		lib + "/libfoo.so.1.0":                          h.contents[lib+"/libfoo.so.1.0"],
 		lib + "/libalias.so.1":                          h.contents[lib+"/libalias.so.1"],
@@ -816,6 +862,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		"/usr/share/mime/packages/freedesktop.org.xml":  "<mime-info/>",
 		lib + "/gtk-3.0/3.0.0/immodules/im-x.so":        h.contents[lib+"/gtk-3.0/3.0.0/immodules/im-x.so"],
 		lib + "/gio/modules/libgiofoo.so":               h.contents[lib+"/gio/modules/libgiofoo.so"],
+		"/usr/share/xkeyboard-config-2/rules/evdev":     "evdev",
 		"/usr/share/glib-2.0/schemas/org.x.gschema.xml": "<schemalist/>",
 		"/usr/share/themes/Default/gtk-3.0/gtk.css":     "css",
 	}
@@ -825,41 +872,41 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		"/usr/share/glib-2.0/schemas/gschemas.compiled": "GVariant",
 		lib + "/gio/modules/giomodule.cache":            "gio",
 		"/usr/share/icons/hicolor/icon-theme.cache":     "icon cache",
-		lib + "/gtk-3.0/3.0.0/immodules.cache":          "\"" + closure + lib + "/gtk-3.0/3.0.0/immodules/im-x.so\" \n\"x\" \"X\" \"\" \"\" \"en\" \n",
+		lib + "/gtk-3.0/3.0.0/immodules.cache":          "\"" + tree + lib + "/gtk-3.0/3.0.0/immodules/im-x.so\" \n\"x\" \"X\" \"\" \"\" \"en\" \n",
 		"/usr/share/icons/default/index.theme":          h.contents["/usr/share/icons/hicolor/cursor.theme"],
-		"/share/cc-remote/fonts.conf":                   "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n  <dir>" + closure + "/usr/share/fonts</dir>\n  <cachedir>" + closure + "/var/cache/fontconfig</cachedir>\n</fontconfig>\n",
+		"/share/cc-remote/fonts.conf":                   "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n<fontconfig>\n  <dir>" + tree + "/usr/share/fonts</dir>\n  <cachedir>" + tree + "/var/cache/fontconfig</cachedir>\n</fontconfig>\n",
 		"/var/cache/fontconfig/abc-le64.cache-9":        "",
 	}
 	for path, want := range captured {
-		if got, err := os.ReadFile(closure + path); err != nil || string(got) != want {
+		if got, err := os.ReadFile(tree + path); err != nil || string(got) != want {
 			t.Errorf("%s = %q, %v; want %q", path, got, err, want)
 		}
 	}
 	for path, want := range generated {
-		got, err := os.ReadFile(closure + path)
+		got, err := os.ReadFile(tree + path)
 		if err != nil || string(got) != want {
 			t.Errorf("%s = %q, %v; want %q", path, got, err, want)
 		}
-		if info, err := os.Lstat(closure + path); err != nil || info.Mode().Perm() != 0o644 {
+		if info, err := os.Lstat(tree + path); err != nil || info.Mode().Perm() != 0o644 {
 			t.Errorf("%s mode = %v, %v; want 0644", path, info.Mode(), err)
 		}
 	}
 	for path, want := range map[string]os.FileMode{"/usr/bin/footool": 0o755, "/usr/share/fonts/truetype/x/X.ttf": 0o644, lib + "/libfoo.so.1.0": 0o644} {
-		if info, err := os.Lstat(closure + path); err != nil || info.Mode().Perm() != want || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		if info, err := os.Lstat(tree + path); err != nil || info.Mode().Perm() != want || info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
 			t.Errorf("%s mode = %v, %v; want %v", path, info.Mode(), err, want)
 		}
 	}
-	for path, want := range map[string]string{lib + "/libfoo.so.1": "libfoo.so.1.0", lib + "/libfoo.so": "libfoo.so.1.0", lib + "/libfoo-env.conf": "/etc/environment", "/usr/share/doc/libfoo1/NEWS.gz": "../../common-licenses/GPL"} {
-		if got, err := os.Readlink(closure + path); err != nil || got != want {
+	for path, want := range map[string]string{lib + "/libfoo.so.1": "libfoo.so.1.0", lib + "/libfoo.so": "libfoo.so.1.0", lib + "/libfoo-env.conf": "/etc/environment", "/usr/share/doc/libfoo1/NEWS.gz": "../../common-licenses/GPL", "/usr/share/X11/xkb": "../xkeyboard-config-2"} {
+		if got, err := os.Readlink(tree + path); err != nil || got != want {
 			t.Errorf("%s -> %q, %v; want %q", path, got, err, want)
 		}
 	}
-	for _, absent := range []string{"/usr/share/doc/libfoo1/missing.txt", "/lib", "/usr/sbin/sshd", "/usr/lib/fake-ld.so", lib + "/gdk-pixbuf-2.0/2.10.0/loaders.cache"} {
-		if _, err := os.Lstat(closure + absent); !os.IsNotExist(err) {
-			t.Errorf("the closure carries %s: %v", absent, err)
+	for _, absent := range []string{"/usr/share/doc/libfoo1/missing.txt", "/lib", "/usr/sbin/sshd", "/usr/lib/fake-ld.so", lib + "/gdk-pixbuf-2.0/2.10.0/loaders.cache", "/usr/share/mime/packages/io.systemd.xml"} {
+		if _, err := os.Lstat(tree + absent); !os.IsNotExist(err) {
+			t.Errorf("the tree carries %s: %v", absent, err)
 		}
 	}
-	if err := filepath.WalkDir(closure+"/usr/share/fonts", func(path string, entry os.DirEntry, err error) error {
+	if err := filepath.WalkDir(tree+"/usr/share/fonts", func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -870,15 +917,15 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	theme, err := os.Lstat(closure + "/usr/share/icons/hicolor")
+	theme, err := os.Lstat(tree + "/usr/share/icons/hicolor")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cache, err := os.Lstat(closure + "/usr/share/icons/hicolor/icon-theme.cache"); err != nil || cache.ModTime().Nanosecond() != 0 || cache.ModTime().Before(theme.ModTime()) {
+	if cache, err := os.Lstat(tree + "/usr/share/icons/hicolor/icon-theme.cache"); err != nil || cache.ModTime().Nanosecond() != 0 || cache.ModTime().Before(theme.ModTime()) {
 		t.Errorf("icon-theme.cache mtime = %v, %v; want whole seconds at or after the theme's %v", cache.ModTime(), err, theme.ModTime())
 	}
 	uid := strconv.Itoa(os.Getuid())
-	conf := closure + "/share/cc-remote/fonts.conf"
+	conf := tree + "/share/cc-remote/fonts.conf"
 	if got, want := logLines(t, filepath.Join(h.root, "fc-cache.log")), []string{"fc-cache -f uid=" + uid + " conf=" + conf, "fc-cache -v uid=" + uid + " conf=" + conf}; !slices.Equal(got, want) {
 		t.Errorf("fc-cache calls = %q, want %q", got, want)
 	}
@@ -899,12 +946,12 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		OS          map[string]string            `json:"os"`
 		Libc6       string                       `json:"libc6"`
 	}
-	raw, err := os.ReadFile(closure + "/closure.json")
+	raw, err := os.ReadFile(tree + "/tree.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatalf("closure.json: %v\n%s", err, raw)
+		t.Fatalf("tree.json: %v\n%s", err, raw)
 	}
 	wantPackages := map[string]map[string]string{
 		"libfoo1":            {"version": "1.0-1", "arch": "amd64"},
@@ -912,6 +959,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		"hicolor-icon-theme": {"version": "0.18-2", "arch": "all"},
 		"shared-mime-info":   {"version": "2.4-5", "arch": "amd64"},
 		"libgtk-3-0t64":      {"version": "3.24.49-1", "arch": "amd64"},
+		"xkb-data":           {"version": "2.44-1", "arch": "all"},
 	}
 	wantConsumers := map[string][]string{"/home/u/.agent-browser/chrome": {"libfoo1"}, "/opt/cc-remote/tools/office/soffice.bin": {"libfoo1"}, "/usr/bin/footool": {"libfoo1"}}
 	wantLinks := closure(Inventory{Apt: Apt{Payload: &h.payload}}).Links
@@ -924,12 +972,12 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		t.Errorf("consumers = %v, want %v", manifest.Consumers, wantConsumers)
 	case !reflect.DeepEqual(manifest.Links, wantLinks):
 		t.Errorf("links = %v, want %v", manifest.Links, wantLinks)
-	case !slices.Equal(manifest.Projections, []string{"/usr/share/themes"}):
+	case !slices.Equal(manifest.Projections, []string{"/usr/share/themes", "/usr/share/X11/xkb"}):
 		t.Errorf("projections = %v", manifest.Projections)
 	case !reflect.DeepEqual(manifest.OS, map[string]string{"VERSION": "26.04 LTS (Resolute Raccoon)", "VERSION_ID": "26.04"}) || manifest.Libc6 != "2.42-1ubuntu1":
 		t.Errorf("os = %v, libc6 = %q", manifest.OS, manifest.Libc6)
-	case len(manifest.Files) != 16:
-		t.Errorf("files = %d entries, want 16:\n%s", len(manifest.Files), raw)
+	case len(manifest.Files) != 18:
+		t.Errorf("files = %d entries, want 18:\n%s", len(manifest.Files), raw)
 	}
 	sum := sha256.Sum256([]byte(h.contents["/usr/bin/footool"]))
 	wantFile := map[string]string{"path": "/usr/bin/footool", "package": "libfoo1", "sha256": hex.EncodeToString(sum[:]), "mode": "0755"}
@@ -961,7 +1009,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 			t.Errorf("generated[%s] = %v, want a sha256 and mode 0644", path, got)
 		}
 	}
-	for path, want := range map[string]string{"/usr/local/bin/footool": closure + "/usr/bin/footool", "/usr/local/share/mime": closure + "/usr/share/mime", "/usr/local/share/glib-2.0/schemas": closure + "/usr/share/glib-2.0/schemas", "/usr/local/share/icons": closure + "/usr/share/icons"} {
+	for path, want := range map[string]string{"/usr/local/bin/footool": tree + "/usr/bin/footool", "/usr/local/share/mime": tree + "/usr/share/mime", "/usr/local/share/glib-2.0/schemas": tree + "/usr/share/glib-2.0/schemas", "/usr/local/share/icons": tree + "/usr/share/icons"} {
 		if got, err := os.Readlink(filepath.Join(h.host, path)); err != nil || got != want {
 			t.Errorf("%s -> %q, %v; want %q", path, got, err, want)
 		}
@@ -971,10 +1019,10 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 		t.Errorf("the capture wrote %q on the host, want only %q", added, want)
 	}
 	var bytes int
-	for _, path := range []string{lib + "/libfoo.so.1.0", lib + "/libalias.so.1", lib + "/gio/modules/libgiofoo.so", "/usr/bin/footool", "/usr/share/doc/libfoo1/copyright", "/usr/share/fonts/truetype/x/X.ttf", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme", "/usr/share/mime/packages/freedesktop.org.xml", lib + "/gtk-3.0/3.0.0/immodules/im-x.so", "/usr/share/glib-2.0/schemas/org.x.gschema.xml", "/usr/share/themes/Default/gtk-3.0/gtk.css"} {
+	for _, path := range []string{lib + "/libfoo.so.1.0", lib + "/libalias.so.1", lib + "/gio/modules/libgiofoo.so", "/usr/bin/footool", "/usr/share/doc/libfoo1/copyright", "/usr/share/fonts/truetype/x/X.ttf", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme", "/usr/share/mime/packages/freedesktop.org.xml", lib + "/gtk-3.0/3.0.0/immodules/im-x.so", "/usr/share/glib-2.0/schemas/org.x.gschema.xml", "/usr/share/themes/Default/gtk-3.0/gtk.css", "/usr/share/xkeyboard-config-2/rules/evdev"} {
 		bytes += len(h.contents[path])
 	}
-	if want := fmt.Sprintf("cc-remote: captured 5 packages, 16 files, %d bytes into %s\n", bytes, closure); out != want {
+	if want := fmt.Sprintf("cc-remote: captured 6 packages, 18 files, %d bytes into %s\n", bytes, tree); out != want {
 		t.Errorf("output = %q, want %q", out, want)
 	}
 }

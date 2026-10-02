@@ -469,11 +469,11 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 	for _, want := range []string{
 		"closure_packages=('libnss3')\n",
 		"  printf '%s\\n' 'bubblewrap'\n",
-		"  expose link required '/opt/cc-remote/closure'\n  expose copy required '/usr/local/bin/certutil'\n  expose copy required '/usr/local/share/mime'\n  expose copy required '/usr/local/share/glib-2.0/schemas'\n  expose copy required '/usr/local/share/icons'\n",
-		"  closure_link \"$closure_root\" \"$payload$closure_root\"\n  closure_link '/usr/local/bin/certutil' \"$closure_root/\"'usr/bin/certutil'\n",
+		"  expose link required '/opt/cc-remote/closure'\n  expose copy required '/usr/local/bin/certutil'\n  expose copy optional '/usr/local/share/mime'\n  expose copy optional '/usr/local/share/glib-2.0/schemas'\n  expose copy optional '/usr/local/share/icons'\n",
+		"  closure_link \"$closure_root\" \"$payload$closure_root\"\n  closure_link '/usr/local/bin/certutil' \"$closure_root/\"'usr/bin/certutil'\n  if [ -d \"$closure_root/\"'usr/share/mime' ]; then\n    closure_link '/usr/local/share/mime' \"$closure_root/\"'usr/share/mime'\n  fi\n",
 		"  closure_project '/usr/share/X11/xkb'\n  write_conf \"$closure_loader_conf\"",
-		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\ndone\nldconfig\nSH\n",
-		"  pack_path required '/opt/cc-remote/closure'\n  pack_path required '/usr/local/bin/certutil'\n",
+		"mount -t squashfs -o ro,nosuid,nodev,loop \"$image\" \"$dir\"\n  fi\ndone\ninstall -d -m 0755 /var/lib/cc-remote\nflock /var/lib/cc-remote/ldconfig.lock ldconfig\nSH\n",
+		"  pack_path required '/opt/cc-remote/closure'\n  pack_path required '/usr/local/bin/certutil'\n  pack_path optional '/usr/local/share/mime'\n",
 		"  packages) provision_packages \"${2:-}\" ;;\n  loader) provision_loader ;;\n",
 	} {
 		if !bytes.Contains(with.ProvisionScript, []byte(want)) {
