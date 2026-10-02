@@ -40,7 +40,7 @@ func TestHostOperations(t *testing.T) {
 		{"provision tools", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhaseTools) }, call{[]string{"sudo", "bash", "-s", "tools"}, "provision"}},
 		{"provision payload", func(ctx context.Context, exec Exec) error {
 			return scripts.Provision(ctx, exec, PhasePayload, digest, fingerprint)
-		}, call{[]string{"sudo", "bash", "-s", "payload", digest, fingerprint}, "provision"}},
+		}, call{[]string{"sudo", "--preserve-env=PATH", "bash", "-s", "payload", digest, fingerprint}, "provision"}},
 		{"provision pack", func(ctx context.Context, exec Exec) error {
 			return scripts.Provision(ctx, exec, PhasePack, fingerprint)
 		}, call{[]string{"sudo", "bash", "-s", "pack", fingerprint}, "provision"}},

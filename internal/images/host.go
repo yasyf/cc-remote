@@ -35,7 +35,12 @@ mv -f "` + PluginsPath + `.tmp" "` + PluginsPath + `"`
 const stagePayload = "install -d -m 0755 " + PayloadStore + " && cat > " + PayloadStore + "/$1.sqfs.partial"
 
 func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ...string) error {
-	argv := slices.Concat([]string{"sudo", "bash", "-s", phase}, args)
+	sudo := []string{"sudo"}
+	if phase == PhasePayload {
+		// sudo's secure_path drops /.sprite/bin, where the payload phase finds sprite-env.
+		sudo = append(sudo, "--preserve-env=PATH")
+	}
+	argv := slices.Concat(sudo, []string{"bash", "-s", phase}, args)
 	if err := exec(ctx, argv, bytes.NewReader(s.ProvisionScript)); err != nil {
 		return fmt.Errorf("provision %s: %w", phase, err)
 	}

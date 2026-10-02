@@ -43,7 +43,7 @@ const (
 	prereqsPhase  = "sudo bash -s prerequisites"
 	packagesPhase = "sudo bash -s packages"
 	toolsPhase    = "sudo bash -s tools"
-	payloadPhase  = "sudo bash -s payload "
+	payloadPhase  = "sudo --preserve-env=PATH bash -s payload "
 	stagesPayload = "stage-payload "
 	payloadBytes  = "hsqs squashfs payload bytes"
 	stages        = "plugins.sh.tmp"
