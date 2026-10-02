@@ -18,9 +18,17 @@ trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"
 
 {{template "artifacts.sh"}}
 t64() {
-  local name
+  local name packages
+  local -a aliases=()
   for name in "$@"; do
-    if apt-cache show "${name}t64" > /dev/null 2>&1; then
+    aliases+=("${name}t64")
+  done
+  if [ "${#aliases[@]}" -eq 0 ]; then
+    return
+  fi
+  packages="$(apt-cache show "${aliases[@]}" 2> /dev/null)" || packages=""
+  for name in "$@"; do
+    if grep -qFx "Package: ${name}t64" <<< "$packages"; then
       echo "${name}t64"
     else
       echo "$name"
