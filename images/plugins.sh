@@ -413,27 +413,51 @@ start_services() {
   fi
 }
 
-service_ready() {
-  if command -v sprite-env > /dev/null && [ "$(sprite-env services get "cc-remote-$1" 2> /dev/null | jq -r '.state.status')" != running ]; then
-    return 1
-  fi
-  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])' "$2" 2> /dev/null
-}
-
 await_services() {
-  local attempts="$1" i=0
-  shift
-  while [ "$#" -gt 0 ]; do
-    until service_ready "$1" "$2"; do
-      i=$((i + 1))
-      if [ "$i" -ge "$attempts" ]; then
-        echo "cc-remote: service $1 is not ready after $((attempts / 10))s: it must be running and $2 must accept a connection; its log is $state_dir/services/$1.log" >&2
-        exit 1
-      fi
-      sleep 0.1
-    done
-    shift 2
-  done
+  python3 - "$1" "$state_dir/services" "${@:2}" <<'PY'
+import json
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+timeout, log_dir, *pairs = sys.argv[1:]
+timeout = float(timeout)
+supervised = shutil.which("sprite-env") is not None
+
+
+def running(name):
+    status = subprocess.run(["sprite-env", "services", "get", "cc-remote-" + name], capture_output=True, text=True).stdout
+    try:
+        return json.loads(status)["state"]["status"] == "running"
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def accepts(path, remaining):
+    probe = socket.socket(socket.AF_UNIX)
+    probe.settimeout(min(1.0, remaining))
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+start = time.monotonic()
+for name, path in zip(pairs[::2], pairs[1::2]):
+    while True:
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            print(f"cc-remote: service {name} did not become ready in {time.monotonic() - start:.1f}s (deadline {timeout:g}s): it must be running and {path} must accept a connection; its log is {log_dir}/{name}.log", file=sys.stderr)
+            sys.exit(1)
+        if (not supervised or running(name)) and accepts(path, remaining):
+            break
+        time.sleep(0.1)
+PY
 }
 
 run_install() {
@@ -538,7 +562,7 @@ run_configure() {
   service {{q .Name}}{{if .Env}} env{{range $key, $value := .Env}} {{expand (printf "%s=%s" $key $value)}}{{end}}{{end}} "$executable"{{range slice .Command 1}} {{q .}}{{end}}
 {{- end}}
   start_services{{range .Services}} {{q .Name}}{{end}}
-  await_services {{.ReadyAttempts}}{{range .Services}} {{q .Name}} {{home .Ready}}{{end}}
+  await_services {{.ReadyTimeout}}{{range .Services}} {{q .Name}} {{home .Ready}}{{end}}
 {{- end}}
 {{- if .Cookiesync}}
   cookiesync install

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	assets "github.com/yasyf/cc-remote/images"
 )
@@ -61,26 +62,26 @@ type tree struct {
 	Path        string
 }
 
-var readyAttempts = 300
+var readyTimeout = 30 * time.Second
 
 type view struct {
 	Inventory
-	Tools         []Artifact
-	Prepare       []string
-	SystemTrees   []tree
-	HomeTrees     []tree
-	ReadyAttempts int
+	Tools        []Artifact
+	Prepare      []string
+	SystemTrees  []tree
+	HomeTrees    []tree
+	ReadyTimeout float64
 }
 
 func newView(inv Inventory, profile string) view {
 	tools := slices.Concat(inv.Tools, inv.Profiles[profile].Tools)
 	return view{
-		Inventory:     inv,
-		Tools:         tools,
-		Prepare:       slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
-		SystemTrees:   systemTrees(inv),
-		HomeTrees:     homeTrees(inv, tools),
-		ReadyAttempts: readyAttempts,
+		Inventory:    inv,
+		Tools:        tools,
+		Prepare:      slices.Concat(inv.Prepare, inv.Profiles[profile].Prepare),
+		SystemTrees:  systemTrees(inv),
+		HomeTrees:    homeTrees(inv, tools),
+		ReadyTimeout: readyTimeout.Seconds(),
 	}
 }
 

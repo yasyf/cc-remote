@@ -12,9 +12,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -276,6 +278,36 @@ func shortHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	return home
+}
+
+func listenFullBacklog(t *testing.T, home, rel string) {
+	t.Helper()
+	path := filepath.Join(home, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Listen(fd, 0); err != nil {
+		t.Fatal(err)
+	}
+	for range 1024 {
+		conn, err := net.Dial("unix", path)
+		if errors.Is(err, syscall.EAGAIN) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	t.Fatalf("%s queued 1024 connections without filling its backlog", path)
 }
 
 func listenReady(t *testing.T, home, rel string) *net.UnixListener {
@@ -937,22 +969,26 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 		existing  bool
 		namespace bool
 		sockets   string
-		attempts  int
+		timeout   time.Duration
 		wantErr   bool
 	}{
-		{name: "every socket accepts", status: "running", sockets: "listening", attempts: 300},
-		{name: "install waits for the last socket", status: "running", sockets: "late", attempts: 300},
-		{name: "a stale socket file is not ready", status: "running", sockets: "stale", attempts: 10, wantErr: true},
-		{name: "a running service without a socket is not ready", status: "running", sockets: "none", attempts: 10, wantErr: true},
-		{name: "a stopped service behind a listening socket is not ready", status: "stopped", sockets: "listening", attempts: 10, wantErr: true},
-		{name: "an existing service is gated but never created", status: "running", existing: true, sockets: "listening", attempts: 300},
-		{name: "the namespace branch is gated on sockets alone", namespace: true, sockets: "listening", attempts: 300},
-		{name: "the namespace branch fails closed without a socket", namespace: true, sockets: "none", attempts: 10, wantErr: true},
+		{name: "every socket accepts", status: "running", sockets: "listening", timeout: 30 * time.Second},
+		{name: "install waits for the last socket", status: "running", sockets: "late", timeout: 30 * time.Second},
+		{name: "a stale socket file is not ready", status: "running", sockets: "stale", timeout: time.Second, wantErr: true},
+		{name: "a running service without a socket is not ready", status: "running", sockets: "none", timeout: time.Second, wantErr: true},
+		{name: "a listener with a full accept backlog is not ready", status: "running", sockets: "backlog", timeout: time.Second, wantErr: true},
+		{name: "a stopped service behind a listening socket is not ready", status: "stopped", sockets: "listening", timeout: time.Second, wantErr: true},
+		{name: "an existing service is gated but never created", status: "running", existing: true, sockets: "listening", timeout: 30 * time.Second},
+		{name: "the namespace branch is gated on sockets alone", namespace: true, sockets: "listening", timeout: 30 * time.Second},
+		{name: "the namespace branch fails closed without a socket", namespace: true, sockets: "none", timeout: time.Second, wantErr: true},
+		{name: "the namespace branch fails closed on a full accept backlog", namespace: true, sockets: "backlog", timeout: time.Second, wantErr: true},
 	}
+	const probe = time.Second
+	notReady := regexp.MustCompile(`cc-remote: service capt did not become ready in [0-9]+\.[0-9]s \(deadline 1s\): it must be running and (\S+) must accept a connection; its log is (\S+)`)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			readyAttempts = tt.attempts
-			t.Cleanup(func() { readyAttempts = 300 })
+			readyTimeout = tt.timeout
+			t.Cleanup(func() { readyTimeout = 30 * time.Second })
 			h := newPluginsHost(t, inventory, nil, fakeState{}, nil)
 			writePluginTestFile(t, filepath.Join(h.fakes, "service-status"), []byte(tt.status+"\n"), 0o600)
 			writePluginTestFile(t, filepath.Join(h.fakes, "nohup"), []byte("#!/bin/sh\necho \"nohup $*\" >> \"$FAKE_LOG\"\n"), 0o700)
@@ -974,10 +1010,13 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 					if err := listener.Close(); err != nil {
 						t.Fatal(err)
 					}
+				case tt.sockets == "backlog":
+					listenFullBacklog(t, h.home, service.Ready)
 				}
 			}
 			var out string
 			var err error
+			started := time.Now()
 			if tt.sockets == "late" {
 				done := startArtifactScript(h.command("bash", filepath.Join(h.fakes, "plugins.sh"), "configure"))
 				deadline := time.Now().Add(10 * time.Second)
@@ -1001,6 +1040,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 			} else {
 				out, err = h.plugins("configure")
 			}
+			elapsed := time.Since(started)
 			calls := h.calls()
 			installs := countCall(calls, "cookiesync install state=present")
 			creates, mutations, spriteEnv := 0, 0, 0
@@ -1016,9 +1056,12 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 				}
 			}
 			if tt.wantErr {
-				want := "cc-remote: service capt is not ready after 1s: it must be running and " + filepath.Join(h.home, ".s", "capt") + " must accept a connection; its log is " + filepath.Join(h.home, ".cc-remote", "services", "capt.log")
-				if exitCode(err) != 1 || !strings.Contains(out, want) {
-					t.Fatalf("configure = %v\n%s\nwant exit 1 with %q", err, out, want)
+				match := notReady.FindStringSubmatch(out)
+				if exitCode(err) != 1 || match == nil || match[1] != filepath.Join(h.home, ".s", "capt") || match[2] != filepath.Join(h.home, ".cc-remote", "services", "capt.log") {
+					t.Fatalf("configure = %v\n%s\nwant exit 1 with %v naming the capt socket and log", err, out, notReady)
+				}
+				if elapsed < tt.timeout || elapsed > tt.timeout+probe+2*time.Second {
+					t.Errorf("configure failed closed after %v, want within [%v, %v]", elapsed, tt.timeout, tt.timeout+probe+2*time.Second)
 				}
 				if installs != 0 {
 					t.Errorf("cookiesync install ran %d times although a service never became ready:\n%s", installs, strings.Join(calls, "\n"))

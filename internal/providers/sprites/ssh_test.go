@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -21,6 +23,7 @@ esac
 `
 	fakeKeyscan = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DIR/ssh-keyscan.log"
+sleep "${FAKE_SCAN_DELAY:-0}"
 if [ -f "$FAKE_DIR/answers" ]; then
   echo "127.0.0.1 ` + fakeHostKey + `"
 else
@@ -36,17 +39,21 @@ func TestAuthorizeScriptWaitsForSSHDToAnswer(t *testing.T) {
 	wantCreate := []string{"services", "create", "sshd", "--cmd", "sudo", "--args", "sh,-c,mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e", "--duration", "1ms", "--no-stream"}
 	wantScan := "-T 1 -t ed25519 127.0.0.1"
 	clientKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeClientKey cc-remote alpha\n"
+	const deadline, probe = time.Second, 300 * time.Millisecond
+	noAnswer := regexp.MustCompile(`cc-remote: sshd did not accept a connection on port 22 in [0-9]+\.[0-9]s \(deadline 1s\)`)
 	tests := []struct {
 		name      string
 		existing  bool
 		answers   bool
+		blocks    bool
 		wantScans int
-		wantErr   string
+		wantErr   bool
 	}{
 		{name: "an existing sshd service is checked but never recreated", existing: true, answers: true, wantScans: 1},
-		{name: "an existing sshd service that never answers", existing: true, wantScans: 60, wantErr: "cc-remote: sshd did not accept a connection on port 22 within 30s"},
+		{name: "an existing sshd service that never answers", existing: true, wantErr: true},
 		{name: "a new sshd service answers", answers: true, wantScans: 1},
-		{name: "a new sshd service that never answers", wantScans: 60, wantErr: "cc-remote: sshd did not accept a connection on port 22 within 30s"},
+		{name: "a new sshd service that never answers", wantErr: true},
+		{name: "a keyscan that blocks for its own timeout never answers", blocks: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -70,17 +77,24 @@ func TestAuthorizeScriptWaitsForSSHDToAnswer(t *testing.T) {
 			script := strings.NewReplacer(
 				"test -x /usr/sbin/sshd", "test -x "+filepath.Join(fakes, "sshd"),
 				"cat /etc/ssh/ssh_host_ed25519_key.pub", "cat "+hostKey,
-				"sleep 0.5", "sleep 0.01",
+				"deadline = 30.0", "deadline = 1.0",
+				"time.sleep(0.5)", "time.sleep(0.01)",
 			).Replace(AuthorizeScript)
+			delay := "0"
+			if tt.blocks {
+				delay = "0.3"
+			}
 			cmd := exec.Command("sh", "-c", script)
-			cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_DIR="+fakes)
+			cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+fakes+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_DIR="+fakes, "FAKE_SCAN_DELAY="+delay)
 			cmd.Stdin = strings.NewReader(clientKey)
 			var stderr strings.Builder
 			cmd.Stderr = &stderr
+			started := time.Now()
 			out, err := cmd.Output()
+			elapsed := time.Since(started)
 			scans := loggedLines(t, filepath.Join(fakes, "ssh-keyscan.log"))
-			if len(scans) != tt.wantScans || slices.ContainsFunc(scans, func(scan string) bool { return scan != wantScan }) {
-				t.Errorf("ssh-keyscan ran %d times with %q, want %d times with %q", len(scans), scans, tt.wantScans, wantScan)
+			if len(scans) == 0 || (tt.wantScans != 0 && len(scans) != tt.wantScans) || slices.ContainsFunc(scans, func(scan string) bool { return scan != wantScan }) {
+				t.Errorf("ssh-keyscan ran %d times with %q, want %d times (0 = any) with %q", len(scans), scans, tt.wantScans, wantScan)
 			}
 			created := loggedLines(t, filepath.Join(fakes, "create.argv"))
 			if tt.existing {
@@ -90,10 +104,13 @@ func TestAuthorizeScriptWaitsForSSHDToAnswer(t *testing.T) {
 			} else if !slices.Equal(created, wantCreate) {
 				t.Errorf("create = %q, want %q", created, wantCreate)
 			}
-			if tt.wantErr != "" {
+			if tt.wantErr {
 				var exit *exec.ExitError
-				if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(stderr.String(), tt.wantErr) || len(out) != 0 {
-					t.Fatalf("authorize = %v, stdout %q, stderr %q; want exit 1 printing %q and no host key", err, out, stderr.String(), tt.wantErr)
+				if !errors.As(err, &exit) || exit.ExitCode() != 1 || !noAnswer.MatchString(stderr.String()) || len(out) != 0 {
+					t.Fatalf("authorize = %v, stdout %q, stderr %q; want exit 1 printing %v and no host key", err, out, stderr.String(), noAnswer)
+				}
+				if elapsed < deadline || elapsed > deadline+probe+2*time.Second {
+					t.Errorf("authorize gave up after %v, want within [%v, %v]", elapsed, deadline, deadline+probe+2*time.Second)
 				}
 				return
 			}

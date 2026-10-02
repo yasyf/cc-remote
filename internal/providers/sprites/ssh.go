@@ -155,6 +155,18 @@ touch "$HOME/.ssh/authorized_keys"
 grep -qxF "$key" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$key" >> "$HOME/.ssh/authorized_keys"
 chmod 600 "$HOME/.ssh/authorized_keys"
 sprite-env services get sshd >/dev/null 2>&1 || sprite-env services create sshd --cmd sudo --args "sh,-c,mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e" --duration 1ms --no-stream >&2
-i=0
-until ssh-keyscan -T 1 -t ed25519 127.0.0.1 2>/dev/null | grep -q .; do i=$((i + 1)); test "$i" -lt 60 || { echo "cc-remote: sshd did not accept a connection on port 22 within 30s" >&2; exit 1; }; sleep 0.5; done
+python3 - <<'PY'
+import subprocess
+import sys
+import time
+
+deadline = 30.0
+start = time.monotonic()
+while not subprocess.run(["ssh-keyscan", "-T", "1", "-t", "ed25519", "127.0.0.1"], capture_output=True).stdout.strip():
+    elapsed = time.monotonic() - start
+    if elapsed >= deadline:
+        print(f"cc-remote: sshd did not accept a connection on port 22 in {elapsed:.1f}s (deadline {deadline:g}s)", file=sys.stderr)
+        sys.exit(1)
+    time.sleep(0.5)
+PY
 cat /etc/ssh/ssh_host_ed25519_key.pub`
