@@ -16,6 +16,7 @@ import (
 const (
 	LocalRuntime      = "local"
 	screenUnavailable = "screen-unavailable"
+	tuiIdle           = "tui-idle"
 	turnStarted       = "turn_started"
 	oldHost           = "old-host"
 )
@@ -42,10 +43,12 @@ type TerminalWait struct {
 }
 
 type Screen struct {
-	Handle string   `json:"handle"`
-	Status string   `json:"status"`
-	Source string   `json:"source"`
-	Tail   []string `json:"tail"`
+	Handle    string   `json:"handle"`
+	Status    string   `json:"status"`
+	Source    string   `json:"source"`
+	Truncated bool     `json:"truncated"`
+	Limited   *bool    `json:"limited"`
+	Tail      []string `json:"tail"`
 }
 
 type Prompt struct {
@@ -189,6 +192,9 @@ func (r Remote) Screen(ctx context.Context, handle string) (Screen, error) {
 	if err != nil {
 		return Screen{}, err
 	}
+	if err := r.answeredFor("orca terminal read", handle, result.Terminal.Handle); err != nil {
+		return Screen{}, err
+	}
 	if result.Terminal.Source == screenUnavailable {
 		return Screen{}, fmt.Errorf("terminal %s on %s has no rendered screen", handle, r.Environment)
 	}
@@ -198,12 +204,18 @@ func (r Remote) Screen(ctx context.Context, handle string) (Screen, error) {
 func (r Remote) WaitIdle(ctx context.Context, handle string, timeout time.Duration) (TerminalWait, error) {
 	result, err := scoped[struct {
 		Wait TerminalWait `json:"wait"`
-	}](ctx, r, "orca terminal wait", "terminal", "wait", "--terminal", handle, "--for", "tui-idle", "--timeout-ms", strconv.FormatInt(timeout.Milliseconds(), 10))
+	}](ctx, r, "orca terminal wait", "terminal", "wait", "--terminal", handle, "--for", tuiIdle, "--timeout-ms", strconv.FormatInt(timeout.Milliseconds(), 10))
 	if err != nil {
+		return TerminalWait{}, err
+	}
+	if err := r.answeredFor("orca terminal wait", handle, result.Wait.Handle); err != nil {
 		return TerminalWait{}, err
 	}
 	if !result.Wait.Satisfied {
 		return result.Wait, fmt.Errorf("terminal %s on %s was not tui-idle within %s: status %s, blocked %s", handle, r.Environment, timeout, result.Wait.Status, result.Wait.BlockedReason)
+	}
+	if result.Wait.Condition != tuiIdle {
+		return TerminalWait{}, fmt.Errorf("terminal %s on %s satisfied %q, not %s", handle, r.Environment, result.Wait.Condition, tuiIdle)
 	}
 	return result.Wait, nil
 }
@@ -223,8 +235,18 @@ func (r Remote) input(ctx context.Context, handle string, args ...string) error 
 	if err != nil {
 		return err
 	}
+	if err := r.answeredFor("orca terminal send", handle, result.Send.Handle); err != nil {
+		return err
+	}
 	if !result.Send.Accepted {
 		return fmt.Errorf("terminal %s on %s refused input: %s", handle, r.Environment, result.Send.RefusedReason)
+	}
+	return nil
+}
+
+func (r Remote) answeredFor(label, handle, terminal string) error {
+	if terminal == "" || terminal != handle {
+		return fmt.Errorf("%s on %s answered for terminal %q, not %s", label, r.Environment, terminal, handle)
 	}
 	return nil
 }

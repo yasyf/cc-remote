@@ -55,6 +55,15 @@ type orcaTask struct {
 	Terminal      string         `json:"terminal,omitempty"`
 	Bootstrap     []string       `json:"bootstrap,omitempty"`
 	Receipts      []orca.Receipt `json:"receipts,omitempty"`
+	Prepared      bool           `json:"prepared,omitempty"`
+	Brief         *orcaArtifact  `json:"brief,omitempty"`
+	BaseCommit    string         `json:"baseCommit,omitempty"`
+}
+
+type orcaLaunch struct {
+	flags      selection
+	ref, title string
+	agent      orca.Agent
 }
 
 type orcaTunnel struct {
@@ -130,20 +139,70 @@ func (t orcaTunnel) dropKey(ctx context.Context, dir string) error {
 	return err
 }
 
+func (l *orcaLaunch) bind(cmd *cobra.Command, mcp string) {
+	l.flags.bind(cmd)
+	cmd.Flags().StringVar(&l.ref, "ref", "", "branch or tag to check out (default config.ref)")
+	cmd.Flags().StringVar(&l.agent.Kind, "agent", orca.AgentClaude, "worker CLI: claude or codex")
+	cmd.Flags().StringVar(&l.agent.Model, "model", "", "the worker's model, passed through unchanged")
+	cmd.Flags().StringVar(&l.agent.Effort, "effort", "", "the worker's effort, passed through unchanged")
+	cmd.Flags().StringVar(&l.agent.Tier, "service-tier", "", "codex only: the worker's explicit service_tier, such as fast (default none)")
+	cmd.Flags().StringArrayVar(&l.agent.MCP, "mcp-config", nil, mcp)
+	cmd.Flags().StringVar(&l.title, "title", "", "Orca terminal title (default the workspace name)")
+	_ = cmd.MarkFlagRequired("model")
+	_ = cmd.MarkFlagRequired("effort")
+}
+
+func (l *orcaLaunch) run(cmd *cobra.Command, runner orca.Runner, name string, finish func(context.Context, orcaDriver, *orcaTask) error) error {
+	session, err := l.flags.open()
+	if err != nil {
+		return err
+	}
+	runtime, err := orcaRuntime(session)
+	if err != nil {
+		return err
+	}
+	key, err := captureKey(cmd.Context(), session.Config.Orca.Keys[l.agent.KeyProvider()])
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	control, err := state.NewOrcaControl()
+	if err != nil {
+		return err
+	}
+	result, err := session.Create(cmd.Context(), name, workspace.Source{Ref: cmp.Or(l.ref, session.Config.Ref)})
+	if err != nil {
+		return errors.Join(err, os.Remove(filepath.Dir(control)))
+	}
+	driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
+	task, err := driver.task(result, l.agent, control)
+	if err == nil {
+		err = driver.launch(cmd.Context(), session, task, runtime, key, cmp.Or(l.title, result.Name))
+	}
+	if err == nil {
+		err = finish(cmd.Context(), driver, task)
+	}
+	if task == nil {
+		return err
+	}
+	return errors.Join(err, emit(cmd.OutOrStdout(), task))
+}
+
 func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
 	return []*cobra.Command{
 		newOrcaCreateCmd(runner),
+		newOrcaPrepareCmd(runner),
 		newOrcaStatusCmd(runner),
 		newOrcaReconnectCmd(runner),
 		newOrcaSendCmd(runner),
 		newOrcaReadCmd(runner),
+		newOrcaCollectCmd(runner),
 	}
 }
 
 func newOrcaCreateCmd(runner orca.Runner) *cobra.Command {
-	var flags selection
-	var ref, promptFile, title string
-	var agent orca.Agent
+	var launch orcaLaunch
+	var promptFile string
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a workspace, pair its Orca runtime with this Orca CLI, and start a worker on its checkout",
@@ -155,56 +214,93 @@ its provider and reaches only the worker, through a one-use pipe over SSH. stdou
 record, also kept under the state directory for status, reconnect, send, and read.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := agent.Validate(); err != nil {
+			if err := launch.agent.Validate(); err != nil {
 				return err
 			}
 			prompt, err := readPrompt(cmd, promptFile)
 			if err != nil {
 				return err
 			}
-			session, err := flags.open()
+			return launch.run(cmd, runner, args[0], func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+				_, err := driver.prompt(ctx, task, prompt)
+				return err
+			})
+		},
+	}
+	launch.bind(cmd, "MCP servers the worker may start: for claude an --mcp-config file or JSON, repeatable; for codex one TOML inline table for mcp_servers (default none)")
+	cmd.Flags().StringVar(&promptFile, "prompt-file", "", "file holding the worker's first prompt, or - for stdin")
+	_ = cmd.MarkFlagRequired("prompt-file")
+	return cmd
+}
+
+func newOrcaPrepareCmd(runner orca.Runner) *cobra.Command {
+	var launch orcaLaunch
+	var briefFile string
+	cmd := &cobra.Command{
+		Use:   "prepare <name>",
+		Short: "Create a workspace and start an idle worker on its checkout with its brief on the machine, sending no prompt",
+		Long: `prepare runs create's machine, runtime, pairing, checkout, key and worker steps once, stopping when the
+worker is idle. It copies the brief file byte for byte to a private task directory on the machine, outside
+the checkout, verifies its SHA-256 and length, and records the checkout's HEAD as baseCommit. It sends the
+worker no input; Orca's worker-start delivers the first task. stdout carries the task record, prepared: true.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := launch.agent.Validate(); err != nil {
+				return err
+			}
+			if err := launch.agent.InlineMCP(); err != nil {
+				return err
+			}
+			brief, err := readBrief(briefFile)
 			if err != nil {
 				return err
 			}
-			runtime, err := orcaRuntime(session)
+			return launch.run(cmd, runner, args[0], func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+				return driver.publish(ctx, task, brief)
+			})
+		},
+	}
+	launch.bind(cmd, "MCP servers the worker may start, inline only: for claude one JSON object per flag; for codex one TOML inline table for mcp_servers (default none)")
+	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
+	_ = cmd.MarkFlagRequired("brief-file")
+	return cmd
+}
+
+func newOrcaCollectCmd(runner orca.Runner) *cobra.Command {
+	var flags selection
+	var request orcaCollect
+	cmd := &cobra.Command{
+		Use:   "collect <name>",
+		Short: "Copy a prepared task's report and patch from its task directory into a new local directory",
+		Long: `collect reads two regular files, never links, from the directory holding the prepared task's brief. The
+report is JSON: schemaVersion 1, the prepared baseCommit, the patch's sha256 and bytes, and files naming each
+changed path with its sha256 or deleted: true. On the recorded live runtime and an unmoved HEAD, collect checks
+the patch against the report, writes both files unchanged into the new --output directory, and prints their
+hashes and bounded git status entries. The machine is unchanged; a matching report does not prove completeness.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := flags.load()
 			if err != nil {
 				return err
 			}
-			key, err := captureKey(cmd.Context(), session.Config.Orca.Keys[agent.KeyProvider()])
+			task, err := loadTask(cfg.State(), args[0])
 			if err != nil {
 				return err
 			}
-			defer clear(key)
-			control, err := state.NewOrcaControl()
+			collection, err := request.collect(cmd.Context(), orca.NewClient(runner), task)
 			if err != nil {
 				return err
 			}
-			result, err := session.Create(cmd.Context(), args[0], workspace.Source{Ref: cmp.Or(ref, session.Config.Ref)})
-			if err != nil {
-				return errors.Join(err, os.Remove(filepath.Dir(control)))
-			}
-			driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
-			task, err := driver.task(result, agent, control)
-			if err == nil {
-				err = driver.launch(cmd.Context(), session, task, runtime, key, cmp.Or(title, result.Name), prompt)
-			}
-			if task == nil {
-				return err
-			}
-			return errors.Join(err, emit(cmd.OutOrStdout(), task))
+			return emit(cmd.OutOrStdout(), collection)
 		},
 	}
 	flags.bind(cmd)
-	cmd.Flags().StringVar(&ref, "ref", "", "branch or tag to check out (default config.ref)")
-	cmd.Flags().StringVar(&agent.Kind, "agent", orca.AgentClaude, "worker CLI: claude or codex")
-	cmd.Flags().StringVar(&agent.Model, "model", "", "the worker's model, passed through unchanged")
-	cmd.Flags().StringVar(&agent.Effort, "effort", "", "the worker's effort, passed through unchanged")
-	cmd.Flags().StringArrayVar(&agent.MCP, "mcp-config", nil, "MCP servers the worker may start: for claude an --mcp-config file or JSON, repeatable; for codex one TOML inline table for mcp_servers (default none)")
-	cmd.Flags().StringVar(&promptFile, "prompt-file", "", "file holding the worker's first prompt, or - for stdin")
-	cmd.Flags().StringVar(&title, "title", "", "Orca terminal title (default the workspace name)")
-	_ = cmd.MarkFlagRequired("model")
-	_ = cmd.MarkFlagRequired("effort")
-	_ = cmd.MarkFlagRequired("prompt-file")
+	cmd.Flags().StringVar(&request.report, "report-file", "", "absolute path of the report in the task's directory on the machine")
+	cmd.Flags().StringVar(&request.patch, "patch-file", "", "absolute path of the patch in the task's directory on the machine")
+	cmd.Flags().StringVar(&request.output, "output", "", "local directory to create for the two files; it must not exist yet")
+	_ = cmd.MarkFlagRequired("report-file")
+	_ = cmd.MarkFlagRequired("patch-file")
+	_ = cmd.MarkFlagRequired("output")
 	return cmd
 }
 
@@ -295,6 +391,9 @@ the supported Orca runtime can deliver the prompt again when replaying an accept
 			if err != nil {
 				return err
 			}
+			if task.Prepared {
+				return fmt.Errorf("%s waits for Orca's worker-start; reach its worker through the home Dispatch, not this terminal", task.Workspace)
+			}
 			if !task.Forward.up(cmd.Context()) {
 				return errors.New("the forward is down; run cc-remote orca reconnect " + task.Workspace)
 			}
@@ -372,7 +471,7 @@ func (d orcaDriver) save(task *orcaTask) error {
 	return state.Save(d.state.Orca(task.Workspace), task)
 }
 
-func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime, key []byte, title, prompt string) error {
+func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime, key []byte, title string) error {
 	ready, pairing, err := d.start(ctx, session, task, runtime)
 	if err != nil {
 		return err
@@ -391,7 +490,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	task.EnvironmentID = environment.ID
 	native := d.client.On(task.Environment, task.RuntimeID)
 	if _, err := native.Status(ctx); err != nil {
-		return err
+		return errors.Join(err, d.save(task))
 	}
 	repo, err := native.AddRepo(ctx, task.ProjectRoot)
 	if err != nil {
@@ -412,12 +511,12 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 		return err
 	}
 	d.log.Info("started the worker", "terminal", task.Terminal, "agent", task.Agent.Kind, "model", task.Agent.Model)
-	task.Bootstrap, err = native.Bootstrap(ctx, task.Terminal, orca.StartupOf(task.Agent), session.Config.Trusted(), orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute})
-	if err := errors.Join(err, d.save(task)); err != nil {
+	startup, err := orcaStartup(session, task)
+	if err != nil {
 		return err
 	}
-	_, err = d.prompt(ctx, task, prompt)
-	return err
+	task.Bootstrap, err = native.Bootstrap(ctx, task.Terminal, startup, session.Config.Trusted(), orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute})
+	return errors.Join(err, d.save(task))
 }
 
 func (d orcaDriver) start(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime) (orca.Ready, string, error) {
@@ -495,6 +594,40 @@ func orcaRuntime(session *workspace.Session) (orca.Runtime, error) {
 		Args:       cfg.Orca.Args,
 		Supervised: session.Provider.Traits().Supervisor == providers.SupervisorSpriteEnv,
 	}, nil
+}
+
+func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, error) {
+	if task.Agent.Kind != orca.AgentCodex {
+		return orca.StartupOf(task.Agent), nil
+	}
+	cfg := session.Config
+	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
+	if err != nil {
+		return orca.Startup{}, err
+	}
+	return orca.CodexStartup(orca.HookReview{
+		Captain: captainPins(inventory),
+		Exec: func(ctx context.Context, argv []string) ([]byte, error) {
+			result, err := session.Provider.Exec(ctx, task.Machine, argv, nil)
+			if err != nil {
+				return nil, err
+			}
+			if result.ExitCode != 0 {
+				return nil, fmt.Errorf("the Codex hook probe on %s exited %d", task.Machine, result.ExitCode)
+			}
+			return result.Stdout, nil
+		},
+	}), nil
+}
+
+func captainPins(inventory images.Inventory) []orca.Pin {
+	var pins []orca.Pin
+	for _, plugin := range inventory.Claude.Plugins {
+		if strings.HasPrefix(plugin.ID, orca.CaptainPlugin+"@") {
+			pins = append(pins, orca.Pin{ID: plugin.ID, Version: plugin.Version})
+		}
+	}
+	return pins
 }
 
 func captureKey(ctx context.Context, command []string) ([]byte, error) {

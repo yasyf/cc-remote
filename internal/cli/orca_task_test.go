@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,7 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/images"
+	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/providers/providertest"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
@@ -220,5 +225,272 @@ func TestPromptKeepsAnAcceptedReceiptWithoutResending(t *testing.T) {
 	loaded, err := loadTask(driver.state, "task-a")
 	if err != nil || len(loaded.Receipts) != 1 || loaded.Receipts[0].RequestID != "req-1" || loaded.Receipts[0].ProcessIncarnation != "p1" || loaded.Receipts[0].Submitted {
 		t.Fatalf("stored receipt = %+v, %v", loaded, err)
+	}
+}
+
+func TestCaptainPinsSelectOnlyCaptainHookPlugins(t *testing.T) {
+	inventory := images.Inventory{Claude: images.Claude{Plugins: []images.Plugin{
+		{ID: "cc-context@cc-context", Version: "0.66.5"},
+		{ID: "captain-hook@captain-hook", Version: "12.79.15"},
+		{ID: "captain-hooks@other", Version: "1.0.0"},
+		{ID: "observer@captain-hook", Version: "1.0.0"},
+	}}}
+	if got := captainPins(inventory); !slices.Equal(got, []orca.Pin{{ID: "captain-hook@captain-hook", Version: "12.79.15"}}) {
+		t.Errorf("captainPins = %+v", got)
+	}
+	if got := captainPins(images.Inventory{}); len(got) != 0 {
+		t.Errorf("an inventory without Captain Hook selected %+v", got)
+	}
+}
+
+type scriptedOrca struct {
+	t       *testing.T
+	replies map[string]string
+	calls   []string
+}
+
+func (s *scriptedOrca) Run(_ context.Context, args ...string) ([]byte, error) {
+	command := strings.Join(args, " ")
+	s.calls = append(s.calls, command)
+	reply, ok := s.replies[command]
+	if !ok {
+		s.t.Errorf("unexpected orca call: %s", command)
+		return nil, fmt.Errorf("unexpected orca call: %s", command)
+	}
+	return []byte(reply), nil
+}
+
+func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
+	agent := orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", MCP: []string{`{"mcpServers":{"docs":{"command":"docs-mcp"}}}`}}
+	brief := []byte("Read every line.\n\n'quoted' \"double\" $(touch pwned) `touch pwned`\n")
+	runtime := orca.Runtime{Entry: "tools/orca/AppRun"}
+	ready := `{"type":"orca_server_ready","schemaVersion":1,"runtimeId":"rt-1","boundEndpoint":"ws://0.0.0.0:7001","advertisedEndpoint":"ws://127.0.0.1:7001","pairing":{"available":true,"url":"orca://pair?code=private"}}`
+	envelope := func(runtimeID, result string) string {
+		return `{"ok":true,"result":` + result + `,"_meta":{"runtimeId":"` + runtimeID + `"}}`
+	}
+	tests := []struct {
+		name    string
+		create  bool
+		runtime string
+		idle    bool
+		corrupt bool
+		want    string
+		orca    int
+		ssh     []string
+	}{
+		{name: "prepare", runtime: "rt-1", idle: true, orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}},
+		{name: "create", create: true, runtime: "rt-1", idle: true, orca: 8, ssh: []string{"check", "key-dir", "key-write"}},
+		{name: "busy worker", runtime: "rt-1", want: "was not tui-idle", orca: 7, ssh: []string{"check", "key-dir", "key-write"}},
+		{name: "other runtime", runtime: "rt-2", want: `answered from runtime "rt-2", not rt-1`, orca: 2, ssh: []string{"check"}},
+		{name: "unverified brief", runtime: "rt-1", idle: true, corrupt: true, want: "not the brief's", orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := fakeRemote(t)
+			if tt.corrupt {
+				t.Setenv("REMOTE_CORRUPT", "1")
+			}
+			root, head := gitCheckout(t)
+			control, err := state.NewOrcaControl()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(filepath.Dir(control)) })
+			provider := &providertest.Fake{Handle: func(string, []string, []byte) providers.Result {
+				return providers.Result{Stdout: []byte("starting\n" + ready + "\n")}
+			}}
+			if _, err := provider.Create(t.Context(), providers.Spec{Name: "task-a"}); err != nil {
+				t.Fatal(err)
+			}
+			worktree := "repo-1::" + root
+			scope := " --environment task-a --json"
+			commands := []string{
+				"environment add --name task-a --pairing-code orca://pair?code=private --json",
+				"status" + scope,
+				"repo add --path " + root + scope,
+				"worktree list --repo id:repo-1" + scope,
+				"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir) + scope,
+				"terminal read --terminal term-1 --screen" + scope,
+				"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
+				"terminal send --terminal term-1 --text do the task --enter --wait-submit 15" + scope,
+			}
+			fake := &scriptedOrca{t: t, replies: map[string]string{
+				commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"task-a"}}`),
+				commands[1]: envelope(tt.runtime, `{"runtime":{"state":"ready","reachable":true,"runtimeId":"`+tt.runtime+`"}}`),
+				commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+root+`"}}`),
+				commands[3]: envelope("rt-1", `{"worktrees":[{"id":"`+worktree+`","repoId":"repo-1","path":"`+root+`"}]}`),
+				commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1"}}`),
+				commands[5]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
+				commands[6]: envelope("rt-1", fmt.Sprintf(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":%t,"status":"running","exitCode":null,"blockedReason":"busy"}}`, tt.idle)),
+				commands[7]: envelope("rt-1", `{"send":{"handle":"term-1","accepted":true,"prompt":{"requestId":"req-1","stages":["input_accepted","turn_started"],"provider":"claude","processIncarnation":"p1"}}}`),
+			}}
+			session := &workspace.Session{Config: &config.Config{}, Provider: provider, Log: slog.New(slog.DiscardHandler)}
+			driver := orcaDriver{client: orca.NewClient(fake), state: state.Dir(t.TempDir()), log: session.Log}
+			task := &orcaTask{
+				SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "fake", Profile: "lean", Machine: "task-a", ProjectRoot: root,
+				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
+				Forward: orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
+			}
+			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), "task-a")
+			if err == nil && tt.create {
+				_, err = driver.prompt(t.Context(), task, "do the task")
+			}
+			if err == nil && !tt.create {
+				err = driver.publish(t.Context(), task, brief)
+			}
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("launch = %v, want %q", err, tt.want)
+			}
+			if !slices.Equal(fake.calls, commands[:tt.orca]) {
+				t.Errorf("orca calls =\n%q\nwant\n%q", fake.calls, commands[:tt.orca])
+			}
+			runtime.Port = 7001
+			if got := provider.Calls(); !slices.Equal(got, []string{"create task-a", fmt.Sprintf("exec task-a %q", []string{"sh", "-c", runtime.EnsureScript()})}) {
+				t.Errorf("provider calls = %q", got)
+			}
+			if got := sshCalls(t); !slices.Equal(got, tt.ssh) {
+				t.Errorf("ssh calls = %q, want %q", got, tt.ssh)
+			}
+			loaded, err := loadTask(driver.state, "task-a")
+			if err != nil || loaded.RuntimeID != "rt-1" || loaded.Agent.Model != agent.Model || loaded.Agent.Effort != agent.Effort || !slices.Equal(loaded.Agent.MCP, agent.MCP) {
+				t.Fatalf("stored task = %+v, %v", loaded, err)
+			}
+			dir := filepath.Join(home, ".cc-remote", "orca", "tasks", "task-a")
+			switch tt.name {
+			case "prepare":
+				want := artifactOf(dir+"/brief.md", brief)
+				if !loaded.Prepared || *loaded.Brief != want || loaded.BaseCommit != head || loaded.Terminal != "term-1" || loaded.WorktreeID != worktree || loaded.Receipts != nil {
+					t.Errorf("prepared task = %+v, brief %+v", loaded, loaded.Brief)
+				}
+			case "create":
+				if loaded.Prepared || loaded.Brief != nil || len(loaded.Receipts) != 1 || !loaded.Receipts[0].Submitted || loaded.Receipts[0].RequestID != "req-1" {
+					t.Errorf("created task = %+v", loaded)
+				}
+			case "busy worker":
+				if loaded.Prepared || loaded.Brief != nil || loaded.BaseCommit != "" || loaded.Terminal != "term-1" || loaded.Receipts != nil {
+					t.Errorf("partial task = %+v", loaded)
+				}
+			case "other runtime":
+				if loaded.Prepared || loaded.EnvironmentID != "env-1" || loaded.RepoID != "" || loaded.Terminal != "" {
+					t.Errorf("partial task = %+v", loaded)
+				}
+			case "unverified brief":
+				if loaded.Prepared || loaded.Brief != nil || loaded.BaseCommit != head || loaded.Receipts != nil {
+					t.Errorf("partial task = %+v", loaded)
+				}
+			}
+			if _, err := os.Stat(dir); (err == nil) != (tt.name == "prepare" || tt.name == "unverified brief") {
+				t.Errorf("task directory %s: %v", dir, err)
+			}
+			if _, err := os.Stat(filepath.Join(home, "pwned")); !os.IsNotExist(err) {
+				t.Errorf("the brief ran as shell: %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareRefusesBadInputBeforeAnyEffect(t *testing.T) {
+	fakeRemote(t)
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	brief, empty := write("brief.md", "do the work\n"), write("empty.md", " \n\t")
+	claude := []string{"--model", "claude-opus-5-5", "--effort", "xhigh"}
+	codex := []string{"--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "xhigh"}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"fable alias", []string{"--model", "fable", "--effort", "high", "--brief-file", brief}, "Fable requires an explicit local choice"},
+		{"fable family", []string{"--model", "claude-fable-5-1", "--effort", "high", "--brief-file", brief}, "Fable requires an explicit local choice"},
+		{"fable on codex", []string{"--agent", "codex", "--model", "Fable-5", "--effort", "xhigh", "--brief-file", brief}, "Fable requires an explicit local choice"},
+		{"claude service tier", slices.Concat(claude, []string{"--service-tier", "fast", "--brief-file", brief}), "codex setting"},
+		{"claude MCP file", slices.Concat(claude, []string{"--mcp-config", "/Users/me/.mcp.json", "--brief-file", brief}), "not an inline JSON object"},
+		{"codex MCP file", slices.Concat(codex, []string{"--mcp-config", "servers.toml", "--brief-file", brief}), "not an inline TOML table"},
+		{"empty brief", slices.Concat(claude, []string{"--brief-file", empty}), "is empty"},
+		{"missing brief", slices.Concat(claude, []string{"--brief-file", filepath.Join(dir, "absent.md")}), "read the brief"},
+		{"valid claude reaches the config", slices.Concat(claude, []string{"--mcp-config", `{"mcpServers":{}}`, "--brief-file", brief}), "read config"},
+		{"codex fast tier reaches the config", slices.Concat(codex, []string{"--service-tier", "fast", "--mcp-config", "{}", "--brief-file", brief}), "read config"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
+				calls++
+				return nil, errors.New("no runtime operation is expected")
+			})
+			cmd := newOrcaPrepareCmd(runner)
+			cmd.SetArgs(append([]string{"task-a", "--config", filepath.Join(dir, "absent.yaml")}, tt.args...))
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.ExecuteContext(t.Context())
+			if err == nil || !strings.Contains(err.Error(), tt.want) || calls != 0 {
+				t.Fatalf("prepare = %v, calls = %d, want %q", err, calls, tt.want)
+			}
+			if strings.Contains(err.Error(), "do the work") {
+				t.Errorf("the error repeats the brief: %v", err)
+			}
+			if got := sshCalls(t); len(got) != 0 {
+				t.Errorf("ssh calls = %q", got)
+			}
+		})
+	}
+}
+
+func TestPrepareAndCreateShareTheirLaunchFlags(t *testing.T) {
+	prepare, create := newOrcaPrepareCmd(nil), newOrcaCreateCmd(nil)
+	for _, name := range []string{"config", "provider", "profile", "ref", "agent", "model", "effort", "service-tier", "mcp-config", "title"} {
+		if prepare.Flags().Lookup(name) == nil || create.Flags().Lookup(name) == nil {
+			t.Errorf("--%s is not on both prepare and create", name)
+		}
+	}
+	if prepare.Flags().Lookup("prompt-file") != nil || create.Flags().Lookup("brief-file") != nil {
+		t.Error("prepare takes a prompt or create takes a brief")
+	}
+	collect := newOrcaCollectCmd(nil)
+	for _, name := range []string{"report-file", "patch-file", "output"} {
+		if collect.Flags().Lookup(name) == nil {
+			t.Errorf("collect lacks --%s", name)
+		}
+	}
+}
+
+func TestSendRefusesAPreparedTask(t *testing.T) {
+	fakeRemote(t)
+	dir := state.Dir(t.TempDir())
+	prompt := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(prompt, []byte("next step\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := &orcaTask{
+		SchemaVersion: orcaTaskSchema, Workspace: "task-a", Environment: "task-a", RuntimeID: "rt-1", Terminal: "term-1",
+		Prepared: true, Brief: &orcaArtifact{Path: "/home/agent/.cc-remote/orca/tasks/task-a/brief.md"}, BaseCommit: strings.Repeat("a", 40),
+	}
+	if err := state.Save(dir.Orca("task-a"), task); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
+		calls++
+		return nil, errors.New("no runtime operation is expected")
+	})
+	cmd := newOrcaSendCmd(runner)
+	cmd.SetArgs([]string{"task-a", "--config", taskConfig(t, dir), "--prompt-file", prompt})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.ExecuteContext(t.Context()); err == nil || !strings.Contains(err.Error(), "worker-start") || calls != 0 {
+		t.Fatalf("send = %v, calls = %d", err, calls)
+	}
+	if got := sshCalls(t); len(got) != 0 {
+		t.Errorf("ssh calls = %q", got)
+	}
+	if loaded, err := loadTask(dir, "task-a"); err != nil || loaded.Receipts != nil || !loaded.Prepared {
+		t.Errorf("stored task = %+v, %v", loaded, err)
 	}
 }

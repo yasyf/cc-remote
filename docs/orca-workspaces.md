@@ -141,3 +141,56 @@ controls do not manage the provider machine; use `cc-remote suspend` and
 `reconnect` restores only the transport to an existing runtime. It does not
 resume a machine, restart a runtime, or recover a worker after process loss.
 The recorded runtime and receipt identities remain unchanged.
+
+## Prepare a worker for a Mac Run
+
+`cc-remote orca prepare` runs the same steps as `create` and sends no prompt.
+It stops once the worker is idle and copies `--brief-file` byte for byte to
+`$HOME/.cc-remote/orca/tasks/task-name/brief.md` on the machine, outside the
+checkout, then checks the copy's SHA-256 and length. The task record then
+carries `prepared: true`, the brief's path, hash, and size, and the checkout's
+HEAD as `baseCommit`. The first task reaches the worker through Orca's
+`worker-start --on --terminal --worktree` from the Mac Run, and later messages
+go to its home Dispatch, so `send` refuses a prepared task.
+
+```sh
+cc-remote orca prepare task-name --config .cc-remote/config.yaml \
+  --agent codex --model <model> --effort <effort> --service-tier fast \
+  --brief-file brief.md
+```
+
+`prepare` takes `--mcp-config` only inline, as a JSON object for Claude or a
+TOML table for Codex, because a path names a file on this machine. It
+refuses Fable models, which run only as an explicit local choice.
+`--service-tier` is a Codex setting on both `prepare` and `create`.
+
+The worker writes its report and a full binary patch beside its brief.
+`collect` copies both into a new local directory:
+
+```sh
+cc-remote orca collect task-name --config .cc-remote/config.yaml \
+  --report-file /home/<user>/.cc-remote/orca/tasks/task-name/report.json \
+  --patch-file /home/<user>/.cc-remote/orca/tasks/task-name/change.patch \
+  --output ./task-name-result
+```
+
+The report names the base, the patch, and every changed path:
+
+```json
+{
+  "schemaVersion": 1,
+  "baseCommit": "<full commit>",
+  "patch": {"sha256": "<hex>", "bytes": 1234},
+  "files": [
+    {"path": "src/app.go", "sha256": "<hex>"},
+    {"path": "old.go", "deleted": true}
+  ]
+}
+```
+
+`collect` requires the recorded live runtime and a HEAD still at `baseCommit`.
+It refuses links and files outside the brief's directory, checks the patch
+against the report, and prints both files' hashes with up to 65,536 bytes of
+`git status` entries, setting `overflow` when more remain. It changes nothing
+on the machine. A matching report does not prove that the patch holds every
+change.

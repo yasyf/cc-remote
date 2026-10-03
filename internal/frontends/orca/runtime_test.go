@@ -137,6 +137,15 @@ func TestAgentArgv(t *testing.T) {
 			"-c", `cli_auth_credentials_store="ephemeral"`,
 			"-c", "mcp_servers={}",
 		}},
+		{"codex with an explicit service tier", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast", MCP: []string{`{docs={command="docs-mcp"}}`}}, []string{
+			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6.1-sol",
+			"-c", `model_reasoning_effort="xhigh"`,
+			"-c", `model_provider="cc_remote_openai"`,
+			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
+			"-c", `cli_auth_credentials_store="ephemeral"`,
+			"-c", `mcp_servers={docs={command="docs-mcp"}}`,
+			"-c", `service_tier="fast"`,
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -162,11 +171,43 @@ func TestAgentValidate(t *testing.T) {
 		{"quoted effort", orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: `x"`}, "effort"},
 		{"two codex MCP tables", orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e", MCP: []string{"{}", "{}"}}, "one --mcp-config"},
 		{"MCP flag", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", MCP: []string{"--debug"}}, "--mcp-config"},
+		{"fable alias", orca.Agent{Kind: orca.AgentClaude, Model: "fable", Effort: "high"}, "Fable requires an explicit local choice"},
+		{"fable family id", orca.Agent{Kind: orca.AgentClaude, Model: "claude-fable-5-1", Effort: "high"}, "Fable requires an explicit local choice"},
+		{"capitalized fable", orca.Agent{Kind: orca.AgentClaude, Model: "Fable-5", Effort: "xhigh"}, "Fable requires an explicit local choice"},
+		{"fable on codex", orca.Agent{Kind: orca.AgentCodex, Model: "fable5", Effort: "xhigh"}, "Fable requires an explicit local choice"},
+		{"claude service tier", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", Tier: "fast"}, "codex setting"},
+		{"quoted service tier", orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e", Tier: `fast"`}, "--service-tier"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.agent.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Validate = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestAgentInlineMCP(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent orca.Agent
+		want  string
+	}{
+		{"no servers", orca.Agent{Kind: orca.AgentClaude}, ""},
+		{"claude JSON", orca.Agent{Kind: orca.AgentClaude, MCP: []string{`{"mcpServers":{"docs":{"command":"docs-mcp"}}}`, `{"mcpServers":{}}`}}, ""},
+		{"codex table", orca.Agent{Kind: orca.AgentCodex, MCP: []string{`{docs={command="docs-mcp"}}`}}, ""},
+		{"claude file", orca.Agent{Kind: orca.AgentClaude, MCP: []string{`{"mcpServers":{}}`, "/Users/me/.mcp.json"}}, "--mcp-config 2 is not an inline JSON object"},
+		{"claude braces that are not JSON", orca.Agent{Kind: orca.AgentClaude, MCP: []string{"{docs}"}}, "--mcp-config 1 is not an inline JSON object"},
+		{"codex file", orca.Agent{Kind: orca.AgentCodex, MCP: []string{"servers.toml"}}, "--mcp-config 1 is not an inline TOML table"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.agent.InlineMCP()
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("InlineMCP = %v, want %q", err, tt.want)
+			}
+			if err != nil && strings.Contains(err.Error(), "/Users/me") {
+				t.Errorf("the error repeats the config: %v", err)
 			}
 		})
 	}

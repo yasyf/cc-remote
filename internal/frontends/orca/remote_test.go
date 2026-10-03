@@ -160,3 +160,39 @@ func TestRawKeysAndEnterAreSeparateInputs(t *testing.T) {
 		t.Errorf("Enter = %v", err)
 	}
 }
+
+func TestTerminalRepliesNameTheRequestedTerminal(t *testing.T) {
+	read := "terminal read --terminal term-1 --screen" + scope
+	key := "terminal send --terminal term-1 --text " + orca.KeyDown + scope
+	wait := "terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope
+	tests := []struct {
+		name, command, out, want string
+	}{
+		{"screen for another terminal", read, `{"terminal":{"handle":"term-2","status":"running","source":"screen","limited":false,"tail":[]}}`, `orca terminal read on task-a answered for terminal "term-2", not term-1`},
+		{"screen without a terminal", read, `{"terminal":{"status":"running","source":"screen","limited":false,"tail":[]}}`, `orca terminal read on task-a answered for terminal "", not term-1`},
+		{"key for another terminal", key, `{"send":{"handle":"term-2","accepted":true,"bytesWritten":3}}`, `orca terminal send on task-a answered for terminal "term-2", not term-1`},
+		{"blocked wait for another terminal", wait, `{"wait":{"handle":"term-2","condition":"tui-idle","satisfied":false,"status":"running","exitCode":null,"blockedReason":"agent-hooks-review-prompt"}}`, `orca terminal wait on task-a answered for terminal "term-2", not term-1`},
+		{"wait for another condition", wait, `{"wait":{"handle":"term-1","condition":"exit","satisfied":true,"status":"exited","exitCode":0}}`, `satisfied "exit", not tui-idle`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			native := orca.NewClient(newFakeOrca(t).on(tt.command, ok(tt.out))).On(env, runtimeID)
+			var err error
+			switch tt.command {
+			case read:
+				_, err = native.Screen(context.Background(), "term-1")
+			case key:
+				err = native.Key(context.Background(), "term-1", orca.KeyDown)
+			case wait:
+				var got orca.TerminalWait
+				got, err = native.WaitIdle(context.Background(), "term-1", time.Minute)
+				if got.Handle != "" || got.Satisfied || len(got.BlockedReason) != 0 {
+					t.Errorf("WaitIdle returned %+v for a contradictory reply", got)
+				}
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
