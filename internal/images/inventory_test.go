@@ -291,3 +291,25 @@ func TestLoadAcceptsTheAptPayloadShape(t *testing.T) {
 		t.Errorf("the closure exposes %d links, want 6 bins and 3 share trees", len(links))
 	}
 }
+
+func TestToolDir(t *testing.T) {
+	inv := validInventory()
+	inv.Tools = append(inv.Tools, Artifact{Name: "orca-runtime", Version: "1.4.218", URL: "https://example.com/orca", SHA256: digest, Format: Binary})
+	inv.Profiles = map[string]Profile{"stack": {Tools: []Artifact{{Name: "browser", Version: "2.0", URL: "https://example.com/b.zip", SHA256: digest, Format: Zip, Dest: ".browser/b-2.0"}}}}
+	tests := []struct {
+		profile, name, want string
+	}{
+		{"lean", "orca-runtime", ".local/share/cc-remote/tools/orca-runtime-1.4.218"},
+		{"stack", "browser", ".browser/b-2.0"},
+		{"stack", "jq", ".local/share/cc-remote/tools/jq-1.8.2"},
+	}
+	for _, tt := range tests {
+		got, err := inv.ToolDir(tt.profile, tt.name)
+		if err != nil || got != tt.want {
+			t.Errorf("ToolDir(%s, %s) = %q, %v; want %q", tt.profile, tt.name, got, err, tt.want)
+		}
+	}
+	if _, err := inv.ToolDir("lean", "browser"); err == nil || !strings.Contains(err.Error(), "profiles.lean.tools") {
+		t.Errorf("a tool of another profile resolved: %v", err)
+	}
+}

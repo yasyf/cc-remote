@@ -43,6 +43,13 @@ func (d Dir) SSH(name string) string {
 	return filepath.Join(string(d), "ssh", name+".ssh")
 }
 func (d Dir) SSHInclude() string { return filepath.Join(string(d), "ssh", "*.ssh") }
+func (d Dir) Orca(name string) string {
+	return filepath.Join(string(d), "orca", name+".json")
+}
+func (d Dir) OrcaControl() string { return filepath.Join(string(d), "orca", "%C") }
+func (d Dir) OrcaForwardLog(name string) string {
+	return filepath.Join(string(d), "orca", name+".forward.log")
+}
 
 type Held struct {
 	Name   string
