@@ -95,6 +95,7 @@ type scripted struct {
 	stdins        map[string][]string
 	ready         map[string]string
 	holds         map[string]*hold
+	baked         string
 }
 
 type hold struct {
@@ -179,7 +180,7 @@ func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Resu
 	}
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
-	failAll, joined := m.failAll, m.joined
+	failAll, joined, baked := m.failAll, m.joined, m.baked
 	missing := m.tailscaleFrom != "" && !m.tailscale && strings.Contains(script, "tailscale")
 	var held *hold
 	for fragment, h := range m.holds {
@@ -212,6 +213,8 @@ func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Resu
 		return providers.Result{Stderr: []byte("cc-remote: this machine already carries /var/lib/tailscale/tailscaled.state, so its image joined a tailnet before this workspace was created; rebuild it unenrolled"), ExitCode: 1}
 	}
 	switch {
+	case strings.Contains(script, images.ManifestPath):
+		return providers.Result{Stdout: []byte(baked)}
 	case strings.Contains(script, enrolls):
 		if m.onEnroll != nil {
 			m.onEnroll()
@@ -358,7 +361,9 @@ func newHarness(t *testing.T, withTailnet bool) *harness {
 
 func newImagedHarness(t *testing.T) *harness {
 	t.Helper()
-	return build(t, false, imaged, "{ image: agent-host }", providers.Traits{})
+	h := build(t, false, imaged, "{ image: agent-host }", providers.Traits{Platform: images.DefaultPlatform})
+	h.machine.baked = string(h.session.baked)
+	return h
 }
 
 func newDirectPayloadHarness(t *testing.T, script string) (*harness, string) {
@@ -1713,7 +1718,7 @@ func TestResumeRefusesWhenTheImageDeclarationChanged(t *testing.T) {
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	if h.machine.ran("ws-1", provisions) != 0 || h.machine.ran("ws-1", installs) != 1 {
+	if h.machine.ran("ws-1", provisions) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", images.ManifestPath) != 1 {
 		t.Fatalf("an image host ran %q", h.machine.scripts["ws-1"])
 	}
 	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
@@ -1756,7 +1761,7 @@ func TestResumeRefusesWhenOnlyTheImageReferenceChanged(t *testing.T) {
 	}
 }
 
-func TestResumeInstallsPluginsWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T) {
+func TestResumeRefusesWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T) {
 	h := newImagedHarness(t)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
@@ -1767,12 +1772,141 @@ func TestResumeInstallsPluginsWhenOnlyTheToolsDriftedOnAnImageHost(t *testing.T)
 	}
 	drifted := h.drift(imaged + "prepare: [\"echo drifted\"]\n")
 	before := len(h.machine.scripts["ws-1"])
-	if _, err := drifted.Resume(ctx, "ws-1"); err != nil {
+	_, err := drifted.Resume(ctx, "ws-1")
+	if err == nil || !strings.Contains(err.Error(), "destroy ws-1 and create it again") {
+		t.Fatalf("Resume = %v", err)
+	}
+	if after := h.machine.scripts["ws-1"][before:]; len(after) != 0 {
+		t.Errorf("the refused resume ran %q", after)
+	}
+}
+
+func TestCreateAdoptsTheBakedImageWithoutInstalling(t *testing.T) {
+	h := newImagedHarness(t)
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	h.ordered(before, readies, stages, installs, publishes, prepares, configures)
-	if strings.Contains(strings.Join(h.machine.scripts["ws-1"][before:], "\n"), provisions) || h.machine.ready["ws-1"] != drifted.Stamp {
-		t.Errorf("the resume provisioned an image host in place, or left stamp %q", h.machine.ready["ws-1"])
+	order := h.ordered(0, images.ManifestPath, stages, configures, publishes)
+	h.ordered(0, images.ManifestPath, checkout)
+	for _, fragment := range []string{installs, provisions, readies} {
+		if got := h.machine.ran("ws-1", fragment); got != 0 {
+			t.Errorf("the adopted image ran %q %d times", fragment, got)
+		}
+	}
+	if h.machine.ran("ws-1", stages) != 1 || h.machine.ran("ws-1", publishes) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the create staged %d times, published %d times, and left stamp %q, want %q", h.machine.ran("ws-1", stages), h.machine.ran("ws-1", publishes), h.machine.ready["ws-1"], h.session.Stamp)
+	}
+	if staged := h.machine.stdins["ws-1"][order[1]]; staged != strings.TrimSpace(string(h.session.Scripts.Plugins)) {
+		t.Error("the create staged another plugins.sh than the one the image baked")
+	}
+	if got := h.machine.ran("ws-1", "finalize.sh"); got != 0 {
+		t.Errorf("a workspace create ran the image finalizer %d times", got)
+	}
+}
+
+func TestCreateFromAnOldImageReferenceNeverPublishesTheNewStamp(t *testing.T) {
+	h := newImagedHarness(t)
+	layered := h.drift(strings.Replace(imaged, "  workspaceDir: /workspaces\n", "  workspaceDir: /workspaces\n  layer: [\"RUN true\"]\n", 1))
+	if layered.Scripts.Fingerprint() != h.session.Scripts.Fingerprint() {
+		t.Fatal("the layer change moved the tool fingerprint")
+	}
+	ctx := context.Background()
+	_, err := layered.Create(ctx, "ws-1", Source{Ref: "main"})
+	if err == nil || !strings.Contains(err.Error(), `image "agent-host", which profile lean cannot adopt`) || !strings.Contains(err.Error(), "with image inputs") {
+		t.Fatalf("Create = %v", err)
+	}
+	if got := h.machine.ran("ws-1", publishes); got != 0 || h.machine.ready["ws-1"] != "" {
+		t.Errorf("the refused create published %d times and left stamp %q", got, h.machine.ready["ws-1"])
+	}
+	for _, fragment := range []string{stages, installs, checkout, configures} {
+		if got := h.machine.ran("ws-1", fragment); got != 0 {
+			t.Errorf("the refused create ran %q %d times", fragment, got)
+		}
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("the refused create left its machine: %v", err)
+	}
+}
+
+func TestCreateRefusesAnImageItCannotAdopt(t *testing.T) {
+	inventory, err := images.Load(newImagedHarness(t).inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := func(edit func(*images.Inventory), profile, platform string) string {
+		t.Helper()
+		inv := inventory
+		image := *inv.Image
+		inv.Image = &image
+		edit(&inv)
+		rendered, err := images.RenderImage(inv, profile, platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(rendered.Manifest)
+	}
+	same := func(*images.Inventory) {}
+	tests := []struct {
+		name, baked, want string
+	}{
+		{"no manifest", "", "carries no baked manifest at " + images.ManifestPath},
+		{"another profile", render(same, "full", images.DefaultPlatform), `baked as profile "full"`},
+		{"another platform", render(same, "lean", "linux/arm64"), `baked as profile "lean" on linux/arm64`},
+		{"another base", render(func(i *images.Inventory) { i.Image.Base = "ubuntu:26.04@sha256:" + sha }, "lean", images.DefaultPlatform), `baked as profile "lean" on linux/amd64 with image inputs`},
+		{"another layer", render(func(i *images.Inventory) { i.Image.Layer = []string{"RUN true"} }, "lean", images.DefaultPlatform), `baked as profile "lean" on linux/amd64 with image inputs`},
+		{"other tools", render(func(i *images.Inventory) { i.Prepare = []string{"echo drifted"} }, "lean", images.DefaultPlatform), `baked as profile "lean" on linux/amd64 with image inputs`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newImagedHarness(t)
+			h.machine.baked = tt.baked
+			ctx := context.Background()
+			_, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"})
+			if err == nil || !strings.Contains(err.Error(), "profile lean cannot adopt") || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "cc-remote images build --profile lean") {
+				t.Fatalf("Create = %v", err)
+			}
+			for _, fragment := range []string{stages, installs, checkout, configures, publishes, enrolls} {
+				if got := h.machine.ran("ws-1", fragment); got != 0 {
+					t.Errorf("the refused create ran %q %d times", fragment, got)
+				}
+			}
+			if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+				t.Errorf("the refused create left its machine: %v", err)
+			}
+			if _, found := h.record("ws-1"); found {
+				t.Error("the refused create kept its record")
+			}
+		})
+	}
+}
+
+func TestResumeKeepsAnAdoptedImageAtItsStamp(t *testing.T) {
+	h := newImagedHarness(t)
+	ctx := context.Background()
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.session.Suspend(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(h.machine.scripts["ws-1"])
+	if _, err := h.session.Resume(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	after := strings.Join(h.machine.scripts["ws-1"][before:], "\n")
+	if !strings.Contains(after, readies) || strings.Contains(after, images.ManifestPath) || strings.Contains(after, stages) || strings.Contains(after, installs) {
+		t.Errorf("the same-stamp resume ran %q", after)
+	}
+	h.machine.mu.Lock()
+	h.machine.ready["ws-1"] = ""
+	h.machine.mu.Unlock()
+	before = len(h.machine.scripts["ws-1"])
+	if _, err := h.session.Resume(ctx, "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(before, readies, images.ManifestPath, stages, publishes)
+	if strings.Contains(strings.Join(h.machine.scripts["ws-1"][before:], "\n"), installs) || h.machine.ready["ws-1"] != h.session.Stamp {
+		t.Errorf("the stampless resume installed, or left stamp %q", h.machine.ready["ws-1"])
 	}
 }
 

@@ -392,7 +392,7 @@ func TestRenderProvisionWithoutOptionalSections(t *testing.T) {
 			t.Errorf("empty inventory's provision.sh contains %q", absent)
 		}
 	}
-	if _, err := RenderImage(inventory); err == nil || err.Error() != "inventory has no image section" {
+	if _, err := RenderImage(inventory, "agents", DefaultPlatform); err == nil || err.Error() != "inventory has no image section" {
 		t.Errorf("RenderImage error = %v, want no image section", err)
 	}
 }
@@ -403,10 +403,14 @@ func TestFingerprintFormat(t *testing.T) {
 	if got, want := scripts.Fingerprint(), hex.EncodeToString(sum[:]); got != want {
 		t.Errorf("Scripts.Fingerprint = %s, want %s", got, want)
 	}
-	context := Context{Dockerfile: []byte("D"), Provision: []byte("A"), Start: []byte("S")}
-	sum = sha256.Sum256([]byte("cc-remote/image/v1\nDockerfile 1\nDprovision.sh 1\nAstart.sh 1\nS"))
+	context := Context{Platform: "linux/arm64", Dockerfile: []byte("D"), Provision: []byte("A"), Start: []byte("S"), Plugins: []byte("P"), Finalize: []byte("F"), Manifest: []byte("M")}
+	sum = sha256.Sum256([]byte("cc-remote/image/v1\nDockerfile 1\nDprovision.sh 1\nAstart.sh 1\nSplugins.sh 1\nPfinalize.sh 1\nFbaked.json 1\nM"))
 	if got, want := context.Fingerprint(), hex.EncodeToString(sum[:]); got != want {
 		t.Errorf("Context.Fingerprint = %s, want %s", got, want)
+	}
+	sum = sha256.Sum256([]byte("cc-remote/image-inputs/v1\nDockerfile 1\nDprovision.sh 1\nAstart.sh 1\nSplugins.sh 1\nPfinalize.sh 1\nFplatform 11\nlinux/arm64"))
+	if got, want := context.Inputs(), hex.EncodeToString(sum[:]); got != want {
+		t.Errorf("Context.Inputs = %s, want %s", got, want)
 	}
 }
 
@@ -447,17 +451,18 @@ func TestFingerprintsTrackTheirInputs(t *testing.T) {
 		mutate             func(*Inventory)
 		toolsMove, imgMove bool
 	}{
-		{"user tool digest", func(i *Inventory) { i.Tools[0].SHA256 = strings.Repeat("3", 64) }, true, false},
-		{"user tool version", func(i *Inventory) { i.Tools[0].Version = "1.8.3" }, true, false},
+		{"user tool digest", func(i *Inventory) { i.Tools[0].SHA256 = strings.Repeat("3", 64) }, true, true},
+		{"user tool version", func(i *Inventory) { i.Tools[0].Version = "1.8.3" }, true, true},
 		{"system tool version", func(i *Inventory) { i.System[1].Version = "2.0.1" }, true, true},
-		{"plugin version", func(i *Inventory) { i.Claude.Plugins[0].Version = "1.0.1" }, true, false},
-		{"marketplace ref", func(i *Inventory) { i.Claude.Marketplaces[0].Ref = strings.Repeat("4", 40) }, true, false},
-		{"captain hook version", func(i *Inventory) { i.CaptainHook.Version = "1.0.1" }, true, false},
+		{"plugin version", func(i *Inventory) { i.Claude.Plugins[0].Version = "1.0.1" }, true, true},
+		{"marketplace ref", func(i *Inventory) { i.Claude.Marketplaces[0].Ref = strings.Repeat("4", 40) }, true, true},
+		{"private marketplace", func(i *Inventory) { i.Claude.Marketplaces[0].Private = true }, true, true},
+		{"captain hook version", func(i *Inventory) { i.CaptainHook.Version = "1.0.1" }, true, true},
 		{"image user", func(i *Inventory) { i.Image.User = "dev" }, false, true},
 		{"image base", func(i *Inventory) { i.Image.Base = "ubuntu:26.04@sha256:" + strings.Repeat("5", 64) }, false, true},
 		{"image name", func(i *Inventory) { i.Image.Name = "other" }, false, false},
 		{"image layer", func(i *Inventory) { i.Image.Layer = append(i.Image.Layer, "RUN true") }, false, true},
-		{"prepare step", func(i *Inventory) { i.Prepare = []string{"true"} }, true, false},
+		{"prepare step", func(i *Inventory) { i.Prepare = []string{"true"} }, true, true},
 		{"apt payload", func(i *Inventory) { i.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}} }, true, false},
 	}
 	for _, tt := range tests {
@@ -490,11 +495,11 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Render %s: %v", name, err)
 		}
-		context, err := RenderImage(inv)
+		context, err := RenderImage(inv, "agents", DefaultPlatform)
 		if err != nil {
 			t.Fatalf("RenderImage %s: %v", name, err)
 		}
-		for _, rendered := range [][]byte{context.Provision, context.Dockerfile} {
+		for _, rendered := range [][]byte{context.Provision, context.Dockerfile, context.Plugins} {
 			if bytes.Contains(rendered, []byte("closure")) || bytes.Contains(rendered, []byte("nosuid")) {
 				t.Errorf("the %s image context renders the closure", name)
 			}
@@ -632,7 +637,7 @@ func fingerprints(t *testing.T, inventory Inventory) fingerprintSet {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	context, err := RenderImage(inventory)
+	context, err := RenderImage(inventory, "agents", DefaultPlatform)
 	if err != nil {
 		t.Fatalf("RenderImage: %v", err)
 	}
@@ -640,25 +645,50 @@ func fingerprints(t *testing.T, inventory Inventory) fingerprintSet {
 }
 
 func TestRenderImageDockerfile(t *testing.T) {
-	context, err := RenderImage(validInventory())
+	context, err := RenderImage(validInventory(), "agents", DefaultPlatform)
 	if err != nil {
 		t.Fatalf("RenderImage: %v", err)
 	}
 	want := "FROM ubuntu:24.04@sha256:" + digest + `
 
 RUN useradd -m -s /bin/bash agent
-COPY provision.sh start.sh /tmp/cc-remote/
+COPY provision.sh start.sh plugins.sh finalize.sh baked.json /tmp/cc-remote/
 RUN bash /tmp/cc-remote/provision.sh packages \
     && bash /tmp/cc-remote/provision.sh tools \
     && install -m 0755 /tmp/cc-remote/start.sh /usr/local/bin/cc-remote-start \
-    && rm -rf /tmp/cc-remote
+    && rm -f /etc/ssh/ssh_host_* \
+    && bash /tmp/cc-remote/finalize.sh system /
 ENV LANG=C.UTF-8
+RUN install -d -o agent -g agent -m 0700 /home/agent/.cc-remote \
+    && install -o agent -g agent -m 0600 /tmp/cc-remote/plugins.sh /home/agent/.cc-remote/plugins.sh \
+    && { echo; } | runuser -u agent -- env HOME=/home/agent bash /home/agent/.cc-remote/plugins.sh install \
+    && runuser -u agent -- env HOME=/home/agent bash /home/agent/.cc-remote/plugins.sh natives \
+    && bash /tmp/cc-remote/finalize.sh home /home/agent \
+    && install -D -m 0644 /tmp/cc-remote/baked.json /opt/cc-remote/baked.json \
+    && rm -rf /tmp/cc-remote
 
 USER agent
 ENV PATH=/home/agent/.local/bin:${PATH}
 `
 	if got := string(context.Dockerfile); got != want {
 		t.Errorf("Dockerfile =\n%s\nwant\n%s", got, want)
+	}
+	inventory := validInventory()
+	inventory.Claude.Marketplaces[0].Private = true
+	private, err := RenderImage(inventory, "agents", DefaultPlatform)
+	if err != nil {
+		t.Fatalf("RenderImage: %v", err)
+	}
+	for _, line := range []string{
+		"RUN --mount=type=secret,id=github-token,required=true install -d -o agent -g agent -m 0700 /home/agent/.cc-remote \\\n",
+		"    && { cat /run/secrets/github-token; echo; } | runuser -u agent -- env HOME=/home/agent bash /home/agent/.cc-remote/plugins.sh install \\\n",
+	} {
+		if !strings.Contains(string(private.Dockerfile), line) {
+			t.Errorf("the private Dockerfile lacks %q:\n%s", line, private.Dockerfile)
+		}
+	}
+	if !private.Private || context.Private {
+		t.Errorf("Private = %t for the private inventory and %t for the public one", private.Private, context.Private)
 	}
 	scripts, err := Render(validInventory(), "agents")
 	if err != nil {
@@ -700,12 +730,6 @@ func TestNoPayloadRendersMatchPinnedTemplates(t *testing.T) {
 				template string
 				data     any
 			}{{"provision.sh", newView(inv, "agents")}, {"plugins.sh", newView(inv, "agents")}, {"provision.sh", newSystemView(inv)}}
-			if inv.Image != nil {
-				renders = append(renders, struct {
-					template string
-					data     any
-				}{"Dockerfile", *inv.Image})
-			}
 			for _, r := range renders {
 				want, err := execute(old, r.template, r.data)
 				if err != nil {
@@ -742,4 +766,56 @@ func firstDifference(got, want []byte) string {
 		}
 	}
 	return "an identical line split"
+}
+
+func dockerInstructions(dockerfile []byte) []string {
+	var instructions []string
+	var current strings.Builder
+	for line := range strings.Lines(string(dockerfile)) {
+		line = strings.TrimRight(line, "\n")
+		continued := strings.HasSuffix(line, "\\")
+		current.WriteString(strings.TrimSuffix(line, "\\"))
+		if continued {
+			continue
+		}
+		if instruction := strings.TrimSpace(current.String()); instruction != "" {
+			instructions = append(instructions, instruction)
+		}
+		current.Reset()
+	}
+	return instructions
+}
+
+func TestFirstPackageRunRemovesSSHHostKeysBeforeItsLayerCommits(t *testing.T) {
+	context, err := RenderImage(validInventory(), "agents", DefaultPlatform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runs []string
+	for _, instruction := range dockerInstructions(context.Dockerfile) {
+		if strings.HasPrefix(instruction, "RUN ") {
+			runs = append(runs, instruction)
+		}
+	}
+	if len(runs) < 2 || !strings.Contains(runs[1], "provision.sh packages") {
+		t.Fatalf("the second RUN is not the package install: %q", runs)
+	}
+	first := runs[1]
+	steps := []string{"provision.sh packages", "provision.sh tools", "cc-remote-start", "&& rm -f /etc/ssh/ssh_host_* ", "&& bash /tmp/cc-remote/finalize.sh system /"}
+	at := -1
+	for _, step := range steps {
+		next := strings.Index(first, step)
+		if next <= at {
+			t.Fatalf("the package RUN does not run %q after the earlier steps: %s", step, first)
+		}
+		at = next
+	}
+	if !strings.HasSuffix(first, "finalize.sh system /") {
+		t.Errorf("the host-key check is not the last step of the package RUN: %s", first)
+	}
+	for _, later := range runs[2:] {
+		if strings.Contains(later, "provision.sh packages") || strings.Contains(later, "provision.sh tools") {
+			t.Errorf("a later RUN installs packages after the host-key removal: %s", later)
+		}
+	}
 }

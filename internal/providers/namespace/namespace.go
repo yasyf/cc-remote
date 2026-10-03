@@ -64,6 +64,7 @@ func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
 		TailnetMode: providers.TailnetUserspace,
 		Supervisor:  providers.SupervisorSetsid,
+		Platform:    p.Platform,
 	}
 }
 

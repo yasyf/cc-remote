@@ -82,11 +82,11 @@ jobs:
           go run ./cmd/cc-remote images render --inventory "$RUNNER_TEMP/closure-inventory.yaml" --profile agents --out "$RUNNER_TEMP/images/closure"
       - name: bash -n
         run: |
-          for script in "$RUNNER_TEMP"/images/*/*.sh; do
+          for script in "$RUNNER_TEMP"/images/*/*.sh "$RUNNER_TEMP"/images/*/namespace/*.sh; do
             bash -n "$script"
           done
       - name: shellcheck
-        run: shellcheck "$RUNNER_TEMP"/images/*/*.sh
+        run: shellcheck "$RUNNER_TEMP"/images/*/*.sh "$RUNNER_TEMP"/images/*/namespace/*.sh
       - name: Compile the service supervisor
         run: python3 -m py_compile images/supervise.py
 

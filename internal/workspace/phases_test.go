@@ -332,7 +332,7 @@ func TestEveryCreatePhaseLogsOnceWithItsLaneAndTheSummaryCountsTheExecs(t *testi
 			return phases
 		}()},
 		{"imaged", newImagedHarness, 6, map[string]string{
-			"machine.create": laneMain, "plugins.stage": laneTools, "tools.install": laneTools,
+			"machine.create": laneMain, "image.adopt": laneTools, "plugins.stage": laneTools,
 			"checkout": laneCheckout, "prepare": laneCheckout, "configure": laneConfigure,
 			"tools.publish": lanePublish, "ssh.target": laneSSH,
 		}},

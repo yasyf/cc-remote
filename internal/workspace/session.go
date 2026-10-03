@@ -52,6 +52,7 @@ type Session struct {
 	labels           []LabelledEnv
 	image            string
 	imageSpec        string
+	baked            []byte
 	payload          *config.Payload
 	closure          bool
 	privatePlugins   bool
@@ -76,7 +77,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 	if supervisor := provider.Traits().Supervisor; machine.Payload != nil && supervisor != providers.SupervisorSpriteEnv {
 		return nil, fmt.Errorf("profile %s: machine %s mounts a payload, which only a %s host remounts at boot; provider %s runs %s", profile, kind, providers.SupervisorSpriteEnv, kind, supervisor)
 	}
-	rendered, err := render(cfg, profile, machine, machine.Payload != nil)
+	rendered, err := render(cfg, profile, machine, machine.Payload != nil, provider.Traits().Platform)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +105,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		profile:          spec,
 		image:            machine.Image,
 		imageSpec:        rendered.imageSpec,
+		baked:            rendered.baked,
 		payload:          machine.Payload,
 		closure:          rendered.closure,
 		privatePlugins:   rendered.private,
@@ -128,12 +130,13 @@ type rendered struct {
 	scripts          images.Scripts
 	stamp            string
 	imageSpec        string
+	baked            []byte
 	private          bool
 	tailnetFromTools bool
 	closure          bool
 }
 
-func render(cfg *config.Config, profile string, machine config.Machine, payload bool) (rendered, error) {
+func render(cfg *config.Config, profile string, machine config.Machine, payload bool, platform string) (rendered, error) {
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
 	if err != nil {
 		return rendered{}, err
@@ -162,11 +165,11 @@ func render(cfg *config.Config, profile string, machine config.Machine, payload 
 		out.stamp = images.Stamp(scripts, nil, payload, packages)
 		return out, nil
 	}
-	image, err := images.RenderImage(inventory)
+	image, err := images.RenderImage(inventory, profile, platform)
 	if err != nil {
 		return rendered{}, err
 	}
-	out.stamp, out.imageSpec = images.Stamp(scripts, &image, "", ""), image.Fingerprint()
+	out.stamp, out.imageSpec, out.baked = images.Stamp(scripts, &image, "", ""), image.Fingerprint(), image.Manifest
 	return out, nil
 }
 
@@ -401,6 +404,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if err != nil {
 		return nil, err
 	}
+	if err := s.adopt(ctx, machine); err != nil {
+		return nil, err
+	}
 	if err := s.installPrerequisites(ctx, machine); err != nil {
 		return nil, err
 	}
@@ -461,6 +467,9 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 	if err != nil {
 		return err
 	}
+	if err := s.adopt(ctx, machine); err != nil {
+		return err
+	}
 	if err := s.installPrerequisites(ctx, machine); err != nil {
 		return err
 	}
@@ -485,6 +494,25 @@ func (s *Session) installLanes(run *lanes, machine string, staged transfers) (pa
 		return s.installPlugins(ctx, machine)
 	})
 	return packages, tools
+}
+
+func (s *Session) adopt(ctx context.Context, machine string) error {
+	if s.inPlace() {
+		return nil
+	}
+	var baked []byte
+	if err := s.timed(ctx, laneTools, "image.adopt", machine, func() error {
+		var err error
+		baked, err = images.ReadBaked(ctx, s.capture(machine))
+		return err
+	}); err != nil {
+		return err
+	}
+	if err := images.Adopt(s.baked, baked); err != nil {
+		return fmt.Errorf("machine %s booted image %q, which profile %s cannot adopt: %w; build it with cc-remote images build --profile %s and point the profile at the image it prints", machine, s.image, s.Profile, err, s.Profile)
+	}
+	s.Log.Info("adopted the baked tools", "machine", machine, "image", s.image)
+	return nil
 }
 
 func (s *Session) installPrerequisites(ctx context.Context, machine string) error {
@@ -546,17 +574,20 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 		}
 		s.Log.Info("provisioned", "machine", machine)
 	}
+	if err := s.timed(ctx, laneTools, "plugins.stage", machine, func() error {
+		return s.Scripts.StagePlugins(ctx, run, payload)
+	}); err != nil {
+		return err
+	}
+	if !s.inPlace() {
+		return nil
+	}
 	var token string
 	if s.privatePlugins {
 		var err error
 		if token, err = s.Token(ctx); err != nil {
 			return err
 		}
-	}
-	if err := s.timed(ctx, laneTools, "plugins.stage", machine, func() error {
-		return s.Scripts.StagePlugins(ctx, run, payload)
-	}); err != nil {
-		return err
 	}
 	if err := s.timed(ctx, laneTools, "tools.install", machine, func() error {
 		return s.Scripts.Install(ctx, run, token, payload)

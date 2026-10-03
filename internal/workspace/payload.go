@@ -63,7 +63,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	if machine.Image != "" {
 		return PayloadBuild{}, fmt.Errorf("profile %s boots %s machines from image %q; a payload is built on a machine provisioned in place", profile, kind, machine.Image)
 	}
-	rendered, err := render(cfg, profile, machine, true)
+	rendered, err := render(cfg, profile, machine, true, provider.Traits().Platform)
 	if err != nil {
 		return PayloadBuild{}, err
 	}

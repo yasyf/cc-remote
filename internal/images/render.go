@@ -24,9 +24,12 @@ const (
 	StartPath   = "/usr/local/bin/cc-remote-start"
 	PluginsPath = "$HOME/.cc-remote/plugins.sh"
 
-	toolDomain  = "cc-remote/tools/v1"
-	imageDomain = "cc-remote/image/v1"
-	stampDomain = "cc-remote/ready/v1"
+	toolDomain   = "cc-remote/tools/v1"
+	imageDomain  = "cc-remote/image/v1"
+	inputsDomain = "cc-remote/image-inputs/v1"
+	stampDomain  = "cc-remote/ready/v1"
+
+	DefaultPlatform = "linux/amd64"
 )
 
 type Scripts struct {
@@ -37,9 +40,22 @@ type Scripts struct {
 
 type Context struct {
 	Image      Image
+	Profile    string
+	Platform   string
+	Private    bool
 	Dockerfile []byte
 	Provision  []byte
 	Start      []byte
+	Plugins    []byte
+	Finalize   []byte
+	Manifest   []byte
+}
+
+type dockerfileView struct {
+	Image
+	Home     string
+	Private  bool
+	Manifest string
 }
 
 type exposure string
@@ -66,6 +82,8 @@ type tree struct {
 var (
 	readyTimeout  = 30 * time.Second
 	closureShares = []string{"mime", "glib-2.0/schemas", "icons"}
+	Platforms     = []string{"linux/amd64", "linux/arm64"}
+	templates     = []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "capture.py", "loader.py", "namespace/Dockerfile"}
 )
 
 type closureLink struct {
@@ -244,6 +262,10 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	if err != nil {
 		return Scripts{}, err
 	}
+	return renderScripts(bound, inv, profile)
+}
+
+func renderScripts(bound *template.Template, inv Inventory, profile string) (Scripts, error) {
 	data := newView(inv, profile)
 	provision, err := execute(bound, "provision.sh", data)
 	if err != nil {
@@ -256,16 +278,29 @@ func Render(inv Inventory, profile string) (Scripts, error) {
 	return Scripts{ProvisionScript: provision, Plugins: plugins, Env: slices.Clone(inv.Configure.Env)}, nil
 }
 
-func RenderImage(inv Inventory) (Context, error) {
+func RenderImage(inv Inventory, profile, platform string) (Context, error) {
+	return renderImage(assets.FS, inv, profile, platform)
+}
+
+func renderImage(fsys fs.FS, inv Inventory, profile, platform string) (Context, error) {
 	if inv.Image == nil {
 		return Context{}, errors.New("inventory has no image section")
 	}
+	if !slices.Contains(Platforms, platform) {
+		return Context{}, fmt.Errorf("image platform %q: an image targets one of %s", platform, strings.Join(Platforms, ", "))
+	}
 	inv.Apt.Payload = nil
-	bound, err := parse(inv)
+	bound, err := parseFrom(fsys, inv, templates...)
 	if err != nil {
 		return Context{}, err
 	}
-	dockerfile, err := execute(bound, "Dockerfile", *inv.Image)
+	scripts, err := renderScripts(bound, inv, profile)
+	if err != nil {
+		return Context{}, err
+	}
+	home := "/home/" + inv.Image.User
+	private := slices.ContainsFunc(inv.Claude.Marketplaces, func(m Marketplace) bool { return m.Private })
+	dockerfile, err := execute(bound, "Dockerfile", dockerfileView{Image: *inv.Image, Home: home, Private: private, Manifest: ManifestPath})
 	if err != nil {
 		return Context{}, err
 	}
@@ -273,11 +308,29 @@ func RenderImage(inv Inventory) (Context, error) {
 	if err != nil {
 		return Context{}, err
 	}
-	start, err := assets.FS.ReadFile("start.sh")
+	start, err := fs.ReadFile(fsys, "start.sh")
 	if err != nil {
 		return Context{}, err
 	}
-	return Context{Image: *inv.Image, Dockerfile: dockerfile, Provision: provision, Start: start}, nil
+	finalize, err := fs.ReadFile(fsys, "namespace/finalize.sh")
+	if err != nil {
+		return Context{}, err
+	}
+	image := Context{
+		Image:      *inv.Image,
+		Profile:    profile,
+		Platform:   platform,
+		Private:    private,
+		Dockerfile: dockerfile,
+		Provision:  provision,
+		Start:      start,
+		Plugins:    scripts.Plugins,
+		Finalize:   finalize,
+	}
+	if image.Manifest, err = bakedOf(inv, profile, platform, image.Inputs(), scripts, home); err != nil {
+		return Context{}, err
+	}
+	return image, nil
 }
 
 func (s Scripts) Fingerprint() string {
@@ -311,8 +364,16 @@ func (c Context) Write(dir string) error {
 	return nil
 }
 
+func (c Context) Inputs() string {
+	return fingerprint(inputsDomain, append(c.inputs(), file{"platform", []byte(c.Platform)})...)
+}
+
+func (c Context) inputs() []file {
+	return []file{{"Dockerfile", c.Dockerfile}, {"provision.sh", c.Provision}, {"start.sh", c.Start}, {"plugins.sh", c.Plugins}, {"finalize.sh", c.Finalize}}
+}
+
 func (c Context) files() []file {
-	return []file{{"Dockerfile", c.Dockerfile}, {"provision.sh", c.Provision}, {"start.sh", c.Start}}
+	return append(c.inputs(), file{"baked.json", c.Manifest})
 }
 
 type file struct {
@@ -331,7 +392,7 @@ func fingerprint(domain string, files ...file) string {
 }
 
 func parse(inv Inventory) (*template.Template, error) {
-	return parseFrom(assets.FS, inv, "artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "capture.py", "loader.py", "namespace/Dockerfile")
+	return parseFrom(assets.FS, inv, templates...)
 }
 
 func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, error) {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/images"
+	"github.com/yasyf/cc-remote/internal/providers/namespace"
 )
 
 func TestTheExampleConfigRendersItsInventoryForEveryProfileAndProvider(t *testing.T) {
@@ -15,9 +16,18 @@ func TestTheExampleConfigRendersItsInventoryForEveryProfileAndProvider(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	section, err := cfg.ProviderSection(namespace.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configured namespace.Config
+	if err := section(&configured); err != nil {
+		t.Fatal(err)
+	}
+	platforms := map[string]string{namespace.Name: configured.Platform}
 	for profile, spec := range cfg.Profiles {
 		for provider, machine := range spec.Machine {
-			r, err := render(cfg, profile, machine, machine.Payload != nil)
+			r, err := render(cfg, profile, machine, machine.Payload != nil, platforms[provider])
 			if err != nil {
 				t.Errorf("%s on %s: %v", profile, provider, err)
 				continue
@@ -58,7 +68,7 @@ func TestOnlyThePayloadAndPackagesDigestsMoveTheStamp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, err := render(cfg, "lean", config.Machine{Payload: tt.payload}, tt.payload != nil)
+			r, err := render(cfg, "lean", config.Machine{Payload: tt.payload}, tt.payload != nil, "")
 			if err != nil {
 				t.Fatal(err)
 			}

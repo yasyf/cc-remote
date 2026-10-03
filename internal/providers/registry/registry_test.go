@@ -85,6 +85,7 @@ func TestNewNamespace(t *testing.T) {
 	wantTraits := providers.Traits{
 		TailnetMode: providers.TailnetUserspace,
 		Supervisor:  providers.SupervisorSetsid,
+		Platform:    "linux/amd64",
 	}
 	if traits := provider.Traits(); traits != wantTraits {
 		t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)

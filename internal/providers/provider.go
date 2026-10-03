@@ -47,6 +47,7 @@ const (
 type Traits struct {
 	TailnetMode TailnetMode
 	Supervisor  Supervisor
+	Platform    string
 }
 
 type Spec struct {
