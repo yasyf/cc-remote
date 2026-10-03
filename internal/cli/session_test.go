@@ -20,7 +20,7 @@ func TestTheExampleConfigOpensEveryShippedProvider(t *testing.T) {
 	}
 	for kind, want := range map[string]providers.Traits{
 		"sprites":   {TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv},
-		"namespace": {TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid},
+		"namespace": {TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid, Platform: "linux/amd64"},
 	} {
 		provider, err := openProvider(cfg, kind)
 		if err != nil {

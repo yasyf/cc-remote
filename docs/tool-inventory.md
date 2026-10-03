@@ -10,23 +10,21 @@ to replace before installation; rendering and fingerprinting need no provider si
 
 | Command | Required flags | Result |
 | --- | --- | --- |
-| `cc-remote images render` | `--inventory`, `--profile`, `--out` | Writes `plugins.sh` and `provision.sh`; with `image`, also writes `Dockerfile` and `start.sh`. |
-| `cc-remote images fingerprint` | `--inventory`, `--profile` | Prints JSON with `tools`, and `image` when configured. |
-| `cc-remote images build` | `--inventory` | Builds and publishes the configured Namespace image through `devbox image build`. Requires a logged-in `devbox` CLI. |
+| `cc-remote images render` | `--inventory`, `--profile`, `--out` | Writes `plugins.sh` and `provision.sh`; with `image`, also writes the profile's image context, `Dockerfile`, `provision.sh`, `start.sh`, `plugins.sh`, `finalize.sh`, and `baked.json`, under `namespace/`. `--platform` selects the image target, `linux/amd64` by default. |
+| `cc-remote images fingerprint` | `--inventory`, `--profile` | Prints JSON with `tools`, and `image` when configured. `--platform` selects the image target, `linux/amd64` by default. |
+| `cc-remote images build` | none | Bakes one profile's tools into a Namespace image with `nsc build --platform <providers.namespace.platform> --push`, reads its digest with `nsc registry describe`, and registers that digest with `devbox image wire`. Accepts `--config`, `--profile`, and `--region`; prints JSON with `profile`, `platform`, `fingerprint`, `repository`, `tag`, `digest`, `reference`, and `manifest`. Requires logged-in `nsc` and `devbox` CLIs. |
 | `cc-remote payload build` | `--out`, `--packages-out` | Builds a private `SquashFS` payload and resident packages archive on a fresh Sprite. Accepts `--config`, `--provider`, and `--profile`; prints JSON with `sha256`, `size`, `tools`, `machine`, and `path`, plus the archive's `sha256`, `size`, and `path` under `packages`. |
 
-The committed example has this fingerprint output:
+Print the committed example's fingerprints with:
 
 ```sh
 cc-remote images fingerprint --inventory examples/inventory.yaml --profile agents
 ```
 
-```json
-{
-  "tools": "d3f5cab0276494d302c92126202e35f4726e96d50aa8cb222596c91a1f9e7b82",
-  "image": "283bddd21100faa26510aa42b58319ecdd9cffbf11e2ed8478d0b88189751cc4"
-}
-```
+The output is one JSON object with `tools` and `image` hex digests. The `tools`
+digest covers the selected profile's rendered `provision.sh` and `plugins.sh`.
+The `image` digest covers the image context and baked manifest, including the
+target platform, so changes limited to image inputs can leave `tools` unchanged.
 
 ## Inventory sections
 
@@ -305,7 +303,8 @@ Namespace image builds run `packages` followed by `tools`.
 | Value | Inputs |
 | --- | --- |
 | Tool fingerprint | Rendered `provision.sh` and `plugins.sh` for the selected profile, including its tool and prepare additions. |
-| Image fingerprint | Rendered `Dockerfile`, system-only `provision.sh`, and `start.sh`; user artifact and plugin versions are excluded. |
+| Image inputs | Rendered `Dockerfile` with its base, layers, and user, system-only `provision.sh`, `start.sh`, the profile's payload-free `plugins.sh`, `finalize.sh`, and the target platform. |
+| Image fingerprint | The image inputs' files and the baked manifest, which records the image inputs digest. |
 | Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host or the configured payload `sha256` for a machine with a payload, plus `payload.packages.sha256` when the payload pins a packages archive; payload and archive `path`, `url_command`, and `size` are excluded. |
 
 Each uses SHA-256 with its own domain and file-name/length framing. The image
@@ -328,3 +327,52 @@ verifies, and mounts the new payload before publishing.
 Namespace image building and live host startup have not been exercised with this
 implementation. CI grades rendering, validation, shell syntax, shellcheck, Python
 compilation, and fixture-based installation behavior.
+
+## Baked Namespace images
+
+An image bakes one profile for one platform, either `linux/amd64` or
+`linux/arm64`. `images build` reads the platform from
+`providers.namespace.platform` and passes it to `nsc build`.
+
+The package `RUN` ends by removing the `/etc/ssh/ssh_host_*` keys that
+`openssh-server` generates during installation, then runs
+`finalize.sh system /`, which fails the build if any host key remains. No
+host key reaches a committed layer, and the SSH configuration files stay.
+
+A later `RUN` runs `plugins.sh install` and `plugins.sh natives` as the image
+user, then runs home finalization and manifest installation as root. All four
+steps share that `RUN`, so cleanup precedes the layer commit.
+
+1. `plugins.sh install` installs user tools, marketplaces, and plugins.
+2. `plugins.sh natives` fetches and verifies the native release behind each pinned plugin binary and service entrypoint.
+3. `finalize.sh` removes installer-created identity, auth, session, and runtime state, then fails the build if any remains.
+4. `install` writes the manifest to `/opt/cc-remote/baked.json`.
+
+The finalizer removes Claude's `~/.claude.json` identity file and its
+session, project, telemetry, and debug state. It also removes Codex auth and
+sessions, plugin data and `.in_use` and `.orphaned_at` markers, daemonkit
+endpoints under `~/.daemonkit/a`, process ID and lock files, and sockets. The
+cc-remote ready, service, and tailnet state and Orca user data go too. It
+keeps `~/.codex/hooks.json`, `~/.codex/config.toml`, and
+`~/.claude/settings.json` byte for byte and fails the build if any of them
+changed.
+
+The build never runs `configure`, starts a service, or publishes readiness.
+Tool trees, marketplace checkouts, plugin caches, metadata, and settings stay
+in the image, as do the native caches under `~/.daemonkit/cache` and
+`~/.daemonkit/binrun`. Only the image build runs `finalize.sh`; create and
+resume never touch those paths on a workspace.
+
+The manifest records the profile, the platform, the image inputs digest, the
+tool fingerprint, the image user and home, and each pinned artifact,
+marketplace, and plugin. It never holds the readiness stamp. A private
+marketplace's token reaches the build only as an `nsc build` secret file,
+which is created outside the context and removed when the build returns.
+
+Create reads the manifest before any lane runs. It refuses a machine whose
+manifest is missing or differs from the requested profile's, naming both
+profiles, platforms, image inputs, and tools, and then destroys that machine.
+An unchanged image reference therefore cannot satisfy a changed base, layer,
+start script, finalizer, or platform. A matching image skips tool
+installation, and create stages `plugins.sh`, checks out the source,
+configures, and publishes the stamp.

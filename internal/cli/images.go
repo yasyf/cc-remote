@@ -1,14 +1,19 @@
 package cli
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/images"
+	"github.com/yasyf/cc-remote/internal/providers/namespace"
+	"github.com/yasyf/cc-remote/internal/workspace"
 )
 
 func newImagesCmd() *cobra.Command {
@@ -21,10 +26,10 @@ func newImagesCmd() *cobra.Command {
 }
 
 func newImagesRenderCmd() *cobra.Command {
-	var inventoryPath, profile, out string
+	var inventoryPath, profile, platform, out string
 	cmd := &cobra.Command{
 		Use:   "render",
-		Short: "Write the provision and plugin scripts, and the Namespace image context, for one profile",
+		Short: "Write one profile's provision and plugin scripts, and its Namespace image context under namespace/",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			inventory, err := images.Load(inventoryPath)
@@ -41,18 +46,26 @@ func newImagesRenderCmd() *cobra.Command {
 			if err := os.WriteFile(filepath.Join(out, "plugins.sh"), scripts.Plugins, 0o600); err != nil {
 				return fmt.Errorf("write plugins.sh: %w", err)
 			}
-			if inventory.Image == nil {
-				return os.WriteFile(filepath.Join(out, "provision.sh"), scripts.ProvisionScript, 0o600)
+			if err := os.WriteFile(filepath.Join(out, "provision.sh"), scripts.ProvisionScript, 0o600); err != nil {
+				return fmt.Errorf("write provision.sh: %w", err)
 			}
-			context, err := images.RenderImage(inventory)
+			if inventory.Image == nil {
+				return nil
+			}
+			context, err := images.RenderImage(inventory, profile, platform)
 			if err != nil {
 				return err
 			}
-			return context.Write(out)
+			dir := filepath.Join(out, "namespace")
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				return fmt.Errorf("create %s: %w", dir, err)
+			}
+			return context.Write(dir)
 		},
 	}
 	cmd.Flags().StringVar(&inventoryPath, "inventory", "", "path to the tool inventory YAML")
 	cmd.Flags().StringVar(&profile, "profile", "", "profile whose extra tools to include")
+	bindPlatform(cmd, &platform)
 	cmd.Flags().StringVar(&out, "out", "", "directory to write the rendered files into")
 	for _, flag := range []string{"inventory", "profile", "out"} {
 		_ = cmd.MarkFlagRequired(flag)
@@ -61,7 +74,7 @@ func newImagesRenderCmd() *cobra.Command {
 }
 
 func newImagesFingerprintCmd() *cobra.Command {
-	var inventoryPath, profile string
+	var inventoryPath, profile, platform string
 	cmd := &cobra.Command{
 		Use:   "fingerprint",
 		Short: "Print the tool fingerprint for one profile and the image fingerprint as JSON",
@@ -80,7 +93,7 @@ func newImagesFingerprintCmd() *cobra.Command {
 				Image string `json:"image,omitempty"`
 			}{Tools: scripts.Fingerprint()}
 			if inventory.Image != nil {
-				context, err := images.RenderImage(inventory)
+				context, err := images.RenderImage(inventory, profile, platform)
 				if err != nil {
 					return err
 				}
@@ -93,6 +106,7 @@ func newImagesFingerprintCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&inventoryPath, "inventory", "", "path to the tool inventory YAML")
 	cmd.Flags().StringVar(&profile, "profile", "", "profile whose extra tools to include")
+	bindPlatform(cmd, &platform)
 	for _, flag := range []string{"inventory", "profile"} {
 		_ = cmd.MarkFlagRequired(flag)
 	}
@@ -100,24 +114,54 @@ func newImagesFingerprintCmd() *cobra.Command {
 }
 
 func newImagesBuildCmd() *cobra.Command {
-	var inventoryPath string
+	var configPath, profile, region string
 	cmd := &cobra.Command{
 		Use:   "build",
-		Short: "Build and publish the Namespace devbox image the inventory describes",
-		Args:  cobra.NoArgs,
+		Short: "Bake one profile's tools into a Namespace image, push it, and wire its digest as a devbox image",
+		Long: `build renders the profile's image context for providers.namespace.platform, builds and pushes it
+for that platform with nsc build under a tag of its image fingerprint, reads the pushed digest back
+from the workspace registry, and wires that exact digest with devbox image wire. A private
+marketplace's GitHub token comes from git.token_command and reaches the build only as an nsc build
+secret file that is removed once the build returns. stdout carries the receipt: the digest reference
+to put in the profile's machine image, and the baked manifest that workspaces of this profile adopt.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			inventory, err := images.Load(inventoryPath)
+			cfg, err := config.Load(cmp.Or(configPath, config.DefaultPath()))
 			if err != nil {
 				return err
 			}
-			context, err := images.RenderImage(inventory)
+			context, err := namespaceImage(cfg, cmp.Or(profile, cfg.Profile))
 			if err != nil {
 				return err
 			}
-			return context.Build(cmd.Context(), images.DevboxCLI{Stdout: cmd.ErrOrStderr(), Stderr: cmd.ErrOrStderr()})
+			built, err := context.Build(cmd.Context(), images.NamespaceCLI{Stderr: cmd.ErrOrStderr(), Region: region}, workspace.GitToken(cfg))
+			if err != nil {
+				return err
+			}
+			return emit(cmd.OutOrStdout(), built)
 		},
 	}
-	cmd.Flags().StringVar(&inventoryPath, "inventory", "", "path to the tool inventory YAML")
-	_ = cmd.MarkFlagRequired("inventory")
+	cmd.Flags().StringVar(&configPath, "config", "", "config file (default $CC_REMOTE_CONFIG or ~/.config/cc-remote/config.yaml)")
+	cmd.Flags().StringVar(&profile, "profile", "", "profile whose tools to bake (default config.profile)")
+	cmd.Flags().StringVar(&region, "region", "", "nsc --region for the build and registry calls (default nsc's own)")
 	return cmd
+}
+
+func bindPlatform(cmd *cobra.Command, platform *string) {
+	cmd.Flags().StringVar(platform, "platform", images.DefaultPlatform, "platform the Namespace image context targets: "+strings.Join(images.Platforms, " or ")+"; images build reads providers.namespace.platform instead")
+}
+
+func namespaceImage(cfg *config.Config, profile string) (images.Context, error) {
+	if _, err := cfg.ProfileNamed(profile); err != nil {
+		return images.Context{}, err
+	}
+	provider, err := openProvider(cfg, namespace.Name)
+	if err != nil {
+		return images.Context{}, err
+	}
+	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
+	if err != nil {
+		return images.Context{}, err
+	}
+	return images.RenderImage(inventory, profile, provider.Traits().Platform)
 }

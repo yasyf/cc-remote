@@ -35,7 +35,7 @@ func TestImagesFingerprintMatchesRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	context, err := images.RenderImage(inventory)
+	context, err := images.RenderImage(inventory, "stack", images.DefaultPlatform)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,15 +51,48 @@ func TestImagesRenderWritesTheScriptsAndContext(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	entries, err := os.ReadDir(dir)
+	for sub, want := range map[string][]string{
+		"":          {"namespace", "plugins.sh", "provision.sh"},
+		"namespace": {"Dockerfile", "baked.json", "finalize.sh", "plugins.sh", "provision.sh", "start.sh"},
+	} {
+		entries, err := os.ReadDir(filepath.Join(dir, sub))
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if !slices.Equal(names, want) {
+			t.Errorf("rendered files in %q = %v, want %v", sub, names, want)
+		}
+	}
+	inventory, err := images.Load(exampleInventory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
+	scripts, err := images.Render(inventory, "agents")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := []string{"Dockerfile", "plugins.sh", "provision.sh", "start.sh"}; !slices.Equal(names, want) {
-		t.Errorf("rendered files = %v, want %v", names, want)
+	image, err := images.RenderImage(inventory, "agents", images.DefaultPlatform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string][]byte{"plugins.sh": scripts.Plugins, "provision.sh": scripts.ProvisionScript, "namespace/plugins.sh": image.Plugins, "namespace/baked.json": image.Manifest} {
+		if got, err := os.ReadFile(filepath.Join(dir, path)); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s differs from its render: %v", path, err)
+		}
+	}
+	if bytes.Equal(scripts.Plugins, image.Plugins) {
+		t.Error("the payload inventory's Sprites plugins.sh equals the payload-free image one")
+	}
+}
+
+func TestImagesBuildRefusesAnUnknownProfileBeforeBuilding(t *testing.T) {
+	root := cli.NewRootCmd()
+	root.SetArgs([]string{"images", "build", "--config", exampleConfig, "--profile", "nope"})
+	if err := root.Execute(); err == nil || err.Error() != "config has no nope profile" {
+		t.Errorf("Execute() error = %v", err)
 	}
 }
