@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -106,6 +107,7 @@ func (t orcaTunnel) ensure(ctx context.Context, port int) error {
 	defer func() { _ = log.Close() }()
 	// The backgrounded master inherits these descriptors; pipes would hold Run open until it exits.
 	cmd := exec.CommandContext(ctx, "ssh", t.openArgs(port)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("forward %s:%d to %s (see %s): %w", orca.Loopback, port, t.Host, t.Log, err)

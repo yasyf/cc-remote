@@ -40,6 +40,33 @@ func TestOrcaTunnelIsAPrivatePersistentForward(t *testing.T) {
 	}
 }
 
+func TestOrcaTunnelLaunchesInItsOwnSession(t *testing.T) {
+	bin, marker := t.TempDir(), filepath.Join(t.TempDir(), "identity")
+	script := "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = check ]; then exit 1; fi\ndone\nprintf '%s\\n' \"$$\" \"$(ps -o pgid= -p $$)\" > \"$FORWARD_IDENTITY\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("FORWARD_IDENTITY", marker)
+	control, err := state.NewOrcaControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Dir(control)) })
+	tunnel := orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")}
+	if err := tunnel.ensure(t.Context(), 7001); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(identity))
+	if len(fields) != 2 || fields[0] != fields[1] {
+		t.Errorf("forward PID and process group = %q, want the forward to lead its own group", identity)
+	}
+}
+
 func TestCaptureKey(t *testing.T) {
 	dir := t.TempDir()
 	script := func(name, body string) string {
