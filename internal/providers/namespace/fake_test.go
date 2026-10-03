@@ -421,7 +421,11 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 		}
 		return providers.Result{}, nil
 	}
-	result, err := providers.OSRunner{}.Run(ctx, providers.Command{Name: "sh", Args: []string{"-c", script}, Env: cmd.Env, Stdin: cmd.Stdin, Stdout: cmd.Stdout})
+	argv, err := nativeArgv(ctx, script)
+	if err != nil {
+		return providers.Result{}, err
+	}
+	result, err := providers.OSRunner{}.Run(ctx, providers.Command{Name: argv[0], Args: argv[1:], Env: cmd.Env, Stdin: cmd.Stdin, Stdout: cmd.Stdout})
 	if err != nil {
 		return result, err
 	}
@@ -434,6 +438,19 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 		result.ExitCode = nativeExit
 	}
 	return result, nil
+}
+
+func nativeArgv(ctx context.Context, script string) ([]string, error) {
+	raw, err := providers.Output(ctx, providers.OSRunner{}, providers.Command{
+		Name: "python3",
+		Args: []string{"-I", "-S", "-c", `import os, shlex, sys
+sys.stdout.buffer.write(b"\0".join(os.fsencode(word) for word in shlex.split(sys.argv[1])))
+`, script},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(string(raw), "\x00"), nil
 }
 
 func newProvider(t *testing.T) (*Provider, *fakeNamespace, *fakeClock) {

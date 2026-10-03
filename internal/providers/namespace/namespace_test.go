@@ -498,6 +498,35 @@ func TestExtendRecordsTheDeadlineTheProviderAnswered(t *testing.T) {
 	}
 }
 
+func TestNativeContainerSSHDoesNotEvaluateShellExpressions(t *testing.T) {
+	t.Setenv("CC_REMOTE_NATIVE_VALUE", "expanded")
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := p.load("inst1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		script string
+		stdout string
+		err    error
+	}{
+		{"assignment", "LC_ALL=C printf must-not-run", "", exec.ErrNotFound},
+		{"expansion", `printf %s "${CC_REMOTE_NATIVE_VALUE}"`, "${CC_REMOTE_NATIVE_VALUE}", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := p.Runner.Run(t.Context(), p.containerScript(saved.Instance, tt.script, nil))
+			if !errors.Is(err, tt.err) || string(result.Stdout) != tt.stdout || len(result.Stderr) != 0 || result.ExitCode != 0 {
+				t.Errorf("native ssh = %q, %q, exit %d, %v; want %q, empty stderr, exit 0, %v", result.Stdout, result.Stderr, result.ExitCode, err, tt.stdout, tt.err)
+			}
+		})
+	}
+}
+
 func TestExecRunsTheFramedCommandThroughTheNativeContainerSSH(t *testing.T) {
 	p, fake, _ := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
@@ -510,18 +539,19 @@ func TestExecRunsTheFramedCommandThroughTheNativeContainerSSH(t *testing.T) {
 			t.Errorf("Exec = %q, exit %d, %v", result.Stdout, result.ExitCode, err)
 		}
 	}
-	framing := regexp.MustCompile(`^LC_ALL=C python3 -I -S -c '[^']+' ([0-9a-f]{64}) `)
+	nonceArg := regexp.MustCompile(`[0-9a-f]{64}`)
 	nonces := make([]string, 0, len(fake.Shells())-before)
 	for _, got := range fake.Shells()[before:] {
-		match := framing.FindStringSubmatch(got[len(got)-1])
-		if match == nil {
+		nonce := nonceArg.FindString(got[len(got)-1])
+		if nonce == "" {
 			t.Fatalf("nsc argv = %q, want the framed wrapper", got)
 		}
-		want := []string{"ssh", "--container_name", "agent", "-T", "inst1", "LC_ALL=C " + providers.ShellQuote("python3", "-I", "-S", "-c", frameWrapper, match[1]) + ` "${LC_ALL+=$LC_ALL}" sh -c 'cat; exit 4'`}
+		script := "LC_ALL=C " + providers.ShellQuote("python3", "-I", "-S", "-c", frameWrapper, nonce) + ` "${LC_ALL+=$LC_ALL}" sh -c 'cat; exit 4'`
+		want := []string{"ssh", "--container_name", "agent", "-T", "inst1", providers.ShellQuote("sh", "-c", script)}
 		if !slices.Equal(got, want) {
 			t.Errorf("nsc argv = %q, want %q", got, want)
 		}
-		nonces = append(nonces, match[1])
+		nonces = append(nonces, nonce)
 	}
 	if len(nonces) != 2 || nonces[0] == nonces[1] {
 		t.Errorf("nonces = %q, want a fresh one per Exec", nonces)
@@ -604,7 +634,12 @@ func TestTheWrapperGivesTheCommandItsOriginalEnvironment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := slices.Concat(unrelated, tt.locale)
-			native := exec.CommandContext(t.Context(), "sh", "-c", framed(nonce, child))
+			command := (&Provider{}).container(providers.ComputeInstance{}, []string{"sh", "-c", framed(nonce, child)}, nil)
+			argv, err := nativeArgv(t.Context(), command.Args[len(command.Args)-1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := exec.CommandContext(t.Context(), argv[0], argv[1:]...)
 			native.Env = fixture
 			native.Stdin = strings.NewReader(input)
 			var stdout, stderr bytes.Buffer
