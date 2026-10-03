@@ -13,7 +13,7 @@ to replace before installation; rendering and fingerprinting need no provider si
 | `cc-remote images render` | `--inventory`, `--profile`, `--out` | Writes `plugins.sh` and `provision.sh`; with `image`, also writes `Dockerfile` and `start.sh`. |
 | `cc-remote images fingerprint` | `--inventory`, `--profile` | Prints JSON with `tools`, and `image` when configured. |
 | `cc-remote images build` | `--inventory` | Builds and publishes the configured Namespace image through `devbox image build`. Requires a logged-in `devbox` CLI. |
-| `cc-remote payload build` | `--out` | Builds a private `SquashFS` payload on a fresh Sprite. Accepts `--config`, `--provider`, and `--profile`; prints JSON with `sha256`, `size`, `tools`, `machine`, and `path`. |
+| `cc-remote payload build` | `--out`, `--packages-out` | Builds a private `SquashFS` payload and resident packages archive on a fresh Sprite. Accepts `--config`, `--provider`, and `--profile`; prints JSON with `sha256`, `size`, `tools`, `machine`, and `path`, plus the archive's `sha256`, `size`, and `path` under `packages`. |
 
 The committed example has this fingerprint output:
 
@@ -173,7 +173,7 @@ result JSON, or error strings. Every `fmt` verb formats the Go URL value as
 With a configured Sprites provider and `lean` profile, a build command is:
 
 ```sh
-cc-remote payload build --config ./config.yaml --provider sprites --profile lean --out ./tools.sqfs
+cc-remote payload build --config ./config.yaml --provider sprites --profile lean --out ./tools.sqfs --packages-out ./packages.tar
 ```
 
 The build installs the full inventory, including private marketplaces and the
@@ -183,12 +183,13 @@ Sprite only on the install phase's stdin.
 
 Before packing, `plugins.sh verify` checks system and user tools and links,
 including running each target's verify arguments; a failed check stops the build.
-The build packs an explicit allowlist of installed trees, streams the file back,
-and computes its SHA-256 and byte size.
-The build refuses to create `--out` if it exists or its parent directory is
-writable by group or others; the new file has mode `0600`. The build destroys its
-Sprite and confirms its absence before returning success. Its returned `path` and
-`sha256` supply the machine's payload fields.
+The build packs an explicit allowlist of installed trees and a separate resident
+packages archive, streams both files back, and computes each file's SHA-256 and
+byte size. It refuses either output path if it exists or its parent directory is
+writable by group or others; both new files have mode `0600`. The build destroys
+its Sprite and confirms its absence before returning success. The returned
+`path` and `sha256` supply the machine's payload fields; `packages.path` and
+`packages.sha256` supply `payload.packages`.
 
 With `path`, the Sprite runs
 `sudo bash -c <stage script> stage-payload <sha256>` with the laptop file on the
