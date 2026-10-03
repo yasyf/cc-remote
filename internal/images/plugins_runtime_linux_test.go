@@ -187,6 +187,9 @@ exec %s "$@"
 			if tt.wantExit != 0 {
 				return
 			}
+			if _, err := os.Stat(filepath.Join(h.home, ".codex/hooks.json")); !os.IsNotExist(err) {
+				t.Errorf("Captain host without a declared Captain plugin created Codex hooks: %v", err)
+			}
 			if h.version("hook@tools-market") != "1.0.0" {
 				t.Error("Claude plugin pin was not installed")
 			}

@@ -189,6 +189,7 @@ func homeTrees(inv Inventory, tools []Artifact) []tree {
 		trees = append(trees,
 			tree{exposeLink, required, ".cache/codex-runtimes/codex-primary-runtime"},
 			tree{exposeCopy, required, ".codex/config.toml"},
+			tree{exposeCopy, optional, ".codex/hooks.json"},
 			tree{exposeCopy, required, ".codex/plugins/cache/openai-primary-runtime"},
 		)
 	}

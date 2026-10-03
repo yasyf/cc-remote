@@ -495,6 +495,39 @@ verify_captain_hook() {
   fi
 }
 
+install_codex_hooks() (
+  local pin plugins root command hooks="$HOME/.codex/hooks.json" edited
+  pin="$(captain_codex_pin)"
+  if [ -z "$pin" ]; then
+    return
+  fi
+  plugins="$(claude_json plugin list --json)" || exit
+  verify_plugins "$plugins"
+  root="$(plugin_path "$plugins" "$(jq -r .ID <<< "$pin")")"
+  command="CAPT_HOOK_PROVIDER=codex $(shq "$root/bin/hook")"
+  captain_codex_root "$root" "$(jq -r .Version <<< "$pin")"
+  umask 077
+  mkdir -p "$HOME/.codex"
+  if [ ! -f "$hooks" ]; then
+    printf '{}\n' > "$hooks"
+  fi
+  edited="$(mktemp "$hooks.XXXXXX")"
+  jq -s --arg command "$command" '
+    if length != 1 then error("expected one hooks document") else .[0] end |
+    ({{template "captain-codex-definitions"}}) as $captain |
+    reduce ($captain | keys_unsorted[]) as $event (.;
+      if (.hooks[$event] // [] | index($captain[$event][0])) == null
+      then .hooks[$event] += $captain[$event] else . end)
+  ' "$hooks" > "$edited"
+  if cmp -s "$hooks" "$edited"; then
+    rm "$edited"
+  else
+    mv "$edited" "$hooks"
+  fi
+)
+
+{{template "captain-codex-helpers" .}}
+
 edit_settings() (
   local settings="$HOME/.claude/settings.json" edited
   umask 077
@@ -676,6 +709,9 @@ run_install() {
     {{.}}
 {{- end}}
   )
+{{- end}}
+{{- if .CodexRuntime}}
+  install_codex_hooks
 {{- end}}
   local link_check=spelling
 {{- if .Closure}}
@@ -954,3 +990,23 @@ case "$phase" in
     exit 2
     ;;
 esac
+
+{{define "captain-codex-helpers" -}}
+captain_codex_pin() {
+  jq -cr '[.[]? | select(.ID | startswith("captain-hook@"))] | if length > 1 then error("multiple Captain Hook plugins in inventory") else .[] end' <<'JSON'
+{{json .Claude.Plugins}}
+JSON
+}
+
+captain_codex_root() {
+  if [ ! -x "$1/bin/hook" ] || ! jq -se --arg version "$2" 'length == 1 and .[0].name == "captain-hook" and .[0].version == $version' "$1/.claude-plugin/plugin.json" > /dev/null; then
+    echo "cc-remote: Captain Hook plugin at $1 is not executable at $2" >&2
+    exit 1
+  fi
+}
+{{- end}}
+
+{{define "captain-codex-definitions" -}}
+reduce ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"][] as $event
+  ({}; .[$event] = [{hooks: [{type: "command", command: ($command + " run " + $event)}]}])
+{{- end}}
