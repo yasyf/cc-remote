@@ -348,8 +348,8 @@ steps share that `RUN`, so cleanup precedes the layer commit.
 3. `finalize.sh` removes installer-created identity, auth, session, and runtime state, then fails the build if any remains.
 4. `install` writes the manifest to `/opt/cc-remote/baked.json`.
 
-The finalizer removes Claude's `~/.claude.json` identity file and its
-session, project, telemetry, and debug state. It also removes Codex auth and
+The finalizer removes Claude's `~/.claude.json` identity file,
+`~/.claude/backups` directory, and session, project, telemetry, and debug state. It also removes Codex auth and
 sessions, plugin data and `.in_use` and `.orphaned_at` markers, daemonkit
 endpoints under `~/.daemonkit/a`, process ID and lock files, and sockets. The
 cc-remote ready, service, and tailnet state and Orca user data go too. It
