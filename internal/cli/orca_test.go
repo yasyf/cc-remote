@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
 
@@ -87,7 +89,7 @@ func TestOrcaResultIsTheSchemaTwoProvisionedRootShape(t *testing.T) {
 		Profile:       "lean",
 		Machine:       "orca-x-1",
 		ProjectRoot:   "/home/sprite/app",
-		SSH:           workspace.SSH{Host: "orca-x-1.sprite", Port: 22, User: "sprite", IdentityFile: "/k", ProxyCommand: "cc-remote proxy orca-x-1", Options: []string{"StrictHostKeyChecking=yes"}},
+		SSH:           &workspace.SSH{Host: "orca-x-1.sprite", Port: 22, User: "sprite", IdentityFile: "/k", ProxyCommand: "cc-remote proxy orca-x-1", Options: []string{"StrictHostKeyChecking=yes"}},
 		Forwards:      []workspace.Forward{{Label: "web", Port: 40001}},
 	}
 	var out bytes.Buffer
@@ -119,17 +121,42 @@ func TestOrcaResultIsTheSchemaTwoProvisionedRootShape(t *testing.T) {
 	}
 }
 
-func TestOrcaConnectionFlagAcceptsSSHOnly(t *testing.T) {
-	if err := orcaMode(""); err != nil {
-		t.Error(err)
+func TestOrcaConnectionFlagAcceptsSSHAndServer(t *testing.T) {
+	for _, connection := range []string{"", "ssh", "server"} {
+		if err := orcaMode(connection); err != nil {
+			t.Errorf("orcaMode(%q) = %v", connection, err)
+		}
 	}
-	if err := orcaMode("ssh"); err != nil {
-		t.Error(err)
+	if err := orcaMode("tcp"); err == nil || err.Error() != `--connection "tcp": expected ssh or server` {
+		t.Errorf("tcp = %v", err)
 	}
-	if err := orcaMode("server"); err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Errorf("server = %v", err)
+}
+
+func TestOrcaServerResultIsTheStrictSchemaTwoOrcaServerShape(t *testing.T) {
+	result := &workspace.Result{
+		SchemaVersion: workspace.SchemaVersion,
+		Name:          "orca-x-1",
+		Provider:      "namespace",
+		Profile:       "agents",
+		Machine:       "109snr2o9ri3c",
+		ProjectRoot:   "/workspaces/app",
+		Compute:       &providers.ComputeInstance{InstanceID: "109snr2o9ri3c", Container: "agent", Endpoint: "https://compute.test", ContainerPort: 18766, ExportedPort: 20000},
 	}
-	if err := orcaMode("tcp"); err == nil {
-		t.Error("tcp was accepted")
+	var out bytes.Buffer
+	if err := emit(&out, orcaServerResultOf(result, "orca://pair?code=private")); err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]any
+	if err := json.Unmarshal(out.Bytes(), &shape); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"schemaVersion": float64(2),
+		"checkoutMode":  "provisioned-root",
+		"connection":    map[string]any{"type": "orca-server", "pairingCode": "orca://pair?code=private", "projectRoot": "/workspaces/app"},
+		"userData":      map[string]any{"provider": "namespace", "profile": "agents", "resourceId": "orca-x-1", "machine": "109snr2o9ri3c"},
+	}
+	if !reflect.DeepEqual(shape, want) {
+		t.Errorf("result = %s, want exactly %v with no target", out.String(), want)
 	}
 }

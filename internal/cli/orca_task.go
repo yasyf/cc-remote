@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
@@ -32,6 +34,8 @@ const (
 	keyPipeTimeout = 2 * time.Minute
 	keyDropTimeout = 5 * time.Second
 	submitWait     = 15 * time.Second
+	gatewayStart   = 30 * time.Second
+	gatewayPoll    = 100 * time.Millisecond
 )
 
 var ErrNotSubmitted = errors.New("the prompt was accepted, but no turn_started was observed")
@@ -45,7 +49,8 @@ type orcaTask struct {
 	ProjectRoot   string         `json:"projectRoot"`
 	Service       string         `json:"service"`
 	Port          int            `json:"port"`
-	Forward       orcaTunnel     `json:"forward"`
+	Forward       *orcaTunnel    `json:"forward,omitempty"`
+	Gateway       *orcaGateway   `json:"gateway,omitempty"`
 	Environment   string         `json:"environment"`
 	EnvironmentID string         `json:"environmentId,omitempty"`
 	RuntimeID     string         `json:"runtimeId,omitempty"`
@@ -58,6 +63,16 @@ type orcaTask struct {
 	Prepared      bool           `json:"prepared,omitempty"`
 	Brief         *orcaArtifact  `json:"brief,omitempty"`
 	BaseCommit    string         `json:"baseCommit,omitempty"`
+
+	provider providers.Provider
+}
+
+type orcaGateway struct {
+	Instance      string `json:"instance"`
+	ContainerPort int    `json:"containerPort"`
+	Lock          string `json:"lock"`
+	Log           string `json:"log"`
+	PID           int    `json:"pid,omitempty"`
 }
 
 type orcaLaunch struct {
@@ -76,6 +91,7 @@ type orcaTunnel struct {
 type orcaHealth struct {
 	Task    *orcaTask           `json:"task"`
 	Forward bool                `json:"forward"`
+	Lease   json.RawMessage     `json:"lease,omitempty"`
 	Runtime *orca.RuntimeStatus `json:"runtime,omitempty"`
 	Error   string              `json:"error,omitempty"`
 }
@@ -128,11 +144,97 @@ func (t orcaTunnel) command(script string, stdin io.Reader) providers.Command {
 	return providers.Command{Name: "ssh", Args: append(t.args(), "sh", "-c", remote.Quote(script)), Stdin: stdin}
 }
 
-func (t orcaTunnel) run(ctx context.Context, script string, stdin io.Reader) ([]byte, error) {
-	return providers.Output(ctx, providers.OSRunner{}, t.command(script, stdin))
+func (g orcaGateway) up() bool {
+	unlock, free, err := state.TryLock(g.Lock)
+	if err != nil {
+		return false
+	}
+	if free {
+		unlock()
+	}
+	return !free
 }
 
-func (t orcaTunnel) dropKey(ctx context.Context, dir string) error {
+func (g *orcaGateway) ensure(ctx context.Context, workspace, config string, port int) error {
+	if g.up() {
+		return nil
+	}
+	cmd, err := forwardCommand(workspace, config)
+	if err != nil {
+		return err
+	}
+	log, err := os.OpenFile(g.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = log.Close() }()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdout, cmd.Stderr = log, log
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start the gateway forward for %s: %w", workspace, err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	deadline := time.After(gatewayStart)
+	for !g.up() {
+		select {
+		case err := <-exited:
+			return fmt.Errorf("the gateway forward for %s on %s:%d exited before it held the listener: %w: %s (see %s)", workspace, orca.Loopback, port, err, lastLine(g.Log), g.Log)
+		case <-deadline:
+			return fmt.Errorf("the gateway forward for %s did not hold %s:%d within %s (see %s); it is left running", workspace, orca.Loopback, port, gatewayStart, g.Log)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(gatewayPoll):
+		}
+	}
+	g.PID = cmd.Process.Pid
+	return nil
+}
+
+var forwardCommand = func(workspace, config string) (*exec.Cmd, error) {
+	helper, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	return exec.Command(helper, "orca", "forward", workspace, "--config", config), nil
+}
+
+func (t *orcaTask) up(ctx context.Context) bool {
+	if t.Gateway != nil {
+		return t.Gateway.up()
+	}
+	return t.Forward.up(ctx)
+}
+
+func (t *orcaTask) ensure(ctx context.Context, config string) error {
+	if t.Gateway != nil {
+		return t.Gateway.ensure(ctx, t.Workspace, config, t.Port)
+	}
+	return t.Forward.ensure(ctx, t.Port)
+}
+
+func (t *orcaTask) shell(ctx context.Context, script string, stdin io.Reader) (providers.Result, error) {
+	if t.Gateway != nil {
+		return t.provider.Exec(ctx, t.Machine, []string{"sh", "-c", script}, stdin)
+	}
+	return providers.OSRunner{}.Run(ctx, t.Forward.command(script, stdin))
+}
+
+func (t *orcaTask) run(ctx context.Context, script string, stdin io.Reader) ([]byte, error) {
+	if t.Gateway == nil {
+		return providers.Output(ctx, providers.OSRunner{}, t.Forward.command(script, stdin))
+	}
+	result, err := t.provider.Exec(ctx, t.Machine, []string{"sh", "-c", script}, stdin)
+	if err != nil {
+		return nil, err
+	}
+	if result.ExitCode != 0 {
+		return nil, &providers.CommandError{Command: "sh -c on " + t.Machine, Result: result}
+	}
+	return result.Stdout, nil
+}
+
+func (t *orcaTask) dropKey(ctx context.Context, dir string) error {
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), keyDropTimeout)
 	defer cancel()
 	_, err := t.run(cleanup, orca.KeyDropScript(dir), nil)
@@ -166,16 +268,19 @@ func (l *orcaLaunch) run(cmd *cobra.Command, runner orca.Runner, name string, fi
 		return err
 	}
 	defer clear(key)
-	control, err := state.NewOrcaControl()
-	if err != nil {
+	driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
+	var task *orcaTask
+	session.Retain = func(ctx context.Context, record *workspace.Record) (err error) {
+		task, err = driver.retain(ctx, session, record, l.agent, false)
 		return err
 	}
 	result, err := session.Create(cmd.Context(), name, workspace.Source{Ref: cmp.Or(l.ref, session.Config.Ref)})
 	if err != nil {
-		return errors.Join(err, os.Remove(filepath.Dir(control)))
+		return err
 	}
-	driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
-	task, err := driver.task(result, l.agent, control)
+	if task == nil {
+		task, err = driver.task(result, l.agent, session.Provider)
+	}
 	if err == nil {
 		err = driver.launch(cmd.Context(), session, task, runtime, key, cmp.Or(l.title, result.Name))
 	}
@@ -197,6 +302,7 @@ func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
 		newOrcaSendCmd(runner),
 		newOrcaReadCmd(runner),
 		newOrcaCollectCmd(runner),
+		newOrcaForwardCmd(),
 	}
 }
 
@@ -283,7 +389,7 @@ hashes and bounded git status entries. The machine is unchanged; a matching repo
 			if err != nil {
 				return err
 			}
-			task, err := loadTask(cfg.State(), args[0])
+			task, err := openTask(cfg, args[0])
 			if err != nil {
 				return err
 			}
@@ -315,11 +421,16 @@ func newOrcaStatusCmd(runner orca.Runner) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			task, err := loadTask(cfg.State(), args[0])
+			task, err := openTask(cfg, args[0])
 			if err != nil {
 				return err
 			}
-			health := orcaHealth{Task: task, Forward: task.Forward.up(cmd.Context())}
+			health := orcaHealth{Task: task, Forward: task.up(cmd.Context())}
+			if task.Gateway != nil {
+				if health.Lease, err = readLease(cfg.State(), task.Workspace, task.Gateway.Instance); err != nil {
+					return err
+				}
+			}
 			err = errors.New("the forward is down; run cc-remote orca reconnect " + task.Workspace)
 			if health.Forward {
 				var status orca.RuntimeStatus
@@ -350,11 +461,14 @@ Recovery after a runtime exits or a machine loses its processes is not supported
 			if err != nil {
 				return err
 			}
-			task, err := loadTask(cfg.State(), args[0])
+			task, err := openTask(cfg, args[0])
 			if err != nil {
 				return err
 			}
-			if err := task.Forward.ensure(cmd.Context(), task.Port); err != nil {
+			if err := task.ensure(cmd.Context(), cfg.Path); err != nil {
+				return err
+			}
+			if err := (orcaDriver{state: cfg.State()}).save(task); err != nil {
 				return err
 			}
 			if _, err := orca.NewClient(runner).On(task.Environment, task.RuntimeID).Status(cmd.Context()); err != nil {
@@ -387,14 +501,14 @@ the supported Orca runtime can deliver the prompt again when replaying an accept
 			if err != nil {
 				return err
 			}
-			task, err := loadTask(cfg.State(), args[0])
+			task, err := openTask(cfg, args[0])
 			if err != nil {
 				return err
 			}
 			if task.Prepared {
 				return fmt.Errorf("%s waits for Orca's worker-start; reach its worker through the home Dispatch, not this terminal", task.Workspace)
 			}
-			if !task.Forward.up(cmd.Context()) {
+			if !task.up(cmd.Context()) {
 				return errors.New("the forward is down; run cc-remote orca reconnect " + task.Workspace)
 			}
 			driver := orcaDriver{client: orca.NewClient(runner), state: cfg.State(), log: slog.Default()}
@@ -422,11 +536,11 @@ func newOrcaReadCmd(runner orca.Runner) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			task, err := loadTask(cfg.State(), args[0])
+			task, err := openTask(cfg, args[0])
 			if err != nil {
 				return err
 			}
-			if !task.Forward.up(cmd.Context()) {
+			if !task.up(cmd.Context()) {
 				return errors.New("the forward is down; run cc-remote orca reconnect " + task.Workspace)
 			}
 			screen, err := orca.NewClient(runner).On(task.Environment, task.RuntimeID).Screen(cmd.Context(), task.Terminal)
@@ -446,7 +560,7 @@ type orcaDriver struct {
 	log    *slog.Logger
 }
 
-func (d orcaDriver) task(result *workspace.Result, agent orca.Agent, control string) (*orcaTask, error) {
+func (d orcaDriver) task(result *workspace.Result, agent orca.Agent, provider providers.Provider) (*orcaTask, error) {
 	port, err := workspace.FreePort()
 	if err != nil {
 		return nil, err
@@ -460,15 +574,56 @@ func (d orcaDriver) task(result *workspace.Result, agent orca.Agent, control str
 		ProjectRoot:   result.ProjectRoot,
 		Service:       orca.RuntimeService,
 		Port:          port,
-		Forward:       orcaTunnel{Host: result.Name, Config: result.SSH.Config, Control: control, Log: d.state.OrcaForwardLog(result.Name)},
 		Environment:   result.Name,
 		Agent:         agent,
+		provider:      provider,
+	}
+	switch {
+	case result.Compute != nil:
+		task.Gateway = &orcaGateway{Instance: result.Machine, ContainerPort: result.Compute.ContainerPort, Lock: d.state.OrcaGatewayLock(result.Name, result.Machine), Log: d.state.OrcaForwardLog(result.Name)}
+	default:
+		control, err := state.NewOrcaControl()
+		if err != nil {
+			return nil, err
+		}
+		task.Forward = &orcaTunnel{Host: result.Name, Config: result.SSH.Config, Control: control, Log: d.state.OrcaForwardLog(result.Name)}
 	}
 	return task, d.save(task)
 }
 
 func (d orcaDriver) save(task *orcaTask) error {
 	return state.Save(d.state.Orca(task.Workspace), task)
+}
+
+func (d orcaDriver) retain(ctx context.Context, session *workspace.Session, record *workspace.Record, agent orca.Agent, resumed bool) (*orcaTask, error) {
+	if record.Compute == nil {
+		return nil, nil
+	}
+	var task *orcaTask
+	var err error
+	if resumed {
+		if task, err = loadTask(d.state, record.Name); err != nil {
+			return nil, err
+		}
+		if task.Gateway == nil || task.Gateway.Instance != record.Machine {
+			return nil, fmt.Errorf("the saved Orca task for %s does not forward instance %s, so no keeper is started for it", record.Name, record.Machine)
+		}
+		task.provider = session.Provider
+	} else {
+		allocated := &workspace.Result{Name: record.Name, Provider: record.Provider, Profile: record.Profile, Machine: record.Machine, ProjectRoot: session.ProjectRoot(), Compute: record.Compute}
+		if task, err = d.task(allocated, agent, session.Provider); err != nil {
+			return nil, err
+		}
+	}
+	return task, errors.Join(task.ensure(ctx, session.Config.Path), d.save(task))
+}
+
+func orcaRetain(session *workspace.Session, resumed bool) func(context.Context, *workspace.Record) error {
+	driver := orcaDriver{state: session.Config.State(), log: session.Log}
+	return func(ctx context.Context, record *workspace.Record) error {
+		_, err := driver.retain(ctx, session, record, orca.Agent{}, resumed)
+		return err
+	}
 }
 
 func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime, key []byte, title string) error {
@@ -480,7 +635,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err := d.save(task); err != nil {
 		return err
 	}
-	if err := task.Forward.ensure(ctx, task.Port); err != nil {
+	if err := task.ensure(ctx, session.Config.Path); err != nil {
 		return err
 	}
 	environment, err := d.client.AddEnvironment(ctx, task.Environment, pairing)
@@ -519,8 +674,53 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	return errors.Join(err, d.save(task))
 }
 
+func orcaServe(ctx context.Context, session *workspace.Session, result *workspace.Result, resumed bool) (string, error) {
+	runtime, err := orcaRuntime(session)
+	if err != nil {
+		return "", err
+	}
+	driver := orcaDriver{state: session.Config.State(), log: session.Log}
+	var task *orcaTask
+	if resumed || result.Compute != nil {
+		if task, err = loadTask(driver.state, result.Name); err != nil {
+			return "", err
+		}
+		task.provider = session.Provider
+	} else if task, err = driver.task(result, orca.Agent{}, session.Provider); err != nil {
+		return "", err
+	}
+	return driver.serve(ctx, session, task, runtime, resumed)
+}
+
+func (d orcaDriver) serve(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime, resumed bool) (string, error) {
+	if resumed {
+		pairing, err := d.resumed(ctx, session, task, runtime)
+		if err != nil {
+			return "", err
+		}
+		return pairing, task.ensure(ctx, session.Config.Path)
+	}
+	ready, pairing, err := d.start(ctx, session, task, runtime)
+	if err != nil {
+		return "", err
+	}
+	task.RuntimeID = ready.RuntimeID
+	if err := d.save(task); err != nil {
+		return "", err
+	}
+	return pairing, task.ensure(ctx, session.Config.Path)
+}
+
+func (t *orcaTask) runtime(runtime orca.Runtime) orca.Runtime {
+	runtime.Port = t.Port
+	if t.Gateway != nil {
+		runtime.Port, runtime.Advertise = t.Gateway.ContainerPort, fmt.Sprintf("ws://%s:%d", orca.Loopback, t.Port)
+	}
+	return runtime
+}
+
 func (d orcaDriver) start(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime) (orca.Ready, string, error) {
-	runtime.Port = task.Port
+	runtime = task.runtime(runtime)
 	result, err := session.Provider.Exec(ctx, task.Machine, []string{"sh", "-c", runtime.EnsureScript()}, nil)
 	if err != nil {
 		return orca.Ready{}, "", err
@@ -528,8 +728,7 @@ func (d orcaDriver) start(ctx context.Context, session *workspace.Session, task 
 	if result.ExitCode != 0 {
 		return orca.Ready{}, "", fmt.Errorf("starting the Orca runtime on %s exited %d: %s", task.Machine, result.ExitCode, bytes.TrimSpace(result.Stderr))
 	}
-	lines := strings.Split(strings.TrimSpace(string(result.Stdout)), "\n")
-	ready, pairing, err := orca.ParseReady([]byte(lines[len(lines)-1]), task.Port)
+	ready, pairing, err := orca.ParseReady(lastReady(result.Stdout), runtime.Port, task.Port)
 	if err != nil {
 		return orca.Ready{}, "", err
 	}
@@ -537,8 +736,33 @@ func (d orcaDriver) start(ctx context.Context, session *workspace.Session, task 
 	return ready, pairing, nil
 }
 
+func (d orcaDriver) resumed(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime) (string, error) {
+	runtime = task.runtime(runtime)
+	result, err := session.Provider.Exec(ctx, task.Machine, []string{"sh", "-c", orca.ProbeScript}, nil)
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("%s has no running Orca runtime %s to resume (%s); none is started in its place, and the saved task is kept", task.Workspace, task.RuntimeID, bytes.TrimSpace(result.Stderr))
+	}
+	ready, pairing, err := orca.ParseReady(lastReady(result.Stdout), runtime.Port, task.Port)
+	if err != nil {
+		return "", err
+	}
+	if ready.RuntimeID != task.RuntimeID {
+		return "", fmt.Errorf("%s now answers as Orca runtime %s, not its saved %s; the other runtime is not adopted, and the saved task and every process are kept", task.Workspace, ready.RuntimeID, task.RuntimeID)
+	}
+	d.log.Info("the Orca runtime survived the resume", "machine", task.Machine, "runtime", ready.RuntimeID)
+	return pairing, nil
+}
+
+func lastReady(stdout []byte) []byte {
+	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	return []byte(lines[len(lines)-1])
+}
+
 func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, title string, key []byte) (string, error) {
-	out, err := task.Forward.run(ctx, orca.KeyDirScript, nil)
+	out, err := task.run(ctx, orca.KeyDirScript, nil)
 	if err != nil {
 		return "", err
 	}
@@ -548,15 +772,15 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 	}
 	terminal, err := native.CreateTerminal(ctx, task.WorktreeID, title, task.Agent.Command(dir))
 	if err != nil {
-		dropped := task.Forward.dropKey(ctx, dir)
+		dropped := task.dropKey(ctx, dir)
 		return "", errors.Join(err, dropped)
 	}
 	payload := append(slices.Clone(key), '\n')
 	defer clear(payload)
 	write, cancel := context.WithTimeout(ctx, keyPipeTimeout)
 	defer cancel()
-	if _, err := task.Forward.run(write, orca.KeyWriteScript(dir), bytes.NewReader(payload)); err != nil {
-		dropped := task.Forward.dropKey(ctx, dir)
+	if _, err := task.run(write, orca.KeyWriteScript(dir), bytes.NewReader(payload)); err != nil {
+		dropped := task.dropKey(ctx, dir)
 		return terminal.Handle, errors.Join(fmt.Errorf("terminal %s never read its key: %w", terminal.Handle, err), dropped)
 	}
 	return terminal.Handle, nil
@@ -662,6 +886,25 @@ func readPrompt(cmd *cobra.Command, path string) (string, error) {
 		return "", fmt.Errorf("the prompt in %s is empty", path)
 	}
 	return prompt, nil
+}
+
+func openTask(cfg *config.Config, name string) (*orcaTask, error) {
+	task, err := loadTask(cfg.State(), name)
+	if err != nil || task.Gateway == nil {
+		return task, err
+	}
+	if task.provider, err = openProvider(cfg, task.Provider); err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+func readLease(dir state.Dir, name, instance string) (json.RawMessage, error) {
+	raw, err := os.ReadFile(dir.OrcaLease(name, instance))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return raw, err
 }
 
 func loadTask(dir state.Dir, name string) (*orcaTask, error) {

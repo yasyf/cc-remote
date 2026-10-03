@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/yasyf/cc-remote/internal/config"
+	"github.com/yasyf/cc-remote/internal/providers/namespace"
 )
 
 const localPublisher = "local"
@@ -28,7 +29,7 @@ func SourceOf(cfg *config.Config) Source {
 		}
 		profiles[name] = slices.Sorted(maps.Keys(profile.Machine))
 	}
-	return Source{Provider: cfg.Provider, Profile: cfg.Profile, Profiles: profiles}
+	return Source{Provider: cfg.Provider, Profile: cfg.Profile, Profiles: profiles, Servers: map[string]bool{namespace.Name: true}}
 }
 
 func PluginOf(cfg *config.Config, version string) (Plugin, error) {

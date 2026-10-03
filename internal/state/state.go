@@ -78,6 +78,14 @@ func (d Dir) OrcaForwardLog(name string) string {
 	return filepath.Join(string(d), "orca", name+".forward.log")
 }
 
+func (d Dir) OrcaGatewayLock(name, instance string) string {
+	return filepath.Join(string(d), "orca", name+"."+instance+".gateway.lock")
+}
+
+func (d Dir) OrcaLease(name, instance string) string {
+	return filepath.Join(string(d), "orca", name+"."+instance+".lease.json")
+}
+
 type Held struct {
 	Name   string
 	unlock func()
@@ -110,6 +118,23 @@ func Lock(path string) (func(), error) {
 		return nil, errors.Join(err, file.Close())
 	}
 	return func() { _ = file.Close() }, nil
+}
+
+func TryLock(path string) (func(), bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, false, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	switch err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); {
+	case errors.Is(err, syscall.EWOULDBLOCK):
+		return nil, false, file.Close()
+	case err != nil:
+		return nil, false, errors.Join(err, file.Close())
+	}
+	return func() { _ = file.Close() }, true, nil
 }
 
 func Save(path string, value any) error {

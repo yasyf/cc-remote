@@ -26,19 +26,20 @@ type Platform struct {
 }
 
 type Record struct {
-	Name       string        `json:"name"`
-	Provider   string        `json:"provider"`
-	Profile    string        `json:"profile"`
-	Source     Source        `json:"source"`
-	Machine    string        `json:"machine"`
-	Image      string        `json:"image,omitempty"`
-	ImageSpec  string        `json:"imageSpec,omitempty"`
-	Ready      bool          `json:"ready,omitempty"`
-	Unverified bool          `json:"unverified,omitempty"`
-	CreatedAt  time.Time     `json:"createdAt"`
-	UpdatedAt  time.Time     `json:"updatedAt"`
-	Forwards   []Forward     `json:"forwards,omitempty"`
-	Tailnet    *tailnet.Node `json:"tailnet,omitempty"`
+	Name       string                     `json:"name"`
+	Provider   string                     `json:"provider"`
+	Profile    string                     `json:"profile"`
+	Source     Source                     `json:"source"`
+	Machine    string                     `json:"machine"`
+	Image      string                     `json:"image,omitempty"`
+	ImageSpec  string                     `json:"imageSpec,omitempty"`
+	Ready      bool                       `json:"ready,omitempty"`
+	Unverified bool                       `json:"unverified,omitempty"`
+	CreatedAt  time.Time                  `json:"createdAt"`
+	UpdatedAt  time.Time                  `json:"updatedAt"`
+	Forwards   []Forward                  `json:"forwards,omitempty"`
+	Tailnet    *tailnet.Node              `json:"tailnet,omitempty"`
+	Compute    *providers.ComputeInstance `json:"compute,omitempty"`
 }
 
 type SSH struct {
@@ -63,16 +64,17 @@ func SSHFragment(name string, target providers.Target) []byte {
 }
 
 type Result struct {
-	SchemaVersion int           `json:"schemaVersion"`
-	Name          string        `json:"name"`
-	Provider      string        `json:"provider"`
-	Profile       string        `json:"profile"`
-	Source        Source        `json:"source"`
-	Machine       string        `json:"machine"`
-	ProjectRoot   string        `json:"projectRoot"`
-	SSH           SSH           `json:"ssh"`
-	Forwards      []Forward     `json:"forwards,omitempty"`
-	Tailnet       *tailnet.Node `json:"tailnet,omitempty"`
+	SchemaVersion int                        `json:"schemaVersion"`
+	Name          string                     `json:"name"`
+	Provider      string                     `json:"provider"`
+	Profile       string                     `json:"profile"`
+	Source        Source                     `json:"source"`
+	Machine       string                     `json:"machine"`
+	ProjectRoot   string                     `json:"projectRoot"`
+	SSH           *SSH                       `json:"ssh,omitempty"`
+	Compute       *providers.ComputeInstance `json:"compute,omitempty"`
+	Forwards      []Forward                  `json:"forwards,omitempty"`
+	Tailnet       *tailnet.Node              `json:"tailnet,omitempty"`
 }
 
 func sshFromTarget(target providers.Target) SSH {

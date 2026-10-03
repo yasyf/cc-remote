@@ -14,7 +14,7 @@ import (
 
 func host(t *testing.T) registry.Host {
 	dir := t.TempDir()
-	return registry.Host{StateDir: filepath.Join(dir, "state"), Home: filepath.Join(dir, "home"), Helper: "/opt/cc-remote"}
+	return registry.Host{StateDir: filepath.Join(dir, "state"), Helper: "/opt/cc-remote"}
 }
 
 func spritesSection(cli string) func(any) error {
@@ -30,9 +30,11 @@ func spritesSection(cli string) func(any) error {
 
 func namespaceSection(into any) error {
 	config := into.(*namespace.Config)
+	config.Endpoint = "https://us.compute.namespaceapis.com"
 	config.Platform = "linux/amd64"
+	config.ExportPort = 18766
 	config.VolumeSizeGB = 125
-	config.IdleTimeout = 30 * time.Minute
+	config.Duration = 4 * time.Hour
 	config.CallTimeout = time.Minute
 	config.ReadyTimeout = 10 * time.Minute
 	return nil
@@ -79,8 +81,8 @@ func TestNewNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := provider.(*namespace.Provider).Config
-	if got.CLI != namespace.DefaultCLI || got.SSHDir != filepath.Join(h.Home, ".namespace", "ssh") || got.StateDir != h.StateDir {
-		t.Errorf("config = %+v, want the default CLI, ssh dir under home, and the host state dir", got)
+	if got.CLI != "nsc" || got.Container != "agent" || got.StateDir != h.StateDir || got.Endpoint != "https://us.compute.namespaceapis.com" {
+		t.Errorf("config = %+v, want the nsc CLI, the agent container, the configured endpoint, and the host state dir", got)
 	}
 	wantTraits := providers.Traits{
 		TailnetMode: providers.TailnetUserspace,
@@ -111,6 +113,27 @@ func TestNewRejects(t *testing.T) {
 			into.(*namespace.Config).ReadyTimeout = 0
 			return nil
 		}, "providers.namespace: namespace needs a positive callTimeout and readyTimeout"},
+		{"namespace without an endpoint", namespace.Name, func(into any) error {
+			if err := namespaceSection(into); err != nil {
+				return err
+			}
+			into.(*namespace.Config).Endpoint = ""
+			return nil
+		}, `providers.namespace: namespace endpoint "" must be the https regional Compute API endpoint every lifecycle call uses`},
+		{"namespace without a lifetime", namespace.Name, func(into any) error {
+			if err := namespaceSection(into); err != nil {
+				return err
+			}
+			into.(*namespace.Config).Duration = 0
+			return nil
+		}, "providers.namespace: namespace needs a positive volumeSizeGB and a positive duration, the finite lifetime each instance is created with"},
+		{"namespace without an export port", namespace.Name, func(into any) error {
+			if err := namespaceSection(into); err != nil {
+				return err
+			}
+			into.(*namespace.Config).ExportPort = 0
+			return nil
+		}, "providers.namespace: namespace exportPort 0 must be the container port the Orca runtime listens on"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -11,20 +11,15 @@ import (
 
 type Host struct {
 	StateDir string
-	Home     string
 	Helper   string
 }
 
 func CurrentHost(stateDir string) (Host, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Host{}, err
-	}
 	helper, err := os.Executable()
 	if err != nil {
 		return Host{}, err
 	}
-	return Host{StateDir: stateDir, Home: home, Helper: helper}, nil
+	return Host{StateDir: stateDir, Helper: helper}, nil
 }
 
 func New(kind string, host Host, section func(into any) error) (providers.Provider, error) {
@@ -41,7 +36,7 @@ func New(kind string, host Host, section func(into any) error) (providers.Provid
 		}
 		return provider, nil
 	case namespace.Name:
-		config := namespace.Config{CLI: namespace.DefaultCLI, SSHDir: namespace.DefaultSSHDir(host.Home)}
+		config := namespace.Config{CLI: namespace.DefaultCLI, Container: namespace.DefaultContainer}
 		if err := section(&config); err != nil {
 			return nil, fmt.Errorf("providers.%s: %w", kind, err)
 		}

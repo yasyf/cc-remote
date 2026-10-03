@@ -1,6 +1,7 @@
 package orca
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,7 @@ type Runtime struct {
 	Display    []string
 	Args       []string
 	Port       int
+	Advertise  string
 	Supervised bool
 }
 
@@ -67,10 +69,19 @@ chmod 700 "$dir"
 mkfifo -m 600 "$dir/key"
 printf '%s\n' "$dir"`
 
+const ProbeScript = `set -eu
+cd "` + runtimeDir + `"
+exec 9>> serve.lock
+if flock -n 9; then
+  echo "` + remote.Prefix + `: no Orca runtime holds ` + runtimeDir + `/serve.lock" >&2
+  exit 3
+fi
+grep '"type":"` + readyType + `"' serve.json | tail -n 1`
+
 func (r Runtime) command() string {
 	return strings.Join(slices.Concat(
 		quoted(r.Display),
-		[]string{`"$HOME/"` + remote.Quote(r.Entry), "serve", "--port", strconv.Itoa(r.Port), "--pairing-address", Loopback, "--user-data-dir", `"` + runtimeDir + `/user-data"`, "--json"},
+		[]string{`"$HOME/"` + remote.Quote(r.Entry), "serve", "--port", strconv.Itoa(r.Port), "--pairing-address", remote.Quote(cmp.Or(r.Advertise, Loopback)), "--user-data-dir", `"` + runtimeDir + `/user-data"`, "--json"},
 		quoted(r.Args),
 	), " ")
 }
@@ -126,7 +137,7 @@ func (r Runtime) EnsureScript() string {
 	)
 }
 
-func ParseReady(line []byte, port int) (Ready, string, error) {
+func ParseReady(line []byte, listen, advertise int) (Ready, string, error) {
 	var event struct {
 		Type               string `json:"type"`
 		SchemaVersion      int    `json:"schemaVersion"`
@@ -142,13 +153,16 @@ func ParseReady(line []byte, port int) (Ready, string, error) {
 		return Ready{}, "", fmt.Errorf("decode the Orca runtime's ready event: %w", err)
 	}
 	advertised, err := url.Parse(event.AdvertisedEndpoint)
+	bound, boundErr := url.Parse(event.BoundEndpoint)
 	switch {
 	case event.Type != readyType || event.SchemaVersion != readySchema:
 		return Ready{}, "", fmt.Errorf("the Orca runtime printed a %q event at schema %d, not %s at schema %d", event.Type, event.SchemaVersion, readyType, readySchema)
 	case event.RuntimeID == "":
 		return Ready{}, "", errors.New("the Orca runtime's ready event names no runtimeId")
-	case err != nil || advertised.Host != net.JoinHostPort(Loopback, strconv.Itoa(port)):
-		return Ready{}, "", fmt.Errorf("the Orca runtime advertises %q, not the forwarded ws://%s:%d", event.AdvertisedEndpoint, Loopback, port)
+	case boundErr != nil || bound.Port() != strconv.Itoa(listen):
+		return Ready{}, "", fmt.Errorf("the Orca runtime listens at %q, not on port %d", event.BoundEndpoint, listen)
+	case err != nil || advertised.Host != net.JoinHostPort(Loopback, strconv.Itoa(advertise)):
+		return Ready{}, "", fmt.Errorf("the Orca runtime advertises %q, not the forwarded ws://%s:%d", event.AdvertisedEndpoint, Loopback, advertise)
 	case !event.Pairing.Available || event.Pairing.URL == "":
 		return Ready{}, "", errors.New("the Orca runtime's ready event offers no pairing")
 	}

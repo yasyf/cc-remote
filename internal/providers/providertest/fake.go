@@ -13,9 +13,11 @@ import (
 )
 
 type Fake struct {
-	Facts  providers.Traits
-	Handle func(id string, cmd []string, stdin []byte) providers.Result
-	Now    func() time.Time
+	Facts      providers.Traits
+	Handle     func(id string, cmd []string, stdin []byte) providers.Result
+	Now        func() time.Time
+	Compute    *providers.ComputeInstance
+	Initialize func(machine providers.Machine) error
 
 	mu       sync.Mutex
 	machines map[string]providers.Machine
@@ -40,7 +42,25 @@ func (f *Fake) Check(context.Context) error { return nil }
 
 func (f *Fake) ValidateSpec(providers.Spec) error { return nil }
 
-func (f *Fake) Create(_ context.Context, spec providers.Spec) (providers.Machine, error) {
+func (f *Fake) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	machine, err := f.allocate(spec)
+	if err != nil {
+		return providers.Machine{}, err
+	}
+	if spec.Allocated != nil {
+		if err := spec.Allocated(ctx, clone(machine)); err != nil {
+			return clone(machine), fmt.Errorf("fake %s: %w: allocated but not retained: %w", spec.Name, providers.ErrAmbiguous, err)
+		}
+	}
+	if f.Initialize != nil {
+		if err := f.Initialize(clone(machine)); err != nil {
+			return clone(machine), fmt.Errorf("fake %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
+		}
+	}
+	return clone(machine), nil
+}
+
+func (f *Fake) allocate(spec providers.Spec) (providers.Machine, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("create %s", spec.Name)
@@ -64,8 +84,13 @@ func (f *Fake) Create(_ context.Context, spec providers.Spec) (providers.Machine
 		CreatedAt: now().UTC(),
 		Labels:    maps.Clone(spec.Labels),
 	}
+	if f.Compute != nil {
+		compute := *f.Compute
+		compute.InstanceID, compute.CreatedAt = spec.Name, machine.CreatedAt
+		machine.Compute = &compute
+	}
 	f.machines[spec.Name] = machine
-	return clone(machine), nil
+	return machine, nil
 }
 
 func (f *Fake) lookup(id string) (providers.Machine, error) {
@@ -140,20 +165,24 @@ func (f *Fake) Exec(_ context.Context, id string, cmd []string, stdin io.Reader)
 	return handle(id, slices.Clone(cmd), input), nil
 }
 
-func (f *Fake) SSHTarget(_ context.Context, id string) (providers.Target, error) {
+func (f *Fake) Access(_ context.Context, id string) (providers.Access, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, err := f.lookup(id); err != nil {
-		return providers.Target{}, err
+	machine, err := f.lookup(id)
+	if err != nil {
+		return providers.Access{}, err
 	}
-	return providers.Target{
+	if machine.Compute != nil {
+		return providers.Access{Kind: providers.AccessCompute, Compute: *machine.Compute}, nil
+	}
+	return providers.Access{Kind: providers.AccessOpenSSH, SSH: providers.Target{
 		Host:          id,
 		Port:          22,
 		User:          "fake",
 		IdentityFile:  "/dev/null",
 		ProxyCommand:  "false",
 		HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyProxyTrusted},
-	}, nil
+	}}, nil
 }
 
 func (f *Fake) List(_ context.Context, labels map[string]string) ([]providers.Machine, error) {
@@ -170,5 +199,9 @@ func (f *Fake) List(_ context.Context, labels map[string]string) ([]providers.Ma
 
 func clone(machine providers.Machine) providers.Machine {
 	machine.Labels = maps.Clone(machine.Labels)
+	if machine.Compute != nil {
+		compute := *machine.Compute
+		machine.Compute = &compute
+	}
 	return machine
 }

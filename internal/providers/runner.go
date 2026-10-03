@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 type Command struct {
 	Name   string
 	Args   []string
+	Env    []string
 	Stdin  io.Reader
 	Stdout io.Writer
 }
@@ -32,6 +34,9 @@ type OSRunner struct{}
 func (OSRunner) Run(ctx context.Context, command Command) (Result, error) {
 	cmd := exec.CommandContext(ctx, command.Name, command.Args...)
 	cmd.WaitDelay = waitDelay
+	if len(command.Env) > 0 {
+		cmd.Env = append(os.Environ(), command.Env...)
+	}
 	cmd.Stdin = command.Stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

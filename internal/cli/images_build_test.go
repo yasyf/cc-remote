@@ -28,9 +28,11 @@ profile: lean
 state_dir: %s
 providers:
   namespace:
+    endpoint: https://compute.example.test
     platform: %q
+    exportPort: 18766
     volumeSizeGB: 125
-    idleTimeout: 30m
+    duration: 4h
     callTimeout: 60s
     readyTimeout: 10m
 workspace_dirs:

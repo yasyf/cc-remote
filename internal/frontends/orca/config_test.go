@@ -26,6 +26,7 @@ func TestSourceOf(t *testing.T) {
 		Provider: "sprites",
 		Profile:  "lean",
 		Profiles: map[string][]string{"lean": {"namespace", "sprites"}, "full": {"namespace"}, "bare": {"sprites"}},
+		Servers:  map[string]bool{"namespace": true},
 	}
 	if got := orca.SourceOf(cfg); !reflect.DeepEqual(got, want) {
 		t.Errorf("SourceOf() = %+v, want %+v", got, want)

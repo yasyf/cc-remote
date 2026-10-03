@@ -111,21 +111,17 @@ func TestOrcaTaskRoundTripsWithoutSecrets(t *testing.T) {
 		t.Errorf("loadTask of nothing = %v", err)
 	}
 	driver := orcaDriver{state: dir}
-	control, err := state.NewOrcaControl()
+	result := &workspace.Result{Name: "task-a", Provider: "sprites", Profile: "lean", Machine: "task-a", ProjectRoot: "/home/agent/app", SSH: &workspace.SSH{Config: "/state/ssh/task-a.ssh"}}
+	task, err := driver.task(result, orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Remove(filepath.Dir(control)) })
-	result := &workspace.Result{Name: "task-a", Provider: "sprites", Profile: "lean", Machine: "task-a", ProjectRoot: "/home/agent/app", SSH: workspace.SSH{Config: "/state/ssh/task-a.ssh"}}
-	task, err := driver.task(result, orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}, control)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task.Port == 0 || task.Service != orca.RuntimeService || task.Environment != "task-a" || task.Forward.Control != control {
+	t.Cleanup(func() { _ = os.Remove(filepath.Dir(task.Forward.Control)) })
+	if task.Port == 0 || task.Service != orca.RuntimeService || task.Environment != "task-a" || task.Gateway != nil || state.EnsureOrcaControl(task.Forward.Control) != nil || task.Forward.Config != "/state/ssh/task-a.ssh" {
 		t.Errorf("task = %+v", task)
 	}
 	loaded, err := loadTask(dir, "task-a")
-	if err != nil || loaded.Port != task.Port || loaded.Forward != task.Forward || loaded.Agent.Model != "m" {
+	if err != nil || loaded.Port != task.Port || *loaded.Forward != *task.Forward || loaded.Gateway != nil || loaded.Agent.Model != "m" {
 		t.Errorf("loadTask = %+v, %v", loaded, err)
 	}
 	info, err := os.Stat(dir.Orca("task-a"))
@@ -144,7 +140,7 @@ func TestKeyCleanupHasItsOwnDeadlineAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	start := time.Now()
-	err := (orcaTunnel{Host: "task-a"}).dropKey(ctx, "/home/agent/.cc-remote/orca/key.test")
+	err := (&orcaTask{Workspace: "task-a", Forward: &orcaTunnel{Host: "task-a"}}).dropKey(ctx, "/home/agent/.cc-remote/orca/key.test")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("dropKey = %v, want its own deadline", err)
 	}
@@ -177,7 +173,7 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 			if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "absent", Profile: "lean", Environment: "task-a", RuntimeID: "rt-1", Port: 7001, Forward: orcaTunnel{Host: "task-a", Config: "/recorded/config", Control: control, Log: dir.OrcaForwardLog("task-a")}}
+			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "absent", Profile: "lean", Environment: "task-a", RuntimeID: "rt-1", Port: 7001, Forward: &orcaTunnel{Host: "task-a", Config: "/recorded/config", Control: control, Log: dir.OrcaForwardLog("task-a")}}
 			if err := state.Save(dir.Orca("task-a"), task); err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +193,7 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 				t.Fatalf("reconnect = %v, calls = %d", err, calls)
 			}
 			loaded, err := loadTask(dir, "task-a")
-			if err != nil || loaded.RuntimeID != "rt-1" || loaded.Forward != task.Forward {
+			if err != nil || loaded.RuntimeID != "rt-1" || *loaded.Forward != *task.Forward {
 				t.Errorf("recorded task changed: %+v, %v", loaded, err)
 			}
 			if info, err := os.Stat(filepath.Dir(control)); err != nil || info.Mode().Perm() != 0o700 {
@@ -329,7 +325,7 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 			task := &orcaTask{
 				SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "fake", Profile: "lean", Machine: "task-a", ProjectRoot: root,
 				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
-				Forward: orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
+				Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
 			}
 			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), "task-a")
 			if err == nil && tt.create {

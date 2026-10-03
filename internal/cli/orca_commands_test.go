@@ -17,6 +17,27 @@ import (
 
 var exampleConfig = filepath.Join("..", "..", "examples", "config.yaml")
 
+const (
+	examplePlaceholder = "<registry/repository@sha256:digest>"
+	syntheticImage     = "registry.example.test/agent@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+)
+
+func pinnedExample(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(exampleConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(examplePlaceholder)) {
+		t.Fatalf("%s no longer carries the image placeholder %s", exampleConfig, examplePlaceholder)
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, bytes.ReplaceAll(raw, []byte(examplePlaceholder), []byte(syntheticImage)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func runCLI(t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := execCLI(args...)
@@ -45,9 +66,11 @@ providers:
   sprites:
     org: example
   namespace:
+    endpoint: https://compute.example.test
     platform: linux/amd64
+    exportPort: 18766
     volumeSizeGB: 125
-    idleTimeout: 30m
+    duration: 4h
     callTimeout: 60s
     readyTimeout: 10m
 workspace_dirs:
@@ -66,8 +89,16 @@ func writeConfig(t *testing.T, profiles string) string {
 	return path
 }
 
+func TestTheExampleImagePlaceholderIsNotAPin(t *testing.T) {
+	_, err := execCLI("orca", "recipes", "--config", exampleConfig)
+	if want := `namespace image "` + examplePlaceholder + `" must be pinned by its @sha256 digest`; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("recipes from the checked-in example = %v, want %q", err, want)
+	}
+}
+
 func TestOrcaRecipes(t *testing.T) {
-	cfg, err := config.Load(exampleConfig)
+	example := pinnedExample(t)
+	cfg, err := config.Load(example)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,18 +106,18 @@ func TestOrcaRecipes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lifecycle := orca.Lifecycle{Binary: "cc-remote", Config: exampleConfig}
+	lifecycle := orca.Lifecycle{Binary: "cc-remote", Config: example}
 	want, err := orca.MergeYAML(nil, lifecycle, recipes)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Run("prints the environmentRecipes block", func(t *testing.T) {
-		if got := runCLI(t, "orca", "recipes", "--config", exampleConfig); got != string(want) {
+		if got := runCLI(t, "orca", "recipes", "--config", example); got != string(want) {
 			t.Errorf("stdout =\n%s\nwant\n%s", got, want)
 		}
 	})
 	t.Run("pins the config it resolved from the environment", func(t *testing.T) {
-		raw, err := os.ReadFile(exampleConfig)
+		raw, err := os.ReadFile(example)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -113,11 +144,11 @@ func TestOrcaRecipes(t *testing.T) {
 			"./tools/cc-remote/bin/cc-remote": "./tools/cc-remote/bin/cc-remote create",
 			"./tools/my tools/cc-remote":      `'./tools/my tools/cc-remote' create`,
 		} {
-			entries, err := orca.ParseYAML([]byte(runCLI(t, "orca", "recipes", "--config", exampleConfig, "--binary", binary)))
+			entries, err := orca.ParseYAML([]byte(runCLI(t, "orca", "recipes", "--config", example, "--binary", binary)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := create + " --provider sprites --profile lean --connection ssh --config " + exampleConfig
+			want := create + " --provider sprites --profile lean --connection ssh --config " + example
 			if len(entries) == 0 || entries[0].Create != want {
 				t.Errorf("--binary %q: first create = %+v, want %q", binary, entries, want)
 			}
@@ -128,7 +159,7 @@ func TestOrcaRecipes(t *testing.T) {
 		if err := os.WriteFile(path, []byte("setup: ./setup.sh\nenvironmentRecipes: []\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if got := runCLI(t, "orca", "recipes", "--config", exampleConfig, "--orca-yaml", path); got != "" {
+		if got := runCLI(t, "orca", "recipes", "--config", example, "--orca-yaml", path); got != "" {
 			t.Errorf("stdout = %q, want nothing", got)
 		}
 		got, err := os.ReadFile(path)
@@ -141,7 +172,7 @@ func TestOrcaRecipes(t *testing.T) {
 	})
 	t.Run("writes the plugin", func(t *testing.T) {
 		dir := t.TempDir()
-		runCLI(t, "orca", "recipes", "--config", exampleConfig, "--plugin", dir)
+		runCLI(t, "orca", "recipes", "--config", example, "--plugin", dir)
 		plugin, err := orca.PluginOf(cfg, version.Version)
 		if err != nil {
 			t.Fatal(err)
@@ -179,14 +210,20 @@ func TestOrcaRecipesFromProfiles(t *testing.T) {
 			profiles: `  lean:
     machine: { sprites: {} }
   full:
-    machine: { namespace: { image: cc-remote-linux, size: l } }`,
-			want: []string{"sprites-lean-ssh", "namespace-full-ssh"},
+    machine: { namespace: { image: "registry.example.test/agent@sha256:0000000000000000000000000000000000000000000000000000000000000000", size: 8x16 } }`,
+			want: []string{"sprites-lean-ssh", "namespace-full-server"},
 		},
 		{
 			name: "a configured Namespace machine without an image is an error",
 			profiles: `  lean:
-    machine: { sprites: {}, namespace: { size: l } }`,
+    machine: { sprites: {}, namespace: { size: 8x16 } }`,
 			wantErr: "profile lean on namespace: a namespace spec needs an image",
+		},
+		{
+			name: "an unpinned Namespace image is an error",
+			profiles: `  lean:
+    machine: { sprites: {}, namespace: { image: cc-remote-linux, size: 8x16 } }`,
+			wantErr: `profile lean on namespace: namespace image "cc-remote-linux" must be pinned by its @sha256 digest`,
 		},
 	}
 	for _, tt := range tests {

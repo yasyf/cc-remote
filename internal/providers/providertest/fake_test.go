@@ -29,6 +29,28 @@ func TestFakeSatisfiesTheContract(t *testing.T) {
 	})
 }
 
+func TestFakeWithComputeAccessSatisfiesTheContract(t *testing.T) {
+	Run(t, func(t *testing.T) Harness {
+		return Harness{
+			Provider: &Fake{
+				Facts:   providers.Traits{TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid},
+				Compute: &providers.ComputeInstance{Container: "agent", Endpoint: "https://compute.test", ContainerPort: 18766},
+				Handle: func(_ string, cmd []string, stdin []byte) providers.Result {
+					result, err := providers.OSRunner{}.Run(t.Context(), providers.Command{Name: cmd[0], Args: cmd[1:], Stdin: bytes.NewReader(stdin)})
+					if err != nil {
+						t.Fatalf("running %v: %v", cmd, err)
+					}
+					return result
+				},
+			},
+			Spec: func(name string, labels map[string]string) providers.Spec {
+				return providers.Spec{Name: name, Profile: "agents", Labels: labels}
+			},
+			TracksState: true,
+		}
+	})
+}
+
 func TestFakeRecordsCalls(t *testing.T) {
 	fake := &Fake{}
 	ctx := t.Context()

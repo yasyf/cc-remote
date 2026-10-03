@@ -38,7 +38,15 @@ func Alias(id string) string { return id + ".sprite.cc-remote" }
 
 func (p *Provider) helperPath() string { return filepath.Join(p.StateDir, "bin", "cc-remote") }
 
-func (p *Provider) SSHTarget(ctx context.Context, id string) (providers.Target, error) {
+func (p *Provider) Access(ctx context.Context, id string) (providers.Access, error) {
+	target, err := p.target(ctx, id)
+	if err != nil {
+		return providers.Access{}, err
+	}
+	return providers.Access{Kind: providers.AccessOpenSSH, SSH: target}, nil
+}
+
+func (p *Provider) target(ctx context.Context, id string) (providers.Target, error) {
 	if _, err := p.Get(ctx, id); err != nil {
 		return providers.Target{}, err
 	}

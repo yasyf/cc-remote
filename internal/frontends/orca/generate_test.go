@@ -12,6 +12,7 @@ import (
 var defaultSprites = orca.Recipe{
 	Provider:    "sprites",
 	Profile:     "agents",
+	Connection:  orca.ConnectionSSH,
 	Name:        "Sprites agents over SSH (default)",
 	Description: "Default: a Sprite over SSH.",
 }
@@ -22,6 +23,7 @@ func defaultRecipes(t *testing.T) []orca.Recipe {
 		Provider: "sprites",
 		Profile:  "agents",
 		Profiles: map[string][]string{"agents": {"namespace", "sprites"}, "stack": {"namespace"}},
+		Servers:  map[string]bool{"namespace": true},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -37,8 +39,8 @@ func TestRecipes(t *testing.T) {
 	}
 	want := []string{
 		"sprites-agents-ssh | Sprites agents over SSH (default) | The default. A Sprites machine with the agents profile, reached over SSH.",
-		"namespace-agents-ssh | Namespace agents over SSH | A Namespace machine with the agents profile, reached over SSH.",
-		"namespace-stack-ssh | Namespace stack over SSH | A Namespace machine with the stack profile, reached over SSH.",
+		"namespace-agents-server | Namespace agents through its Orca server | A Namespace machine with the agents profile, paired with its own Orca server.",
+		"namespace-stack-server | Namespace stack through its Orca server | A Namespace machine with the stack profile, paired with its own Orca server.",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("Recipes() =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -79,7 +81,7 @@ func TestRecipeID(t *testing.T) {
 		want   string
 	}{
 		{"sprites ssh", defaultSprites, "sprites-agents-ssh"},
-		{"namespace stack", orca.Recipe{Provider: "namespace", Profile: "stack"}, "namespace-stack-ssh"},
+		{"namespace stack", orca.Recipe{Provider: "namespace", Profile: "stack", Connection: orca.ConnectionServer}, "namespace-stack-server"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -134,12 +136,13 @@ func TestEntriesRejectsInvalidConfig(t *testing.T) {
 	}{
 		{"no recipes", orca.DefaultLifecycle(), nil, "no recipes configured"},
 		{"duplicate id", orca.DefaultLifecycle(), []orca.Recipe{defaultSprites, defaultSprites}, "recipe sprites-agents-ssh is configured twice"},
-		{"shell metacharacter in profile", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "agents;rm", Name: "x"}}, `profile "agents;rm"`},
-		{"empty name", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "agents"}}, "name is empty"},
+		{"shell metacharacter in profile", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "agents;rm", Connection: orca.ConnectionSSH, Name: "x"}}, `profile "agents;rm"`},
+		{"empty name", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "agents", Connection: orca.ConnectionSSH}}, "name is empty"},
+		{"no connection", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "agents", Name: "x"}}, `recipe sprites-agents-: connection "" must be ssh or server`},
 		{"control character in config", orca.Lifecycle{Binary: "cc-remote", Config: "config\n.yaml"}, []orca.Recipe{defaultSprites}, "contains a control character"},
 		{"empty binary", orca.Lifecycle{}, []orca.Recipe{defaultSprites}, "lifecycle binary is empty"},
-		{"uppercase provider", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "Sprites", Profile: "agents", Name: "x"}}, `provider "Sprites" must match`},
-		{"path traversal in profile", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "../x", Name: "x"}}, `profile "../x" must match`},
+		{"uppercase provider", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "Sprites", Profile: "agents", Connection: orca.ConnectionSSH, Name: "x"}}, `provider "Sprites" must match`},
+		{"path traversal in profile", orca.DefaultLifecycle(), []orca.Recipe{{Provider: "sprites", Profile: "../x", Connection: orca.ConnectionSSH, Name: "x"}}, `profile "../x" must match`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,7 +155,7 @@ func TestEntriesRejectsInvalidConfig(t *testing.T) {
 }
 
 func TestPluginFiles(t *testing.T) {
-	stack := orca.Recipe{Provider: "namespace", Profile: "stack", Name: "Namespace stack over SSH"}
+	stack := orca.Recipe{Provider: "namespace", Profile: "stack", Connection: orca.ConnectionServer, Name: "Namespace stack through its Orca server"}
 	plugin := orca.Plugin{
 		ID:          "cc-remote-recipes",
 		Publisher:   "example",
@@ -169,7 +172,7 @@ func TestPluginFiles(t *testing.T) {
 	for _, f := range files {
 		paths = append(paths, f.Path)
 	}
-	if got, want := strings.Join(paths, ","), "orca-plugin.json,recipes/sprites-agents-ssh.json,recipes/namespace-stack-ssh.json"; got != want {
+	if got, want := strings.Join(paths, ","), "orca-plugin.json,recipes/sprites-agents-ssh.json,recipes/namespace-stack-server.json"; got != want {
 		t.Fatalf("paths = %s, want %s", got, want)
 	}
 	wantManifest := `{
@@ -190,7 +193,7 @@ func TestPluginFiles(t *testing.T) {
         "path": "recipes/sprites-agents-ssh.json"
       },
       {
-        "path": "recipes/namespace-stack-ssh.json"
+        "path": "recipes/namespace-stack-server.json"
       }
     ]
   },
@@ -202,13 +205,13 @@ func TestPluginFiles(t *testing.T) {
 	}
 	wantRecipe := `{
   "schemaVersion": 1,
-  "id": "namespace-stack-ssh",
-  "name": "Namespace stack over SSH",
+  "id": "namespace-stack-server",
+  "name": "Namespace stack through its Orca server",
   "checkoutMode": "provisioned-root",
-  "create": "cc-remote create --provider namespace --profile stack --connection ssh",
-  "suspend": "cc-remote suspend --provider namespace --profile stack --connection ssh",
-  "resume": "cc-remote resume --provider namespace --profile stack --connection ssh",
-  "destroy": "cc-remote destroy --provider namespace --profile stack --connection ssh"
+  "create": "cc-remote create --provider namespace --profile stack --connection server",
+  "suspend": "cc-remote suspend --provider namespace --profile stack --connection server",
+  "resume": "cc-remote resume --provider namespace --profile stack --connection server",
+  "destroy": "cc-remote destroy --provider namespace --profile stack --connection server"
 }
 `
 	if got := string(files[2].Data); got != wantRecipe {

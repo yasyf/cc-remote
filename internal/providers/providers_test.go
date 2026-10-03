@@ -187,6 +187,28 @@ func TestOSRunner(t *testing.T) {
 	}
 }
 
+func TestOSRunnerScopesItsEnvironmentToTheChild(t *testing.T) {
+	t.Setenv("CC_REMOTE_SCOPED", "ambient")
+	t.Setenv("CC_REMOTE_INHERITED", "kept")
+	show := providers.Command{Name: "sh", Args: []string{"-c", `printf '%s|%s' "$CC_REMOTE_SCOPED" "$CC_REMOTE_INHERITED"`}}
+	for _, tt := range []struct {
+		env  []string
+		want string
+	}{
+		{nil, "ambient|kept"},
+		{[]string{"CC_REMOTE_SCOPED=child"}, "child|kept"},
+	} {
+		show.Env = tt.env
+		result, err := providers.OSRunner{}.Run(t.Context(), show)
+		if err != nil || string(result.Stdout) != tt.want {
+			t.Errorf("Run with env %q = %q, %v; want %q", tt.env, result.Stdout, err, tt.want)
+		}
+	}
+	if got := os.Getenv("CC_REMOTE_SCOPED"); got != "ambient" {
+		t.Errorf("the controller's own environment changed to %q", got)
+	}
+}
+
 func TestOutput(t *testing.T) {
 	out, err := providers.Output(t.Context(), providers.OSRunner{}, providers.Command{Name: "printf", Args: []string{"ok"}})
 	if err != nil || string(out) != "ok" {

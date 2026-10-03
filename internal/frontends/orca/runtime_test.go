@@ -19,7 +19,7 @@ func readyLine(advertised string) string {
 }
 
 func TestParseReady(t *testing.T) {
-	ready, pairing, err := orca.ParseReady([]byte(readyLine("ws://127.0.0.1:7001")), 7001)
+	ready, pairing, err := orca.ParseReady([]byte(readyLine("ws://127.0.0.1:7001")), 7001, 7001)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestParseReady(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := orca.ParseReady([]byte(tt.line), 7001)
+			_, _, err := orca.ParseReady([]byte(tt.line), 7001, 7001)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("ParseReady error = %v, want %q", err, tt.want)
 			}
@@ -47,6 +47,36 @@ func TestParseReady(t *testing.T) {
 				t.Errorf("the error leaks the pairing data: %v", err)
 			}
 		})
+	}
+}
+
+func TestParseReadyChecksTheListenerAndTheAdvertisedPortApart(t *testing.T) {
+	line := strings.Replace(readyLine("ws://127.0.0.1:7001"), `"boundEndpoint":"ws://0.0.0.0:7001"`, `"boundEndpoint":"ws://0.0.0.0:18766"`, 1)
+	ready, pairing, err := orca.ParseReady([]byte(line), 18766, 7001)
+	if err != nil || ready.BoundEndpoint != "ws://0.0.0.0:18766" || ready.AdvertisedEndpoint != "ws://127.0.0.1:7001" || pairing != pairingURL {
+		t.Errorf("ParseReady = %+v, %q, %v", ready, pairing, err)
+	}
+	if _, _, err := orca.ParseReady([]byte(line), 7001, 7001); err == nil || err.Error() != `the Orca runtime listens at "ws://0.0.0.0:18766", not on port 7001` {
+		t.Errorf("ParseReady of a runtime on another port = %v", err)
+	}
+	if _, _, err := orca.ParseReady([]byte(line), 18766, 18766); err == nil || !strings.Contains(err.Error(), "not the forwarded ws://127.0.0.1:18766") {
+		t.Errorf("ParseReady advertising another loopback port = %v", err)
+	}
+}
+
+func TestProbeScriptReadsTheRunningRuntimeWithoutStartingOne(t *testing.T) {
+	if out, err := exec.Command("sh", "-n", "-c", orca.ProbeScript).CombinedOutput(); err != nil {
+		t.Fatalf("probe script does not parse: %v: %s", err, out)
+	}
+	for _, launch := range []string{"serve.sh", "setsid", "services create", "nohup", " serve "} {
+		if strings.Contains(orca.ProbeScript, launch) {
+			t.Errorf("the probe script carries %q, which could start a runtime", launch)
+		}
+	}
+	for _, read := range []string{"flock -n 9", "exit 3", `grep '"type":"orca_server_ready"' serve.json | tail -n 1`} {
+		if !strings.Contains(orca.ProbeScript, read) {
+			t.Errorf("the probe script lacks %q", read)
+		}
 	}
 }
 
