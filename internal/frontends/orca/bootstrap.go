@@ -1,6 +1,7 @@
 package orca
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type Gate struct {
 type Startup struct {
 	Gates []Gate
 	Ready *regexp.Regexp
+	Hooks *HookReview
 }
 
 type UnknownScreenError struct {
@@ -69,12 +71,23 @@ func (e UnknownScreenError) Unwrap() error { return e.Cause }
 func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, trusted bool, p Poll) ([]string, error) {
 	steps := []string{}
 	var last Screen
+	pending := -1
 	_, err := poll(ctx, p, func(ctx context.Context) (struct{}, bool, error) {
 		screen, err := r.Screen(ctx, handle)
 		if err != nil {
 			return struct{}{}, false, err
 		}
 		last = screen
+		if startup.Hooks != nil {
+			count, found, err := reviewPrompt(screen.Tail)
+			if err != nil {
+				return struct{}{}, false, err
+			}
+			if found {
+				pending = count
+				return struct{}{}, true, completeFrame(screen)
+			}
+		}
 		gate, found := startup.gate(screen.Tail)
 		switch {
 		case found && gate.Trust && !trusted:
@@ -88,13 +101,24 @@ func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, t
 		case startup.Ready != nil && !startup.Ready.MatchString(screenText(screen.Tail)):
 			return struct{}{}, false, nil
 		}
-		_, err = r.WaitIdle(ctx, handle, idleTimeout)
+		wait, err := r.WaitIdle(ctx, handle, idleTimeout)
+		if err != nil && startup.Hooks != nil && string(bytes.TrimSpace(wait.BlockedReason)) == reviewBlocked {
+			return struct{}{}, false, nil
+		}
 		return struct{}{}, err == nil, err
 	})
 	if errors.Is(err, context.DeadlineExceeded) {
 		return steps, UnknownScreenError{Steps: steps, Screen: Redact(last.Tail), Cause: err}
 	}
-	return steps, err
+	if err != nil || pending < 0 {
+		return steps, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.Timeout)
+	defer cancel()
+	if err := r.reviewHooks(ctx, handle, pending, *startup.Hooks, p); err != nil {
+		return steps, fmt.Errorf("hooks: %w", err)
+	}
+	return append(steps, "hooks"), nil
 }
 
 func (r Remote) answer(ctx context.Context, handle string, gate Gate, screen Screen, p Poll) error {

@@ -33,6 +33,7 @@ const (
 
 var (
 	agentValue = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	fableModel = regexp.MustCompile(`(?i)(^|[-_.])fable([-_.0-9]|$)`)
 	keyDir     = regexp.MustCompile(`^/[A-Za-z0-9._/-]+/\.cc-remote/orca/key\.[A-Za-z0-9]+$`)
 )
 
@@ -54,6 +55,7 @@ type Agent struct {
 	Kind   string   `json:"kind"`
 	Model  string   `json:"model"`
 	Effort string   `json:"effort"`
+	Tier   string   `json:"serviceTier,omitempty"`
 	MCP    []string `json:"mcp,omitempty"`
 }
 
@@ -172,12 +174,38 @@ func (a Agent) Validate() error {
 	if !agentValue.MatchString(a.Model) || !agentValue.MatchString(a.Effort) {
 		return fmt.Errorf("model %q and effort %q must both be set to the worker's exact model and effort names", a.Model, a.Effort)
 	}
+	if fableModel.MatchString(a.Model) {
+		return fmt.Errorf("model %q is Fable, and Fable requires an explicit local choice; a remote worker never runs it", a.Model)
+	}
+	if a.Tier != "" && a.Kind != AgentCodex {
+		return fmt.Errorf("--service-tier is a codex setting; %s takes none", a.Kind)
+	}
+	if a.Tier != "" && !agentValue.MatchString(a.Tier) {
+		return fmt.Errorf("--service-tier %q must be the exact tier name, such as fast", a.Tier)
+	}
 	if a.Kind == AgentCodex && len(a.MCP) > 1 {
 		return errors.New("codex takes one --mcp-config, the TOML inline table that becomes its whole mcp_servers")
 	}
 	for _, server := range a.MCP {
 		if server == "" || strings.HasPrefix(server, "-") {
 			return fmt.Errorf("--mcp-config %q must be a config, not empty or a flag", server)
+		}
+	}
+	return nil
+}
+
+func (a Agent) InlineMCP() error {
+	form := "JSON object"
+	if a.Kind == AgentCodex {
+		form = "TOML table"
+	}
+	for i, server := range a.MCP {
+		inline := strings.HasPrefix(server, "{") && strings.HasSuffix(server, "}")
+		if a.Kind == AgentClaude {
+			inline = inline && json.Valid([]byte(server))
+		}
+		if !inline {
+			return fmt.Errorf("--mcp-config %d is not an inline %s; a file path would name a file on this machine, not the worker's", i+1, form)
 		}
 	}
 	return nil
@@ -210,7 +238,7 @@ func (a Agent) Argv() []string {
 		if len(a.MCP) == 1 {
 			servers = a.MCP[0]
 		}
-		return []string{
+		argv := []string{
 			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", a.Model,
 			"-c", `model_reasoning_effort="` + a.Effort + `"`,
 			"-c", `model_provider="cc_remote_openai"`,
@@ -218,6 +246,10 @@ func (a Agent) Argv() []string {
 			"-c", `cli_auth_credentials_store="ephemeral"`,
 			"-c", "mcp_servers=" + servers,
 		}
+		if a.Tier != "" {
+			argv = append(argv, "-c", `service_tier="`+a.Tier+`"`)
+		}
+		return argv
 	}
 	servers := a.MCP
 	if len(servers) == 0 {
