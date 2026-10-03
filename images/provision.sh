@@ -203,8 +203,8 @@ provision_packages() {
     {{stage .}}
 {{- end}}
 {{- end}}
-    apt-get install -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives="$build_dir/debs/" "${resident[@]}" "${staged[@]}" > /dev/null
-    apt-get install -y -qq --no-install-recommends "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
+    apt-get install -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives="$build_dir/debs/" "${resident[@]}" "${staged[@]}" > /dev/null
+    apt-get install -y -qq --no-install-recommends --no-upgrade "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
   fi
 {{- else}}
 
