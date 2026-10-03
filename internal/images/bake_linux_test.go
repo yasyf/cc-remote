@@ -137,6 +137,7 @@ func TestFinalizeExcludesInstallerStateAndKeepsReusableContent(t *testing.T) {
 		".claude/debug/latest":                                 identity,
 		".claude/ide/1.lock":                                   "{}",
 		".claude/history.jsonl":                                identity,
+		".claude/backups/.claude.json.backup.1790998918598":    `{"userID":"` + identity + `","anonymousId":"` + identity + `"}`,
 		".claude/plugins/data/hook/state.json":                 identity,
 		".claude/plugins/cache/market/hook/1.0.0/.in_use":      identity,
 		".claude/plugins/cache/market/hook/0.9.0/.orphaned_at": "1",
@@ -184,8 +185,22 @@ func TestFinalizeExcludesInstallerStateAndKeepsReusableContent(t *testing.T) {
 	for rel, data := range kept {
 		writePluginTestFile(t, filepath.Join(home, rel), []byte(data), 0o644)
 	}
+	if err := os.Symlink(filepath.Join(home, ".daemonkit/cache"), filepath.Join(home, ".claude/backups/native-cache")); err != nil {
+		t.Fatal(err)
+	}
 	listen(t, filepath.Join(home, ".daemonkit/a/com.example.hook/sv.sock"))
 	listen(t, filepath.Join(home, ".local/state/agent.sock"))
+	roots := []string{
+		".claude.json", ".claude/backups", ".claude/.credentials.json", ".claude/projects", ".claude/todos", ".claude/shell-snapshots",
+		".claude/statsig", ".claude/session-env", ".claude/debug", ".claude/ide", ".claude/history.jsonl", ".claude/plugins/data",
+		".codex/auth.json", ".codex/sessions", ".codex/log", ".codex/history.jsonl", ".daemonkit/a", ".cc-remote/ready",
+		".cc-remote/services", ".cc-remote/start.sh", ".cc-remote/supervise.py", ".cc-remote/orca", ".config/gh/hosts.yml", ".git-credentials",
+	}
+	for _, rel := range roots {
+		if _, err := os.Lstat(filepath.Join(home, rel)); err != nil {
+			t.Fatalf("the fixture lacks %s: %v", rel, err)
+		}
+	}
 	finalize := writeFinalize(t, t.TempDir())
 	for range 2 {
 		if out, err := exec.Command("bash", finalize, "home", home).CombinedOutput(); err != nil {
@@ -195,6 +210,11 @@ func TestFinalizeExcludesInstallerStateAndKeepsReusableContent(t *testing.T) {
 	for rel := range excluded {
 		if _, err := os.Lstat(filepath.Join(home, rel)); !os.IsNotExist(err) {
 			t.Errorf("finalization kept %s: %v", rel, err)
+		}
+	}
+	for _, rel := range roots {
+		if _, err := os.Lstat(filepath.Join(home, rel)); !os.IsNotExist(err) {
+			t.Errorf("finalization kept the excluded path %s: %v", rel, err)
 		}
 	}
 	for rel, want := range kept {

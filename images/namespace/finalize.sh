@@ -22,6 +22,7 @@ finalize_home() {
   local -A kept
   excluded=(
     "$home/.claude.json"
+    "$home/.claude/backups"
     "$home/.claude/.credentials.json"
     "$home/.claude/projects"
     "$home/.claude/todos"
