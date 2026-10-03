@@ -333,14 +333,14 @@ type flaky struct {
 	onSSH       func()
 }
 
-func (f *flaky) SSHTarget(ctx context.Context, id string) (providers.Target, error) {
+func (f *flaky) Access(ctx context.Context, id string) (providers.Access, error) {
 	if f.unreachable.Load() {
-		return providers.Target{}, errors.New("no route to " + id)
+		return providers.Access{}, errors.New("no route to " + id)
 	}
 	if f.onSSH != nil {
 		f.onSSH()
 	}
-	return f.Provider.SSHTarget(ctx, id)
+	return f.Provider.Access(ctx, id)
 }
 
 type harness struct {
@@ -1149,8 +1149,11 @@ func TestAnExpiredDirectPayloadAbandonsTheMachine(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "fetch payload "+sha+": ") || !strings.Contains(err.Error(), "HTTP 403") {
 		t.Fatalf("Create = %v", err)
 	}
-	if !expired.ran() || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", packagesPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
-		t.Errorf("an expired download ran %q", h.machine.scripts["ws-1"])
+	if !expired.ran() || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", loaderPhase) != 0 || h.machine.ran("ws-1", publishes) != 0 || h.machine.ready["ws-1"] != "" {
+		t.Errorf("an expired download mounted, installed, loaded, or published: %q", h.machine.scripts["ws-1"])
+	}
+	if _, err := os.Stat(h.session.State.SSH("ws-1")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the failed create delivered access: %v", err)
 	}
 	if !strings.Contains(h.calls(), "destroy ws-1") {
 		t.Errorf("the machine survived the failed download: %s", h.calls())
@@ -1924,7 +1927,7 @@ func TestDestroyKeepsAnUnlabelledMachineAndItsRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.fake.Now = nil
-			h.session.Provider = &createFailed{Provider: h.provider}
+			h.session.Provider = &createFailed{Provider: h.provider, known: "ws-1"}
 			if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "run destroy ws-1") {
 				t.Fatalf("err = %v", err)
 			}
@@ -1953,10 +1956,43 @@ func TestDestroyKeepsAnUnlabelledMachineAndItsRecord(t *testing.T) {
 
 type createFailed struct {
 	providers.Provider
+	known string
 }
 
 func (c *createFailed) Create(context.Context, providers.Spec) (providers.Machine, error) {
-	return providers.Machine{}, errors.New("the provider api timed out before answering")
+	if c.known == "" {
+		return providers.Machine{}, errors.New("the provider api timed out before answering")
+	}
+	return providers.Machine{ID: c.known, Provider: "fake", State: providers.StateUnknown}, errors.New("the provider api timed out after naming the machine")
+}
+
+func TestAnUnknownAllocationIsNeverDestroyedByName(t *testing.T) {
+	h := newHarness(t, false)
+	ctx := context.Background()
+	if _, err := h.fake.Create(ctx, providers.Spec{Name: "ws-1", Labels: map[string]string{LabelWorkspace: "ws-1", LabelProfile: "lean"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.session.Provider = &createFailed{Provider: h.provider}
+	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "the provider returned no machine ID for ws-1, so its record is kept unverified and nothing is destroyed by name") {
+		t.Fatalf("Create = %v", err)
+	}
+	record, found := h.record("ws-1")
+	if !found || !record.Unverified || record.Machine != "" {
+		t.Fatalf("record = %+v, %v; want it unverified with no machine ID", record, found)
+	}
+	h.session.Provider = h.provider
+	if err := h.session.Destroy(ctx, "ws-1"); err == nil || !strings.Contains(err.Error(), "never learned a machine ID") {
+		t.Fatalf("Destroy = %v, want the refusal to destroy by name", err)
+	}
+	if strings.Contains(h.calls(), "destroy") {
+		t.Errorf("destroy reached the provider by name: %s", h.calls())
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); err != nil {
+		t.Error("a machine of the same name was destroyed")
+	}
+	if _, found := h.record("ws-1"); !found {
+		t.Error("the refused destroy released the record")
+	}
 }
 
 func TestDestroyReportsAMachineThatSurvivesItsOwnDestroy(t *testing.T) {
@@ -2036,10 +2072,11 @@ type createdThenFailed struct {
 }
 
 func (c *createdThenFailed) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
-	if _, err := c.Provider.Create(ctx, spec); err != nil {
-		return providers.Machine{}, err
+	machine, err := c.Provider.Create(ctx, spec)
+	if err != nil {
+		return machine, err
 	}
-	return providers.Machine{}, errors.New("configure-ssh: the provider api timed out")
+	return machine, errors.New("configure-ssh: the provider api timed out")
 }
 
 func TestConnectWritesTheSSHFragmentOrcaResolvesByTheWorkspaceName(t *testing.T) {
@@ -2086,15 +2123,15 @@ type pinnedSSH struct {
 	identity   string
 }
 
-func (p *pinnedSSH) SSHTarget(_ context.Context, id string) (providers.Target, error) {
-	return providers.Target{
+func (p *pinnedSSH) Access(_ context.Context, id string) (providers.Access, error) {
+	return providers.Access{Kind: providers.AccessOpenSSH, SSH: providers.Target{
 		Host:          id + ".internal",
 		Port:          2222,
 		User:          "sprite",
 		IdentityFile:  p.identity,
 		ProxyCommand:  "cc-remote proxy -- " + id,
 		HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyPinned, Alias: id + ".sprite.cc-remote", KnownHostsFile: p.knownHosts},
-	}, nil
+	}}, nil
 }
 
 func TestAFreshCreateRefusesAnAlreadyEnrolledImage(t *testing.T) {
@@ -2186,8 +2223,12 @@ func TestOpenRefusesAPayloadWithoutAptPayload(t *testing.T) {
 	}
 }
 
-func TestTheResidentPackagesWaitForThePayloadToMount(t *testing.T) {
-	tests := []struct {
+func payloadHarnesses() []struct {
+	name     string
+	harness  func(*testing.T) *harness
+	transfer string
+} {
+	return []struct {
 		name     string
 		harness  func(*testing.T) *harness
 		transfer string
@@ -2198,52 +2239,103 @@ func TestTheResidentPackagesWaitForThePayloadToMount(t *testing.T) {
 			return h
 		}, transfer: fetchesPayload},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := tt.harness(t)
-			var creating sync.WaitGroup
-			t.Cleanup(creating.Wait)
-			streaming, mounting := h.machine.hold(t, tt.transfer), h.machine.hold(t, payloadPhase)
-			packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
-			checkingOut := h.machine.hold(t, checkout)
-			created := make(chan error, 1)
-			creating.Go(func() {
-				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
-				created <- err
+}
+
+func TestTheResidentPackagesRunBesideThePayloadMount(t *testing.T) {
+	for _, tt := range payloadHarnesses() {
+		for _, first := range []string{packagesPhase, installs} {
+			t.Run(tt.name+" with "+first+" finishing first", func(t *testing.T) {
+				h := tt.harness(t)
+				var creating sync.WaitGroup
+				t.Cleanup(creating.Wait)
+				streaming, mounting := h.machine.hold(t, tt.transfer), h.machine.hold(t, payloadPhase)
+				staging, checkingOut := h.machine.hold(t, stagesDebs), h.machine.hold(t, checkout)
+				upstream := map[string]*hold{packagesPhase: h.machine.hold(t, packagesPhase), installs: h.machine.hold(t, installs)}
+				loading := h.machine.hold(t, loaderPhase)
+				created := make(chan error, 1)
+				creating.Go(func() {
+					_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+					created <- err
+				})
+				streaming.awaitEntered(t)
+				staging.awaitEntered(t)
+				staging.release <- providers.Result{}
+				upstream[packagesPhase].awaitEntered(t)
+				checkingOut.awaitEntered(t)
+				checkingOut.release <- providers.Result{}
+				upstream[installs].stillParked(t, "while the payload transfer was still running")
+				if mounting.ran() {
+					t.Error("the payload mounted while its transfer was still held")
+				}
+				streaming.release <- providers.Result{}
+				mounting.awaitEntered(t)
+				upstream[installs].stillParked(t, "while the payload mount was still running")
+				mounting.release <- providers.Result{}
+				upstream[installs].awaitEntered(t)
+				second := map[string]string{packagesPhase: installs, installs: packagesPhase}[first]
+				upstream[first].release <- providers.Result{}
+				loading.stillParked(t, "once only "+first+" had finished")
+				if h.machine.ran("ws-1", publishes) != 0 || h.machine.ran("ws-1", configures) != 0 || h.machine.ran("ws-1", prepares) != 0 {
+					t.Errorf("one lane alone let configure, prepare or publish run: %q", h.machine.scripts["ws-1"])
+				}
+				if _, err := os.Stat(h.session.State.SSH("ws-1")); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("access was delivered before every lane finished: %v", err)
+				}
+				upstream[second].release <- providers.Result{}
+				loading.awaitEntered(t)
+				loading.release <- providers.Result{}
+				if err := <-created; err != nil {
+					t.Fatal(err)
+				}
+				staged := h.ordered(0, stagesDebs+packagesSHA, packagesPhase+" resident "+packagesSHA, loaderPhase, publishes)
+				if stage := h.machine.scripts["ws-1"][staged[0]]; !strings.HasPrefix(stage, "sudo bash -c ") || !strings.HasSuffix(stage, " "+stagesDebs+packagesSHA) {
+					t.Errorf("the packages archive was staged by %q", stage)
+				}
+				if got := h.machine.stdins["ws-1"][staged[0]]; got != packagesBytes {
+					t.Errorf("staged the packages archive from %q, want %q", got, packagesBytes)
+				}
+				mounted := h.ordered(0, tt.transfer+sha, payloadPhase+sha+" ", installs, loaderPhase, publishes)
+				if mount := h.machine.scripts["ws-1"][mounted[1]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
+					t.Errorf("the payload phase ran as %q, want it to carry the packages pin", mount)
+				}
+				if order := h.machine.order("ws-1", 0, packagesPhase+" resident "+packagesSHA, payloadPhase+sha+" "); order[0] > order[1] {
+					t.Errorf("the package apply started at %d, after the payload mount at %d", order[0], order[1])
+				}
+				if h.machine.ran("ws-1", stagesDebs) != 1 || h.machine.ran("ws-1", fetchesDebs) != 0 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 || h.machine.ran("ws-1", loaderPhase) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
+					t.Errorf("the create ran %q with stamp %q", h.machine.scripts["ws-1"], h.machine.ready["ws-1"])
+				}
 			})
-			streaming.awaitEntered(t)
-			checkingOut.awaitEntered(t)
-			checkingOut.release <- providers.Result{}
-			packaging.stillParked(t, "while the payload transfer was still running")
-			if mounting.ran() {
-				t.Error("the payload mounted while its transfer was still held")
-			}
-			streaming.release <- providers.Result{}
-			mounting.awaitEntered(t)
-			packaging.stillParked(t, "while the payload mount was still running")
-			mounting.release <- providers.Result{}
-			packaging.awaitEntered(t)
-			installing.awaitEntered(t)
-			installing.release <- providers.Result{}
-			packaging.release <- providers.Result{}
-			if err := <-created; err != nil {
-				t.Fatal(err)
-			}
-			staged := h.ordered(0, payloadPhase+sha+" ", stagesDebs+packagesSHA, packagesPhase+" resident "+packagesSHA, loaderPhase)
-			if stage := h.machine.scripts["ws-1"][staged[1]]; !strings.HasPrefix(stage, "sudo bash -c ") || !strings.HasSuffix(stage, " "+stagesDebs+packagesSHA) {
-				t.Errorf("the packages archive was staged by %q", stage)
-			}
-			if got := h.machine.stdins["ws-1"][staged[1]]; got != packagesBytes {
-				t.Errorf("staged the packages archive from %q, want %q", got, packagesBytes)
-			}
-			if mount := h.machine.scripts["ws-1"][staged[0]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
-				t.Errorf("the payload phase ran as %q, want it to carry the packages pin", mount)
-			}
-			h.ordered(0, tt.transfer+sha, payloadPhase+sha+" ", loaderPhase)
-			if h.machine.ran("ws-1", stagesDebs) != 1 || h.machine.ran("ws-1", fetchesDebs) != 0 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 {
-				t.Errorf("the create ran %q", h.machine.scripts["ws-1"])
-			}
-		})
+		}
+	}
+}
+
+func TestAPackageOrPayloadFailurePublishesNothing(t *testing.T) {
+	for _, tt := range payloadHarnesses() {
+		for _, failing := range []string{packagesPhase, payloadPhase} {
+			t.Run(tt.name+" with "+failing+" failing", func(t *testing.T) {
+				h := tt.harness(t)
+				var creating sync.WaitGroup
+				t.Cleanup(creating.Wait)
+				failed := h.machine.hold(t, failing)
+				created := make(chan error, 1)
+				creating.Go(func() {
+					_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+					created <- err
+				})
+				failed.awaitEntered(t)
+				failed.release <- providers.Result{Stderr: []byte(failing + " refused"), ExitCode: 1}
+				err := <-created
+				if err == nil || !strings.Contains(err.Error(), failing+" refused") {
+					t.Fatalf("Create = %v, want the %s failure", err, failing)
+				}
+				if h.machine.ran("ws-1", publishes) != 0 || h.machine.ran("ws-1", loaderPhase) != 0 || h.machine.ready["ws-1"] != "" {
+					t.Errorf("the failed create ran the loader %d times, published %d times, stamp %q", h.machine.ran("ws-1", loaderPhase), h.machine.ran("ws-1", publishes), h.machine.ready["ws-1"])
+				}
+				if _, err := os.Stat(h.session.State.SSH("ws-1")); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the failed create delivered access: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -2410,8 +2502,11 @@ func TestAResumeRemountsAndRejectsAPackagesPinTheReadyPayloadWasNotBuiltWith(t *
 		t.Errorf("the rejected resume moved the ready stamp from %s to %q", h.session.Stamp, h.machine.ready["ws-1"])
 	}
 	for _, script := range h.machine.scripts["ws-1"][before:] {
-		if strings.Contains(script, packagesPhase) || strings.Contains(script, publishes) || strings.Contains(script, loaderPhase) {
+		if strings.Contains(script, publishes) || strings.Contains(script, loaderPhase) {
 			t.Errorf("the rejected resume ran %q", script)
 		}
+	}
+	if record, found := h.record("ws-1"); !found || record.Machine != "ws-1" || record.Unverified {
+		t.Errorf("the rejected resume changed the retained record: %+v, %v", record, found)
 	}
 }

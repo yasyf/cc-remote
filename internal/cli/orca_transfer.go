@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
-	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
 )
@@ -85,13 +84,13 @@ func artifactOf(name string, data []byte) orcaArtifact {
 	return orcaArtifact{Path: name, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(data))}
 }
 
-func (t orcaTunnel) fetch(ctx context.Context, step, script string, stdin io.Reader) ([]byte, error) {
-	result, err := providers.OSRunner{}.Run(ctx, t.command(script, stdin))
+func (t *orcaTask) fetch(ctx context.Context, step, script string, stdin io.Reader) ([]byte, error) {
+	result, err := t.shell(ctx, script, stdin)
 	if err != nil {
-		return nil, fmt.Errorf("%s on %s: %w", step, t.Host, err)
+		return nil, fmt.Errorf("%s on %s: %w", step, t.Workspace, err)
 	}
 	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("%s on %s exited %d: %s", step, t.Host, result.ExitCode, cmp.Or(transferRefusals[result.ExitCode], "its remote output is withheld"))
+		return nil, fmt.Errorf("%s on %s exited %d: %s", step, t.Workspace, result.ExitCode, cmp.Or(transferRefusals[result.ExitCode], "its remote output is withheld"))
 	}
 	return result.Stdout, nil
 }
@@ -124,13 +123,13 @@ func (d orcaDriver) publish(ctx context.Context, task *orcaTask, brief []byte) e
 }
 
 func (t *orcaTask) head(ctx context.Context) (string, error) {
-	out, err := t.Forward.fetch(ctx, "read the checkout's HEAD", "exec git -C "+remote.Quote(t.ProjectRoot)+" rev-parse --verify HEAD", nil)
+	out, err := t.fetch(ctx, "read the checkout's HEAD", "exec git -C "+remote.Quote(t.ProjectRoot)+" rev-parse --verify HEAD", nil)
 	if err != nil {
 		return "", err
 	}
 	head := strings.TrimSuffix(string(out), "\n")
 	if !commitID.MatchString(head) {
-		return "", fmt.Errorf("git rev-parse HEAD in %s on %s printed no full commit ID", t.ProjectRoot, t.Forward.Host)
+		return "", fmt.Errorf("git rev-parse HEAD in %s on %s printed no full commit ID", t.ProjectRoot, t.Workspace)
 	}
 	return head, nil
 }
@@ -148,7 +147,7 @@ func (t *orcaTask) sendBrief(ctx context.Context, brief []byte) (*orcaArtifact, 
 		`cat > "$dir/`+briefName+`"`,
 		`exec cat "$dir/`+briefName+`"`,
 	)
-	out, err := t.Forward.fetch(ctx, "copy the brief", script, bytes.NewReader(brief))
+	out, err := t.fetch(ctx, "copy the brief", script, bytes.NewReader(brief))
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +179,7 @@ func (c orcaCollect) collect(ctx context.Context, client orca.Client, task *orca
 	if _, err := os.Lstat(c.output); !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("--output %s must not exist yet", c.output)
 	}
-	if !task.Forward.up(ctx) {
+	if !task.up(ctx) {
 		return nil, errors.New("the forward is down; run cc-remote orca reconnect " + task.Workspace)
 	}
 	if _, err := client.On(task.Environment, task.RuntimeID).Status(ctx); err != nil {
@@ -228,7 +227,7 @@ func (t *orcaTask) artifact(ctx context.Context, dir, file string) ([]byte, erro
 		`test "$(cd "$dir" && pwd -P)" = "$dir" && test -f "$file" && test ! -L "$file" || exit `+fmt.Sprint(exitNotArtifact),
 		`exec cat "$file"`,
 	)
-	return t.Forward.fetch(ctx, "read "+file, script, nil)
+	return t.fetch(ctx, "read "+file, script, nil)
 }
 
 func checkReport(raw, patch []byte, base string) error {
@@ -260,7 +259,7 @@ func checkReport(raw, patch []byte, base string) error {
 }
 
 func (t *orcaTask) status(ctx context.Context) (orcaStatus, error) {
-	out, err := t.Forward.fetch(ctx, "read git status", "exec git --no-optional-locks -C "+remote.Quote(t.ProjectRoot)+" status --porcelain=v1 -z --untracked-files=all", nil)
+	out, err := t.fetch(ctx, "read git status", "exec git --no-optional-locks -C "+remote.Quote(t.ProjectRoot)+" status --porcelain=v1 -z --untracked-files=all", nil)
 	if err != nil {
 		return orcaStatus{}, err
 	}

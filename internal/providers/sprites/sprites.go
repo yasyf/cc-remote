@@ -100,30 +100,31 @@ func (p *Provider) ValidateSpec(spec providers.Spec) error {
 }
 
 func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	named := providers.Machine{ID: spec.Name, Provider: Name, State: providers.StateUnknown}
 	if err := providers.CheckName(spec.Name, nameLimit); err != nil {
-		return providers.Machine{}, err
+		return named, err
 	}
 	if err := p.ValidateSpec(spec); err != nil {
-		return providers.Machine{}, err
+		return named, err
 	}
 	switch _, err := p.Get(ctx, spec.Name); {
 	case err == nil:
-		return providers.Machine{}, fmt.Errorf("sprite %s: %w", spec.Name, providers.ErrExists)
+		return named, fmt.Errorf("sprite %s: %w", spec.Name, providers.ErrExists)
 	case !errors.Is(err, providers.ErrNotFound):
-		return providers.Machine{}, err
+		return named, err
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "create", "-o", p.Org, "--skip-console", spec.Name)); err != nil {
 		if _, found := p.Get(ctx, spec.Name); found == nil {
-			return providers.Machine{}, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
+			return named, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
 		}
-		return providers.Machine{}, fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)
+		return named, fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)
 	}
 	created, err := p.Get(ctx, spec.Name)
 	if err != nil {
-		return providers.Machine{}, fmt.Errorf("sprite %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)
+		return named, fmt.Errorf("sprite %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)
 	}
 	if err := p.records().Save(spec.Name, spec.Labels, created.CreatedAt); err != nil {
-		return providers.Machine{}, fmt.Errorf("sprite %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)
+		return named, fmt.Errorf("sprite %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)
 	}
 	created.Labels = maps.Clone(spec.Labels)
 	return created, nil

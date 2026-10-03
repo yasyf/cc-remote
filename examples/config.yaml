@@ -7,9 +7,11 @@ providers:
   sprites:
     org: <sprites-org>
   namespace:
+    endpoint: https://us.compute.namespaceapis.com
     platform: linux/amd64
+    exportPort: 18766
     volumeSizeGB: 125
-    idleTimeout: 30m
+    duration: 4h
     callTimeout: 60s
     readyTimeout: 10m
 
@@ -22,14 +24,14 @@ profiles:
     checkout: shallow
     machine:
       sprites: {}
-      namespace: { image: <image-name-or-digest>, size: l }
+      namespace: { image: <registry/repository@sha256:digest>, size: 8x16 }
   full:
     checkout: full
     prepare:
       - ./tools/bootstrap-project.sh
       - ./tools/install-project-deps.sh
     machine:
-      namespace: { image: <image-name-or-digest>, size: xl }
+      namespace: { image: <registry/repository@sha256:digest>, size: 16x32 }
 
 inventory: ./inventory.yaml
 

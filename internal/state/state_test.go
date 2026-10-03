@@ -218,3 +218,39 @@ func TestHoldSerializesHoldersOfOneNameOnly(t *testing.T) {
 		t.Error("an invalid name was held")
 	}
 }
+
+func TestTryLockReportsAHeldLockWithoutWaiting(t *testing.T) {
+	dir := Dir(t.TempDir())
+	path := dir.OrcaGatewayLock("ws-1", "inst1")
+	if want := filepath.Join(string(dir), "orca", "ws-1.inst1.gateway.lock"); path != want {
+		t.Errorf("gateway lock = %s, want %s", path, want)
+	}
+	if got, want := dir.OrcaLease("ws-1", "inst1"), filepath.Join(string(dir), "orca", "ws-1.inst1.lease.json"); got != want {
+		t.Errorf("lease = %s, want %s", got, want)
+	}
+	unlock, held, err := TryLock(path)
+	if err != nil || !held {
+		t.Fatalf("first TryLock = %t, %v", held, err)
+	}
+	started := time.Now()
+	if again, held, err := TryLock(path); err != nil || held || again != nil {
+		t.Errorf("second TryLock = %t, %v; want it reported as held", held, err)
+	}
+	if waited := time.Since(started); waited > time.Second {
+		t.Errorf("TryLock waited %s on a held lock", waited)
+	}
+	other, held, err := TryLock(dir.OrcaGatewayLock("ws-1", "inst2"))
+	if err != nil || !held {
+		t.Fatalf("another instance's lock = %t, %v; want it free", held, err)
+	}
+	other()
+	unlock()
+	relock, held, err := TryLock(path)
+	if err != nil || !held {
+		t.Fatalf("TryLock after release = %t, %v", held, err)
+	}
+	relock()
+	if info, err := os.Stat(filepath.Dir(path)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("lock directory = %v, %v", info, err)
+	}
+}

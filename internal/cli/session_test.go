@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/providers"
@@ -102,7 +103,7 @@ func TestLifecycleCommandsRejectIncompleteRequests(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"unsupported connection", []string{"create", "ws-1", "--connection", "server"}, "not implemented"},
+		{"unsupported connection", []string{"create", "ws-1", "--connection", "tcp"}, `--connection "tcp": expected ssh or server`},
 		{"destroy without name or payload", []string{"destroy", "--connection", "ssh"}, "stdin"},
 		{"create without name", []string{"create"}, "name the workspace"},
 	}
@@ -115,5 +116,32 @@ func TestLifecycleCommandsRejectIncompleteRequests(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtendNeedsAnExplicitDuration(t *testing.T) {
+	root := NewRootCmd()
+	cmd, _, err := root.Find([]string{"extend"})
+	if err != nil || cmd.Name() != "extend" || cmd.Flags().Lookup("by") == nil || cmd.Flags().Lookup("config") == nil {
+		t.Fatalf("extend = %v, %v", cmd, err)
+	}
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"extend", "ws-1", "--config", filepath.Join(t.TempDir(), "absent.yaml")})
+	if err := root.Execute(); err == nil || err.Error() != `required flag(s) "by" not set` {
+		t.Errorf("extend without --by = %v", err)
+	}
+}
+
+func TestExtendedReportsTheProviderDeadline(t *testing.T) {
+	var out bytes.Buffer
+	deadline := time.Date(2026, 10, 3, 14, 0, 0, 0, time.UTC)
+	if err := emit(&out, extended{Name: "ws-1", Machine: "inst1", Deadline: deadline}); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got) != 3 || got["name"] != "ws-1" || got["machine"] != "inst1" || got["deadline"] != "2026-10-03T14:00:00Z" {
+		t.Errorf("extend output = %s, %v", out.String(), err)
 	}
 }

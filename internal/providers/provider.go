@@ -20,8 +20,12 @@ type Provider interface {
 	Suspend(ctx context.Context, id string) error
 	Destroy(ctx context.Context, id string) error
 	Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (Result, error)
-	SSHTarget(ctx context.Context, id string) (Target, error)
+	Access(ctx context.Context, id string) (Access, error)
 	List(ctx context.Context, labels map[string]string) ([]Machine, error)
+}
+
+type Extender interface {
+	Extend(ctx context.Context, id string, by time.Duration) (time.Time, error)
 }
 
 var (
@@ -51,12 +55,15 @@ type Traits struct {
 }
 
 type Spec struct {
-	Name    string
-	Profile string
-	Image   string
-	Size    string
-	Region  string
-	Labels  map[string]string
+	Name      string
+	Profile   string
+	Image     string
+	Size      string
+	Region    string
+	Root      string
+	Home      string
+	Labels    map[string]string
+	Allocated func(ctx context.Context, machine Machine) error
 }
 
 type State string
@@ -73,6 +80,41 @@ type Machine struct {
 	State     State
 	CreatedAt time.Time
 	Labels    map[string]string
+	Compute   *ComputeInstance
+}
+
+type ComputeInstance struct {
+	InstanceID    string    `json:"instanceId"`
+	Container     string    `json:"container"`
+	Region        string    `json:"region,omitempty"`
+	Endpoint      string    `json:"endpoint"`
+	Image         string    `json:"image"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"createdAt"`
+	Deadline      time.Time `json:"deadline"`
+	Volume        Volume    `json:"volume"`
+	ContainerPort int       `json:"containerPort"`
+	ExportedPort  int       `json:"exportedPort,omitempty"`
+	IngressDomain string    `json:"ingressDomain,omitempty"`
+}
+
+type Volume struct {
+	Tag            string `json:"tag"`
+	HostMount      string `json:"hostMount"`
+	ContainerMount string `json:"containerMount"`
+}
+
+type AccessKind string
+
+const (
+	AccessOpenSSH AccessKind = "openssh"
+	AccessCompute AccessKind = "compute"
+)
+
+type Access struct {
+	Kind    AccessKind
+	SSH     Target
+	Compute ComputeInstance
 }
 
 func (m Machine) HasLabels(labels map[string]string) bool {

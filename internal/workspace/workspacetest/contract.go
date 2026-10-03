@@ -140,17 +140,26 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if err != nil {
 		t.Fatalf("Create = %v", err)
 	}
-	if result.SchemaVersion != workspace.SchemaVersion || result.Name != "ws-1" || result.Provider != h.Kind || result.Machine != "ws-1" || result.ProjectRoot != s.ProjectRoot() || result.SSH.Host == "" || len(result.Forwards) != 1 || result.Forwards[0].Label != "web" || result.Forwards[0].Port == 0 {
+	if result.SchemaVersion != workspace.SchemaVersion || result.Name != "ws-1" || result.Provider != h.Kind || result.Machine == "" || result.ProjectRoot != s.ProjectRoot() || len(result.Forwards) != 1 || result.Forwards[0].Label != "web" || result.Forwards[0].Port == 0 {
 		t.Errorf("result = %+v", result)
 	}
-	if fragment, err := os.ReadFile(result.SSH.Config); err != nil || result.SSH.Config != s.State.SSH("ws-1") || !strings.HasPrefix(string(fragment), "Host ws-1\n") || !strings.Contains(string(fragment), "\n  HostName "+result.SSH.Host+"\n") {
-		t.Errorf("ssh fragment %s = %q, %v", result.SSH.Config, fragment, err)
+	switch {
+	case result.SSH != nil && result.Compute == nil:
+		if fragment, err := os.ReadFile(result.SSH.Config); err != nil || result.SSH.Config != s.State.SSH("ws-1") || !strings.HasPrefix(string(fragment), "Host ws-1\n") || !strings.Contains(string(fragment), "\n  HostName "+result.SSH.Host+"\n") {
+			t.Errorf("ssh fragment %s = %q, %v", result.SSH.Config, fragment, err)
+		}
+	case result.Compute != nil && result.SSH == nil:
+		if _, err := os.Stat(s.State.SSH("ws-1")); !errors.Is(err, os.ErrNotExist) || result.Compute.InstanceID != result.Machine {
+			t.Errorf("compute result %+v wrote an ssh fragment or names another instance: %v", result.Compute, err)
+		}
+	default:
+		t.Errorf("result carries ssh %+v and compute %+v, want exactly one access", result.SSH, result.Compute)
 	}
-	machine, err := h.Provider.Get(ctx, "ws-1")
+	machine, err := h.Provider.Get(ctx, result.Machine)
 	if err != nil || machine.Labels[workspace.LabelWorkspace] != "ws-1" || machine.Labels[workspace.LabelProfile] != "lean" {
 		t.Errorf("machine = %+v, %v", machine, err)
 	}
-	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != "ws-1" || rec.Source.Ref != "main" || len(rec.Forwards) != 1 {
+	if rec, found := record(t, s, "ws-1"); !found || rec.Machine != result.Machine || rec.Source.Ref != "main" || len(rec.Forwards) != 1 {
 		t.Errorf("record = %+v, found %v", rec, found)
 	}
 	if err := s.Suspend(ctx, "ws-1"); err != nil {
@@ -166,13 +175,13 @@ func createSuspendResumeDestroy(t *testing.T, h Harness, s *workspace.Session) {
 	if err := s.Destroy(ctx, "ws-1"); err != nil {
 		t.Fatalf("Destroy = %v", err)
 	}
-	if _, err := h.Provider.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+	if _, err := h.Provider.Get(ctx, result.Machine); !errors.Is(err, providers.ErrNotFound) {
 		t.Errorf("the destroyed machine is still there: %v", err)
 	}
 	if _, found := record(t, s, "ws-1"); found {
 		t.Error("the destroyed workspace is still recorded")
 	}
-	if _, err := os.Stat(result.SSH.Config); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(s.State.SSH("ws-1")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the destroyed workspace still has an ssh fragment")
 	}
 	if _, err := s.Resume(ctx, "ws-1"); err == nil {
@@ -190,14 +199,15 @@ func createWorksFromEmptyState(t *testing.T, h Harness, _ *workspace.Session) {
 	}
 	s.Log = slog.New(slog.DiscardHandler)
 	s.Token = func(context.Context) (string, error) { return Token, nil }
-	if _, err := s.Create(t.Context(), "ws-5", workspace.Source{Ref: "main"}); err != nil {
+	result, err := s.Create(t.Context(), "ws-5", workspace.Source{Ref: "main"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	machine, err := h.Provider.Get(t.Context(), "ws-5")
+	machine, err := h.Provider.Get(t.Context(), result.Machine)
 	if err != nil || machine.Labels[workspace.LabelWorkspace] != "ws-5" {
 		t.Fatalf("fresh machine = %+v, %v", machine, err)
 	}
-	if rec, found := record(t, s, "ws-5"); !found || rec.Machine != "ws-5" || rec.Unverified {
+	if rec, found := record(t, s, "ws-5"); !found || rec.Machine != result.Machine || rec.Unverified {
 		t.Fatalf("fresh record = %+v, found %v", rec, found)
 	}
 }
@@ -235,6 +245,9 @@ func tokenNeverReachesAScriptOrDisk(t *testing.T, h Harness, s *workspace.Sessio
 	}
 	for _, path := range []string{s.State.Workspace("ws-4"), s.State.SSH("ws-4")} {
 		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) && path == s.State.SSH("ws-4") {
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

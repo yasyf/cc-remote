@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -129,14 +130,14 @@ schema 2 provisioned-root result instead.`,
 			if source.Ref == "" {
 				source.Ref = session.Config.Ref
 			}
+			if connection == connectionServer {
+				session.Retain = orcaRetain(session, false)
+			}
 			result, err := session.Create(cmd.Context(), name, source)
 			if err != nil {
 				return err
 			}
-			if connection != "" {
-				return emit(cmd.OutOrStdout(), orcaResultOf(result))
-			}
-			return emit(cmd.OutOrStdout(), result)
+			return emitRecipe(cmd, session, result, connection, false)
 		},
 	}
 	flags.bind(cmd)
@@ -146,7 +147,24 @@ schema 2 provisioned-root result instead.`,
 }
 
 func bindConnection(cmd *cobra.Command, connection *string) {
-	cmd.Flags().StringVar(connection, "connection", "", "run as an Orca VM recipe over this connection (ssh)")
+	cmd.Flags().StringVar(connection, "connection", "", "run as an Orca VM recipe over this connection (ssh or server)")
+}
+
+func emitRecipe(cmd *cobra.Command, session *workspace.Session, result *workspace.Result, connection string, resumed bool) error {
+	switch connection {
+	case "":
+		return emit(cmd.OutOrStdout(), result)
+	case connectionServer:
+		pairing, err := orcaServe(cmd.Context(), session, result, resumed)
+		if err != nil {
+			return err
+		}
+		return emit(cmd.OutOrStdout(), orcaServerResultOf(result, pairing))
+	}
+	if result.SSH == nil {
+		return fmt.Errorf("%s on %s has no SSH access for an Orca ssh recipe; its recipe connects with --connection server", result.Name, result.Provider)
+	}
+	return emit(cmd.OutOrStdout(), orcaResultOf(result))
 }
 
 func orcaTarget(cmd *cobra.Command, args []string, connection string) (string, error) {
@@ -178,14 +196,14 @@ func newResumeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if connection == connectionServer {
+				session.Retain = orcaRetain(session, true)
+			}
 			result, err := session.Resume(cmd.Context(), name)
 			if err != nil {
 				return err
 			}
-			if connection != "" {
-				return emit(cmd.OutOrStdout(), orcaResultOf(result))
-			}
-			return emit(cmd.OutOrStdout(), result)
+			return emitRecipe(cmd, session, result, connection, true)
 		},
 	}
 	flags.bind(cmd)
@@ -238,6 +256,40 @@ func newDestroyCmd() *cobra.Command {
 	}
 	flags.bind(cmd)
 	bindConnection(cmd, &connection)
+	return cmd
+}
+
+type extended struct {
+	Name     string    `json:"name"`
+	Machine  string    `json:"machine"`
+	Deadline time.Time `json:"deadline"`
+}
+
+func newExtendCmd() *cobra.Command {
+	var flags selection
+	var by time.Duration
+	cmd := &cobra.Command{
+		Use:   "extend <name>",
+		Short: "Extend a workspace's finite provider lifetime and print the deadline the provider answered",
+		Long: `extend asks the provider to let the workspace's instance live --by longer and prints the actual
+deadline the provider returned, which policy may clamp. Only providers with a finite instance lifetime,
+like namespace, support it; nothing renews it again on its own.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			session, err := flags.open()
+			if err != nil {
+				return err
+			}
+			record, err := session.Extend(cmd.Context(), args[0], by)
+			if err != nil {
+				return err
+			}
+			return emit(cmd.OutOrStdout(), extended{Name: record.Name, Machine: record.Machine, Deadline: record.Compute.Deadline})
+		},
+	}
+	flags.bind(cmd)
+	cmd.Flags().DurationVar(&by, "by", 0, "how much longer the instance may live, like 2h")
+	_ = cmd.MarkFlagRequired("by")
 	return cmd
 }
 

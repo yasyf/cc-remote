@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,7 @@ type Session struct {
 	Log      *slog.Logger
 	Stderr   io.Writer
 	Token    func(context.Context) (string, error)
+	Retain   func(ctx context.Context, record *Record) error
 	Now      func() time.Time
 	Scripts  images.Scripts
 	Stamp    string
@@ -53,6 +55,7 @@ type Session struct {
 	image            string
 	imageSpec        string
 	baked            []byte
+	home             string
 	payload          *config.Payload
 	closure          bool
 	privatePlugins   bool
@@ -106,6 +109,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		image:            machine.Image,
 		imageSpec:        rendered.imageSpec,
 		baked:            rendered.baked,
+		home:             rendered.home,
 		payload:          machine.Payload,
 		closure:          rendered.closure,
 		privatePlugins:   rendered.private,
@@ -131,6 +135,7 @@ type rendered struct {
 	stamp            string
 	imageSpec        string
 	baked            []byte
+	home             string
 	private          bool
 	tailnetFromTools bool
 	closure          bool
@@ -170,6 +175,11 @@ func render(cfg *config.Config, profile string, machine config.Machine, payload 
 		return rendered{}, err
 	}
 	out.stamp, out.imageSpec, out.baked = images.Stamp(scripts, &image, "", ""), image.Fingerprint(), image.Manifest
+	var baked images.Baked
+	if err := json.Unmarshal(image.Manifest, &baked); err != nil {
+		return rendered{}, fmt.Errorf("read the rendered image manifest: %w", err)
+	}
+	out.home = baked.Home
 	return out, nil
 }
 
@@ -216,10 +226,23 @@ func (s *Session) ProjectRoot() string {
 	return s.Config.ProjectRoot(s.Kind)
 }
 
-func (s *Session) spec(name string, labels map[string]string) providers.Spec {
+func (s *Session) spec(name string, labels map[string]string, allocated func(context.Context, providers.Machine) error) providers.Spec {
 	machine := s.profile.Machine[s.Kind]
 	labels[LabelProfile] = s.Profile
-	return providers.Spec{Name: name, Profile: s.Profile, Image: machine.Image, Size: machine.Size, Region: machine.Region, Labels: labels}
+	return providers.Spec{Name: name, Profile: s.Profile, Image: machine.Image, Size: machine.Size, Region: machine.Region, Root: s.Config.Roots[s.Kind], Home: s.home, Labels: labels, Allocated: allocated}
+}
+
+func (s *Session) allocated(record *Record) func(context.Context, providers.Machine) error {
+	return func(ctx context.Context, machine providers.Machine) error {
+		record.Machine, record.Compute = machine.ID, machine.Compute
+		if err := s.save(record); err != nil {
+			return err
+		}
+		if s.Retain == nil {
+			return nil
+		}
+		return s.Retain(ctx, record)
+	}
 }
 
 type runner struct {
@@ -344,22 +367,26 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (resul
 		return nil, err
 	}
 	now := s.Now()
-	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Machine: name, Image: s.image, ImageSpec: s.imageSpec, Unverified: true, CreatedAt: now}
+	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Image: s.image, ImageSpec: s.imageSpec, Unverified: true, CreatedAt: now}
 	if err := s.save(record); err != nil {
 		return nil, err
 	}
 	s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
-	if err := s.timed(ctx, laneMain, "machine.create", name, func() error {
-		_, err := s.Provider.Create(ctx, s.spec(name, map[string]string{LabelWorkspace: name}))
+	var machine providers.Machine
+	created := s.timed(ctx, laneMain, "machine.create", name, func() error {
+		var err error
+		machine, err = s.Provider.Create(ctx, s.spec(name, map[string]string{LabelWorkspace: name}, s.allocated(record)))
 		return err
-	}); err != nil {
-		return nil, s.unmade(record, err)
+	})
+	record.Machine, record.Compute = machine.ID, machine.Compute
+	if created != nil {
+		return nil, s.unmade(record, created)
 	}
 	record.Unverified = false
 	if err := s.save(record); err != nil {
 		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 	}
-	s.Log.Info("created", "machine", name)
+	s.Log.Info("created", "machine", record.Machine)
 	result, err = s.provision(ctx, held, record, staged)
 	if err == nil {
 		err = s.save(record)
@@ -374,7 +401,13 @@ func (s *Session) unmade(record *Record, cause error) error {
 	if errors.Is(cause, providers.ErrExists) {
 		return errors.Join(cause, s.forget(record.Name))
 	}
-	return fmt.Errorf("%w; whether %s came to exist at the provider is unverified, so its record is kept: run destroy %s once the provider answers", cause, record.Machine, record.Name)
+	if err := s.save(record); err != nil {
+		return errors.Join(cause, err)
+	}
+	if record.Machine == "" {
+		return fmt.Errorf("%w; the provider returned no machine ID for %s, so its record is kept unverified and nothing is destroyed by name", cause, record.Name)
+	}
+	return fmt.Errorf("%w; %s was allocated as %s but not provisioned, so its record is kept: run destroy %s once the provider answers", cause, record.Name, record.Machine, record.Name)
 }
 
 func (s *Session) reconcile(name string, recorded *Record) error {
@@ -450,16 +483,16 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		return nil, err
 	}
 	tail := newLanes(ctx)
-	var target providers.Target
+	var access providers.Access
 	tail.Go(func(ctx context.Context) error { return s.publish(ctx, machine) })
 	tail.Go(func(ctx context.Context) (err error) {
-		target, err = s.sshTarget(ctx, machine)
+		access, err = s.access(ctx, machine)
 		return err
 	})
 	if err := tail.Wait(); err != nil {
 		return nil, err
 	}
-	return s.deliverTarget(record, target)
+	return s.deliverAccess(record, access)
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
@@ -486,14 +519,7 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 
 func (s *Session) installLanes(run *lanes, machine string, staged transfers) (packages, tools <-chan struct{}) {
 	mounted := run.Go(func(ctx context.Context) error { return s.mountPayload(ctx, machine, staged.payload) })
-	packages = run.Go(func(ctx context.Context) error {
-		if s.payload != nil {
-			if err := run.after(mounted); err != nil {
-				return err
-			}
-		}
-		return s.installPackages(ctx, machine, staged.packages)
-	})
+	packages = run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine, staged.packages) })
 	tools = run.Go(func(ctx context.Context) error {
 		if err := run.after(mounted); err != nil {
 			return err
@@ -823,31 +849,25 @@ func (s *Session) enroll(ctx context.Context, held *state.Held, record *Record) 
 }
 
 func (s *Session) connect(ctx context.Context, record *Record) (*Result, error) {
-	target, err := s.sshTarget(ctx, record.Machine)
+	access, err := s.access(ctx, record.Machine)
 	if err != nil {
 		return nil, err
 	}
-	return s.deliverTarget(record, target)
+	return s.deliverAccess(record, access)
 }
 
-func (s *Session) sshTarget(ctx context.Context, machine string) (providers.Target, error) {
-	var target providers.Target
+func (s *Session) access(ctx context.Context, machine string) (providers.Access, error) {
+	var access providers.Access
 	err := s.timed(ctx, laneSSH, "ssh.target", machine, func() error {
 		var err error
-		target, err = s.Provider.SSHTarget(ctx, machine)
+		access, err = s.Provider.Access(ctx, machine)
 		return err
 	})
-	return target, err
+	return access, err
 }
 
-func (s *Session) deliverTarget(record *Record, target providers.Target) (*Result, error) {
-	fragment := s.State.SSH(record.Name)
-	if err := state.Write(fragment, SSHFragment(record.Name, target)); err != nil {
-		return nil, err
-	}
-	ssh := sshFromTarget(target)
-	ssh.Config = fragment
-	return &Result{
+func (s *Session) deliverAccess(record *Record, access providers.Access) (*Result, error) {
+	result := &Result{
 		SchemaVersion: SchemaVersion,
 		Name:          record.Name,
 		Provider:      s.Kind,
@@ -855,10 +875,25 @@ func (s *Session) deliverTarget(record *Record, target providers.Target) (*Resul
 		Source:        record.Source,
 		Machine:       record.Machine,
 		ProjectRoot:   s.ProjectRoot(),
-		SSH:           ssh,
 		Forwards:      record.Forwards,
 		Tailnet:       record.Tailnet,
-	}, nil
+	}
+	switch access.Kind {
+	case providers.AccessCompute:
+		compute := access.Compute
+		record.Compute, result.Compute = &compute, &compute
+		return result, nil
+	case providers.AccessOpenSSH:
+		fragment := s.State.SSH(record.Name)
+		if err := state.Write(fragment, SSHFragment(record.Name, access.SSH)); err != nil {
+			return nil, err
+		}
+		ssh := sshFromTarget(access.SSH)
+		ssh.Config = fragment
+		result.SSH = &ssh
+		return result, nil
+	}
+	panic(fmt.Sprintf("access kind %q", access.Kind))
 }
 
 func (s *Session) abandon(ctx context.Context, held *state.Held, record *Record) error {
@@ -911,6 +946,11 @@ func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
 	}
 	if record.Unverified {
 		return nil, fmt.Errorf("the create of %s never confirmed that %s came to exist, so it was not provisioned: run destroy %s, then create it again", record.Name, record.Machine, record.Name)
+	}
+	if s.Retain != nil {
+		if err := s.Retain(ctx, record); err != nil {
+			return nil, err
+		}
 	}
 	return s.restore(ctx, held, record)
 }
@@ -990,6 +1030,9 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if record.Machine == "" {
+		return fmt.Errorf("the create of %s never learned a machine ID from %s, so nothing can be destroyed by ID: look for an instance labelled with workspace %s at the provider and remove it there, then delete %s", name, s.Kind, name, s.State.Workspace(name))
+	}
 	if s.Enroller != nil {
 		if err := s.Enroller.Leave(ctx, held, runner{s, record.Machine}, record.Tailnet); err != nil {
 			return err
@@ -999,6 +1042,31 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 		return err
 	}
 	return s.forget(name)
+}
+
+func (s *Session) Extend(ctx context.Context, name string, by time.Duration) (*Record, error) {
+	held, err := s.State.Hold(name)
+	if err != nil {
+		return nil, err
+	}
+	defer held.Release()
+	record, err := s.record(name)
+	if err != nil {
+		return nil, err
+	}
+	extender, ok := s.Provider.(providers.Extender)
+	if !ok {
+		return nil, fmt.Errorf("provider %s has no explicit lifetime to extend", s.Kind)
+	}
+	if record.Unverified || record.Compute == nil {
+		return nil, fmt.Errorf("%s has no provisioned instance with a recorded deadline to extend", name)
+	}
+	deadline, err := extender.Extend(ctx, record.Machine, by)
+	if err != nil {
+		return nil, err
+	}
+	record.Compute.Deadline = deadline
+	return record, s.save(record)
 }
 
 func (s *Session) forgetBinding(ctx context.Context, held *state.Held, missing error) error {

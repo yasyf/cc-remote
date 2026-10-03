@@ -144,7 +144,7 @@ func TestPublishCopiesTheExactBriefOutsideTheCheckout(t *testing.T) {
 	root, head := gitCheckout(t)
 	brief := []byte("# Task\n\n\"double\" 'single' $(touch pwned) `touch pwned` ; & | > out \\ *\x00\ttrailing  \n\n")
 	driver := orcaDriver{state: state.Dir(t.TempDir())}
-	task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: orcaTunnel{Host: "task-a"}, Terminal: "term-1"}
+	task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: &orcaTunnel{Host: "task-a"}, Terminal: "term-1"}
 	if err := driver.publish(t.Context(), task, brief); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 			root, head := gitCheckout(t)
 			tt.prepare(t, home, root)
 			driver := orcaDriver{state: state.Dir(t.TempDir())}
-			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: orcaTunnel{Host: "task-a"}, Terminal: "term-1"}
+			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: &orcaTunnel{Host: "task-a"}, Terminal: "term-1"}
 			if err := driver.save(task); err != nil {
 				t.Fatal(err)
 			}
@@ -286,7 +286,7 @@ func newCollectFixture(t *testing.T) collectFixture {
 	t.Cleanup(func() { _ = os.Remove(filepath.Dir(control)) })
 	task := &orcaTask{
 		SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "absent", Profile: "lean", Machine: "task-a", ProjectRoot: root,
-		Port: 7001, Forward: orcaTunnel{Host: "task-a", Config: "/recorded/config", Control: control, Log: dir.OrcaForwardLog("task-a")},
+		Port: 7001, Forward: &orcaTunnel{Host: "task-a", Config: "/recorded/config", Control: control, Log: dir.OrcaForwardLog("task-a")},
 		Environment: "task-a", EnvironmentID: "env-1", RuntimeID: "rt-1", RepoID: "repo-1", WorktreeID: "repo-1::" + root,
 		Agent: orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, Terminal: "term-1",
 		Prepared: true, Brief: &orcaArtifact{Path: tasks + "/brief.md", SHA256: artifactOf("", brief).SHA256, Bytes: int64(len(brief))}, BaseCommit: head,

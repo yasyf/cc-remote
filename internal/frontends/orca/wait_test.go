@@ -138,7 +138,7 @@ func TestWaitPreflightFailures(t *testing.T) {
 			name: "recipe missing from orca.yaml",
 			mutate: func(t *testing.T, f waitFixture) (orca.Preflight, *fakeOrca) {
 				p := f.preflight
-				p.Recipe = orca.Recipe{Provider: "namespace", Profile: "stack", Name: "Namespace stack"}
+				p.Recipe = orca.Recipe{Provider: "namespace", Profile: "stack", Connection: orca.ConnectionServer, Name: "Namespace stack"}
 				return p, newFakeOrca(t).on("status --json", statusReady).on("repo list --json", f.reposJSON())
 			},
 			wantErr: orca.ErrMissingRecipe,

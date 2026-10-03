@@ -246,15 +246,19 @@ func TestStatusMapsToState(t *testing.T) {
 	}
 }
 
-func TestSSHTargetPinsTheSpriteHostKey(t *testing.T) {
+func TestAccessPinsTheSpriteHostKey(t *testing.T) {
 	p, fake := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
 	}
-	target, err := p.SSHTarget(t.Context(), "alpha")
+	access, err := p.Access(t.Context(), "alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if access.Kind != providers.AccessOpenSSH || access.Compute != (providers.ComputeInstance{}) {
+		t.Errorf("Access = %+v, want openssh access only", access)
+	}
+	target := access.SSH
 	keys := p.keys()
 	want := providers.Target{
 		Host:         "alpha",
@@ -269,7 +273,7 @@ func TestSSHTargetPinsTheSpriteHostKey(t *testing.T) {
 		},
 	}
 	if target != want {
-		t.Errorf("SSHTarget =\n%+v\nwant\n%+v", target, want)
+		t.Errorf("Access target =\n%+v\nwant\n%+v", target, want)
 	}
 	knownHosts, err := os.ReadFile(keys.knownHosts("alpha"))
 	if err != nil {
@@ -285,12 +289,12 @@ func TestSSHTargetPinsTheSpriteHostKey(t *testing.T) {
 	if authorized := fake.sprites["alpha"].authorized; !slices.Equal(authorized, []string{strings.TrimSpace(string(public))}) {
 		t.Errorf("authorized keys = %q, want the generated public key", authorized)
 	}
-	if _, err := p.SSHTarget(t.Context(), "alpha"); err != nil {
+	if _, err := p.Access(t.Context(), "alpha"); err != nil {
 		t.Fatal(err)
 	}
 	again, err := os.ReadFile(keys.identity("alpha") + ".pub")
 	if err != nil || string(again) != string(public) {
-		t.Errorf("a second SSHTarget replaced the key: %v", err)
+		t.Errorf("a second Access replaced the key: %v", err)
 	}
 
 	if err := p.Destroy(t.Context(), "alpha"); err != nil {
@@ -303,7 +307,7 @@ func TestSSHTargetPinsTheSpriteHostKey(t *testing.T) {
 	}
 }
 
-func TestConcurrentSSHTargetsShareOneKey(t *testing.T) {
+func TestConcurrentAccessesShareOneKey(t *testing.T) {
 	p, fake := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
@@ -311,7 +315,7 @@ func TestConcurrentSSHTargetsShareOneKey(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
 	for i := range errs {
-		wg.Go(func() { _, errs[i] = p.SSHTarget(t.Context(), "alpha") })
+		wg.Go(func() { _, errs[i] = p.Access(t.Context(), "alpha") })
 	}
 	wg.Wait()
 	if err := errors.Join(errs...); err != nil {
@@ -392,11 +396,11 @@ func TestProxyCommandStopsWithSSH(t *testing.T) {
 			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 				t.Fatal(err)
 			}
-			target, err := p.SSHTarget(t.Context(), "alpha")
+			access, err := p.Access(t.Context(), "alpha")
 			if err != nil {
 				t.Fatal(err)
 			}
-			ssh := exec.Command("sh", "-c", "exec "+target.ProxyCommand)
+			ssh := exec.Command("sh", "-c", "exec "+access.SSH.ProxyCommand)
 			stdin, err := ssh.StdinPipe()
 			if err != nil {
 				t.Fatal(err)

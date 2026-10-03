@@ -117,11 +117,11 @@ func newImagesBuildCmd() *cobra.Command {
 	var configPath, profile, region string
 	cmd := &cobra.Command{
 		Use:   "build",
-		Short: "Bake one profile's tools into a Namespace image, push it, and wire its digest as a devbox image",
+		Short: "Build and push one profile's Namespace image and print its verified digest",
 		Long: `build renders the profile's image context for providers.namespace.platform, builds and pushes it
-for that platform with nsc build under a tag of its image fingerprint, reads the pushed digest back
-from the workspace registry, and wires that exact digest with devbox image wire. A private
-marketplace's GitHub token comes from git.token_command and reaches the build only as an nsc build
+for that platform with nsc build under a tag of its image fingerprint, then validates the repository
+and digest returned by the workspace registry. A private marketplace's GitHub token comes from
+git.token_command and reaches the build only as an nsc build
 secret file that is removed once the build returns. stdout carries the receipt: the digest reference
 to put in the profile's machine image, and the baked manifest that workspaces of this profile adopt.`,
 		Args: cobra.NoArgs,

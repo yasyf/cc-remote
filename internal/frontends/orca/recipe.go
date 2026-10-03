@@ -23,8 +23,9 @@ const (
 )
 
 const (
-	connection      = "ssh"
-	provisionedRoot = "provisioned-root"
+	ConnectionSSH    = "ssh"
+	ConnectionServer = "server"
+	provisionedRoot  = "provisioned-root"
 )
 
 var recipeID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -33,11 +34,13 @@ type Source struct {
 	Provider string
 	Profile  string
 	Profiles map[string][]string
+	Servers  map[string]bool
 }
 
 type Recipe struct {
 	Provider    string
 	Profile     string
+	Connection  string
 	Name        string
 	Description string
 }
@@ -48,8 +51,9 @@ type Lifecycle struct {
 }
 
 type machine struct {
-	provider string
-	profile  string
+	provider   string
+	profile    string
+	connection string
 }
 
 func DefaultLifecycle() Lifecycle {
@@ -60,14 +64,20 @@ func Recipes(src Source) ([]Recipe, error) {
 	if !slices.Contains(src.Profiles[src.Profile], src.Provider) {
 		return nil, fmt.Errorf("default profile %q configures no %s machine", src.Profile, src.Provider)
 	}
-	fallback := machine{provider: src.Provider, profile: src.Profile}
+	connection := func(provider string) string {
+		if src.Servers[provider] {
+			return ConnectionServer
+		}
+		return ConnectionSSH
+	}
+	fallback := machine{provider: src.Provider, profile: src.Profile, connection: connection(src.Provider)}
 	var machines []machine
 	for profile, providers := range src.Profiles {
 		for _, provider := range providers {
 			if !config.Identifier.MatchString(provider) || !config.Identifier.MatchString(profile) {
 				return nil, fmt.Errorf("provider %q and profile %q must match %s", provider, profile, config.Identifier)
 			}
-			machines = append(machines, machine{provider: provider, profile: profile})
+			machines = append(machines, machine{provider: provider, profile: profile, connection: connection(provider)})
 		}
 	}
 	slices.SortFunc(machines, func(a, b machine) int {
@@ -86,15 +96,19 @@ func (m machine) recipe(isDefault bool) Recipe {
 	provider := strings.ToUpper(m.provider[:1]) + m.provider[1:]
 	name := fmt.Sprintf("%s %s over SSH", provider, m.profile)
 	description := fmt.Sprintf("A %s machine with the %s profile, reached over SSH.", provider, m.profile)
+	if m.connection == ConnectionServer {
+		name = fmt.Sprintf("%s %s through its Orca server", provider, m.profile)
+		description = fmt.Sprintf("A %s machine with the %s profile, paired with its own Orca server.", provider, m.profile)
+	}
 	if isDefault {
 		name += " (default)"
 		description = "The default. " + description
 	}
-	return Recipe{Provider: m.provider, Profile: m.profile, Name: name, Description: description}
+	return Recipe{Provider: m.provider, Profile: m.profile, Connection: m.connection, Name: name, Description: description}
 }
 
 func (r Recipe) ID() string {
-	return r.Provider + "-" + r.Profile + "-" + connection
+	return r.Provider + "-" + r.Profile + "-" + r.Connection
 }
 
 func (r Recipe) validate() error {
@@ -102,6 +116,9 @@ func (r Recipe) validate() error {
 		if !config.Identifier.MatchString(value) {
 			return fmt.Errorf("recipe %s: %s %q must match %s", r.ID(), field, value, config.Identifier)
 		}
+	}
+	if r.Connection != ConnectionSSH && r.Connection != ConnectionServer {
+		return fmt.Errorf("recipe %s: connection %q must be %s or %s", r.ID(), r.Connection, ConnectionSSH, ConnectionServer)
 	}
 	if !recipeID.MatchString(r.ID()) {
 		return fmt.Errorf("recipe id %q must match Orca's %s", r.ID(), recipeID)
@@ -125,7 +142,7 @@ func (l Lifecycle) validate() error {
 }
 
 func (l Lifecycle) Command(verb Verb, r Recipe) string {
-	words := []string{l.Binary, string(verb), "--provider", r.Provider, "--profile", r.Profile, "--connection", connection}
+	words := []string{l.Binary, string(verb), "--provider", r.Provider, "--profile", r.Profile, "--connection", r.Connection}
 	if l.Config != "" {
 		words = append(words, "--config", l.Config)
 	}

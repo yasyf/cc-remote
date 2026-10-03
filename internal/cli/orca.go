@@ -18,6 +18,7 @@ import (
 const (
 	connectionSSH    = "ssh"
 	connectionServer = "server"
+	connectionOrca   = "orca-server"
 	orcaSchema       = 2
 	orcaCheckoutMode = "provisioned-root"
 
@@ -56,6 +57,12 @@ type orcaConnection struct {
 	Target      orcaSSHTarget `json:"target"`
 }
 
+type orcaServerConnection struct {
+	Type        string `json:"type"`
+	PairingCode string `json:"pairingCode"`
+	ProjectRoot string `json:"projectRoot"`
+}
+
 type orcaUserData struct {
 	Provider   string `json:"provider"`
 	Profile    string `json:"profile"`
@@ -64,10 +71,10 @@ type orcaUserData struct {
 }
 
 type orcaResult struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	CheckoutMode  string         `json:"checkoutMode"`
-	Connection    orcaConnection `json:"connection"`
-	UserData      orcaUserData   `json:"userData"`
+	SchemaVersion int          `json:"schemaVersion"`
+	CheckoutMode  string       `json:"checkoutMode"`
+	Connection    any          `json:"connection"`
+	UserData      orcaUserData `json:"userData"`
 }
 
 type orcaPayload struct {
@@ -78,10 +85,8 @@ type orcaPayload struct {
 
 func orcaMode(connection string) error {
 	switch connection {
-	case "", connectionSSH:
+	case "", connectionSSH, connectionServer:
 		return nil
-	case connectionServer:
-		return errors.New("--connection server is not implemented; Orca connects over ssh")
 	}
 	return fmt.Errorf("--connection %q: expected ssh or server", connection)
 }
@@ -123,6 +128,15 @@ func orcaResource(stdin io.Reader) (string, error) {
 		return "", errors.New("the lifecycle payload on stdin names no recipeResult.userData.resourceId")
 	}
 	return payload.RecipeResult.UserData.ResourceID, nil
+}
+
+func orcaServerResultOf(result *workspace.Result, pairing string) orcaResult {
+	return orcaResult{
+		SchemaVersion: orcaSchema,
+		CheckoutMode:  orcaCheckoutMode,
+		Connection:    orcaServerConnection{Type: connectionOrca, PairingCode: pairing, ProjectRoot: result.ProjectRoot},
+		UserData:      orcaUserData{Provider: result.Provider, Profile: result.Profile, ResourceID: result.Name, Machine: result.Machine},
+	}
 }
 
 func orcaResultOf(result *workspace.Result) orcaResult {

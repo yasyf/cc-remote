@@ -80,7 +80,7 @@ func (f *fakeNamespace) Output(_ context.Context, name string, args ...string) (
 	return nil, nil
 }
 
-func TestBuildPushesTheBakedContextAndWiresItsDigest(t *testing.T) {
+func TestBuildPushesTheBakedContextAndReturnsItsDigest(t *testing.T) {
 	image, err := RenderImage(validInventory(), "agents", DefaultPlatform)
 	if err != nil {
 		t.Fatal(err)
@@ -99,14 +99,6 @@ func TestBuildPushesTheBakedContextAndWiresItsDigest(t *testing.T) {
 		{nsc, []string{"build", dir, "--file", "Dockerfile", "--platform", "linux/amd64", "--name", "agent-host-agents:" + fingerprint, "--push"}},
 		{nsc, []string{"registry", "describe", "--repository", "agent-host-agents", "--reference", fingerprint, "--output", "json"}},
 		{nsc, []string{"workspace", "describe", "--key", "registry_url", "--output", "json"}},
-		{devbox, []string{
-			"image", "wire", "nscr.io/abc123ws/agent-host-agents@" + pushedDigest,
-			"--description", "cc-remote agent host cc-remote-image=" + fingerprint,
-			"--user", "agent",
-			"--on_startup", "/usr/local/bin/cc-remote-start",
-			"--workspace_dir", "/workspaces",
-			"--persistency", "whole",
-		}},
 	}
 	if len(cli.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", cli.calls, want)
@@ -248,8 +240,8 @@ func TestNamespaceCLIPutsTheRegionOnNscOnly(t *testing.T) {
 	if got := regional.Argv(nsc, []string{"build", "/ctx"}); !slices.Equal(got, []string{"--region", "eu", "build", "/ctx"}) {
 		t.Errorf("nsc argv = %q", got)
 	}
-	if got := regional.Argv(devbox, []string{"image", "wire"}); !slices.Equal(got, []string{"image", "wire"}) {
-		t.Errorf("devbox argv = %q", got)
+	if got := regional.Argv("other", []string{"build"}); !slices.Equal(got, []string{"build"}) {
+		t.Errorf("other argv = %q", got)
 	}
 	if got := (NamespaceCLI{}).Argv(nsc, []string{"build"}); !slices.Equal(got, []string{"build"}) {
 		t.Errorf("unconfigured nsc argv = %q", got)

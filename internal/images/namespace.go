@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	devbox    = "devbox"
 	nsc       = "nsc"
 	secretID  = "github-token"
 	waitDelay = 2 * time.Second
@@ -105,9 +104,6 @@ func (c Context) Build(ctx context.Context, cli Namespace, token func(context.Co
 		return Built{}, err
 	}
 	reference := registry + "/" + c.Repository() + "@" + digest
-	if err := cli.Run(ctx, devbox, c.WireArgs(reference)...); err != nil {
-		return Built{}, err
-	}
 	return Built{
 		Profile:     c.Profile,
 		Platform:    c.Platform,
@@ -160,17 +156,6 @@ func (c Context) BuildArgs(dir, secret string) []string {
 
 func (c Context) DescribeArgs() []string {
 	return []string{"registry", "describe", "--repository", c.Repository(), "--reference", c.Fingerprint(), "--output", "json"}
-}
-
-func (c Context) WireArgs(reference string) []string {
-	return []string{
-		"image", "wire", reference,
-		"--description", "cc-remote agent host cc-remote-image=" + c.Fingerprint(),
-		"--user", c.Image.User,
-		"--on_startup", StartPath,
-		"--workspace_dir", c.Image.WorkspaceDir,
-		"--persistency", "whole",
-	}
 }
 
 func (c Context) parseDescribed(out []byte) (string, error) {
