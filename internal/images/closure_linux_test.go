@@ -385,9 +385,9 @@ func (s payloadSandbox) phase(scripts Scripts, sha string) *exec.Cmd {
 }
 
 func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
-	download := "install -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server\n"
-	full := "update -qq\n" + download + "install -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
-	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\n"
+	download := "install -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server\n"
+	full := "update -qq\n" + download + "install -y -qq --no-install-recommends ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
+	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\n"
 	tests := []struct {
 		name    string
 		mode    []string
@@ -647,7 +647,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	sum := sha512.Sum512([]byte("deb"))
 	inventory := scriptInventory()
 	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
-	full := "update -qq\ninstall -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
+	full := "update -qq\ninstall -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
 	resident := "install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives=@CACHE@/\n"
 	tests := []struct {
 		name    string
@@ -660,7 +660,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 		apt     string
 		fetches int
 	}{
-		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
+		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
 		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "install -y -qq --no-download @DEBS@/orca-1.4.215.deb\n"},
 		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, packagesDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
 		{name: "a deb naming no package is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package", fetches: 1},

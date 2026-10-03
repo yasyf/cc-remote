@@ -1137,7 +1137,7 @@ func TestAFailedURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
 func TestAnExpiredDirectPayloadAbandonsTheMachine(t *testing.T) {
 	h, _ := newDirectPayloadHarness(t, "printf '%s\\n' '"+payloadURL+"'")
 	expired := h.machine.hold(t, fetchesPayload)
-	expired.release <- providers.Result{Stderr: []byte("cc-remote: the payload download failed (curl exit 22, HTTP 403, tee exit 0, sha256sum exit 0); a 403 usually means the presigned URL expired"), ExitCode: 1}
+	expired.release <- providers.Result{Stderr: []byte("cc-remote: the payload download failed (curl exit 22, HTTP 403, tee exit 0, openssl exit 0); a 403 usually means the presigned URL expired"), ExitCode: 1}
 	var logs bytes.Buffer
 	h.session.Log = slog.New(slog.NewJSONHandler(&logs, nil))
 	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})

@@ -672,7 +672,7 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	}
 }
 
-func TestNoPayloadRendersMatchThePreClosureTemplates(t *testing.T) {
+func TestNoPayloadRendersOnlyAddOpenSSLToPreClosureTemplates(t *testing.T) {
 	before := os.DirFS("testdata/ddfe484")
 	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
 	for name, inv := range map[string]Inventory{"full": validInventory(), "bare": {Version: SchemaVersion}} {
@@ -700,12 +700,16 @@ func TestNoPayloadRendersMatchThePreClosureTemplates(t *testing.T) {
 				if err != nil {
 					t.Fatalf("render %s from ddfe484: %v", r.template, err)
 				}
+				want = []byte(strings.NewReplacer(
+					"prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)", "prerequisites=(ca-certificates curl git jq openssl python3 unzip xz-utils)",
+					"for bin in curl git jq python3 unzip xz; do", "for bin in curl git jq openssl python3 unzip xz; do",
+				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s drifted from the ddfe484 render for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})

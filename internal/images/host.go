@@ -81,11 +81,11 @@ fi
 
 func (a TransferArtifact) stageScript() string {
 	return a.openStaging() + `set +e
-cat | tee "$staging" | sha256sum > "$work/sum"
+cat | tee "$staging" | openssl dgst -sha256 -r > "$work/sum"
 codes=("${PIPESTATUS[@]}")
 set -e
 if [ "${codes[*]}" != "0 0 0" ]; then
-  echo "cc-remote: the ` + a.Name + ` stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, sha256sum exit ${codes[2]})" >&2
+  echo "cc-remote: the ` + a.Name + ` stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, openssl exit ${codes[2]})" >&2
   exit 1
 fi
 ` + a.admitStaging()
@@ -96,7 +96,7 @@ func (a TransferArtifact) fetchScript() string {
 set +e
 curl -q --config - --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
   --max-filesize "$size" --write-out '%{stderr}%{http_code}' 2> "$work/http" \
-  | tee "$staging" | sha256sum > "$work/sum"
+  | tee "$staging" | openssl dgst -sha256 -r > "$work/sum"
 codes=("${PIPESTATUS[@]}")
 set -e
 http="$(cat "$work/http")"
@@ -106,7 +106,7 @@ if [ "${codes[*]}" != "0 0 0" ]; then
   if [ "$http" = 403 ]; then
     hint="; a 403 usually means the presigned URL expired"
   fi
-  echo "cc-remote: the ` + a.Name + ` download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, sha256sum exit ${codes[2]})$hint" >&2
+  echo "cc-remote: the ` + a.Name + ` download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, openssl exit ${codes[2]})$hint" >&2
   exit 1
 fi
 if [ "$http" != 200 ]; then
