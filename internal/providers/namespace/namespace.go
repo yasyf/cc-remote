@@ -754,7 +754,7 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	if _, err := rand.Read(nonce); err != nil {
 		return providers.Result{}, err
 	}
-	native, err := p.Runner.Run(ctx, p.containerScript(saved.Instance, framed(nonce, cmd), stdin))
+	native, err := p.Runner.Run(ctx, p.container(saved.Instance, []string{"sh", "-c", framed(nonce, cmd)}, stdin))
 	result, status, framing := unframe(native.Stdout, nonce)
 	if err != nil {
 		return result, fmt.Errorf("running a command on namespace instance %s: %w", id, err)
