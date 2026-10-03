@@ -109,11 +109,19 @@ func TestCodexStartupOnlyWaitsForIdle(t *testing.T) {
 }
 
 func TestSelectedAndRedact(t *testing.T) {
-	if got := orca.Selected([]string{"  1. Yes", "❯ 2. No (recommended)"}); got != "2. No (recommended)" {
-		t.Errorf("Selected = %q", got)
+	selections := []struct {
+		name string
+		tail []string
+		want string
+	}{
+		{"claude", []string{"  1. Yes", "❯ 2. No (recommended)"}, "2. No (recommended)"},
+		{"codex", []string{"  Folder access", "  1. Trust and continue", "› 2. Quit", "  enter continue · esc quit"}, "2. Quit"},
+		{"no menu", []string{"no menu"}, ""},
 	}
-	if got := orca.Selected([]string{"no menu"}); got != "" {
-		t.Errorf("Selected = %q", got)
+	for _, tt := range selections {
+		if got := orca.Selected(tt.tail); got != tt.want {
+			t.Errorf("Selected(%s) = %q, want %q", tt.name, got, tt.want)
+		}
 	}
 	if got := orca.Redact([]string{"key sk-proj-AbC_12.x end"}); got[0] != "key sk-[redacted] end" {
 		t.Errorf("Redact = %q", got)

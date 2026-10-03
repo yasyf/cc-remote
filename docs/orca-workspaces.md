@@ -114,8 +114,8 @@ command for its provider; the defaults read the macOS keychain items
 `cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. The key travels
 only over SSH stdin into a one-use pipe that the worker's terminal reads and
 removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
-worker may start. `create` accepts Claude's folder trust prompt only when
-`orca.trust` lists the repository's owner.
+worker may start. The frontend accepts Claude and Codex folder trust prompts
+only when `orca.trust` lists the repository's owner.
 
 ```yaml
 orca:

@@ -102,7 +102,8 @@ func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, t
 			return struct{}{}, false, nil
 		}
 		wait, err := r.WaitIdle(ctx, handle, idleTimeout)
-		if err != nil && startup.Hooks != nil && string(bytes.TrimSpace(wait.BlockedReason)) == reviewBlocked {
+		blocked := string(bytes.TrimSpace(wait.BlockedReason))
+		if err != nil && startup.Hooks != nil && (blocked == reviewBlocked || blocked == trustBlocked) {
 			return struct{}{}, false, nil
 		}
 		return struct{}{}, err == nil, err
@@ -163,8 +164,10 @@ func (s Startup) gate(tail []string) (Gate, bool) {
 
 func Selected(tail []string) string {
 	for _, line := range tail {
-		if _, option, ok := strings.Cut(line, selector); ok {
-			return strings.TrimSpace(option)
+		for _, marker := range []string{selector, browserSelector} {
+			if _, option, ok := strings.Cut(line, marker); ok {
+				return strings.TrimSpace(option)
+			}
 		}
 	}
 	return ""

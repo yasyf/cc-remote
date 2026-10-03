@@ -18,6 +18,9 @@ const (
 	sendEscape  = "terminal send --terminal term-1 --text " + orca.KeyEscape + scope
 	idleWait    = `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null}}`
 	blockedWait = `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":false,"status":"running","exitCode":null,"blockedReason":"agent-hooks-review-prompt"}}`
+	trustWait   = `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":false,"status":"running","exitCode":null,"blockedReason":"agent-trust-workspace"}}`
+	trustChoice = "1. Trust and continue"
+	quitChoice  = "2. Quit"
 	probeHome   = "/home/agent"
 	probeRoot   = probeHome + "/.claude/plugins/cache/captain-hook/captain-hook/12.79.15"
 	probeDigest = "1111111111111111111111111111111111111111111111111111111111111111"
@@ -28,7 +31,18 @@ var (
 	captainPins = []orca.Pin{{ID: "captain-hook@captain-hook", Version: "12.79.15"}}
 	exactProbe  = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":13,"events":{"SessionStart":2,"UserPromptSubmit":2,"PreToolUse":2,"PermissionRequest":1,"PostToolUse":2,"SubagentStart":1,"SubagentStop":1,"Stop":2}}`
 	codexBanner = []string{"  >_ OpenAI Codex (v0.159.2)", "     ~/app", "  permissions: YOLO mode"}
+	codexReady  = append(slices.Clone(codexBanner), "  › Ask Codex anything")
 	refusalPoll = orca.Poll{Interval: time.Millisecond, Timeout: time.Second}
+	folderShown = []string{
+		"  Folder access",
+		"  /workspaces/monorepo",
+		"  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings",
+		"  can run code automatically, even without a model request. Continue only if you trust these files. Your trust",
+		"  decision will be saved.",
+		"› 1. Trust and continue",
+		"  2. Quit",
+		"  enter continue · esc quit",
+	}
 )
 
 type browserRow struct {
@@ -79,6 +93,18 @@ func promptScreen(pending int, selected string) []string {
 		lines = append(lines, marker+option)
 	}
 	return append(lines, "  enter confirm · esc skip")
+}
+
+func folderAccess(selected string) []string {
+	lines := slices.Clone(folderShown[:5])
+	for _, option := range []string{trustChoice, quitChoice} {
+		marker := "  "
+		if option == selected {
+			marker = "› "
+		}
+		lines = append(lines, marker+option)
+	}
+	return append(lines, folderShown[7])
 }
 
 func browserScreen(rows []browserRow, top, selected, window, pending int, below bool) []string {
@@ -150,16 +176,17 @@ func walk(t *testing.T, o walkOptions) ([]string, int) {
 }
 
 type probeRecorder struct {
-	t     *testing.T
-	fake  *fakeOrca
-	out   string
-	calls int
+	t      *testing.T
+	fake   *fakeOrca
+	out    string
+	calls  int
+	enters int
 }
 
 func (p *probeRecorder) review(captain []orca.Pin) orca.HookReview {
 	return orca.HookReview{Captain: captain, Exec: func(_ context.Context, argv []string) ([]byte, error) {
 		p.calls++
-		if p.fake.called(sendEnter) != 0 || p.fake.called(sendTrust) != 0 {
+		if p.fake.called(sendEnter) != p.enters || p.fake.called(sendTrust) != 0 {
 			p.t.Error("the probe ran after review input")
 		}
 		if len(argv) != 5 || argv[0] != "python3" || argv[1] != "-c" || argv[2] != orca.HookProbeScript || argv[3] != captain[0].ID || argv[4] != captain[0].Version {
@@ -195,6 +222,11 @@ func lastPosition(f *fakeOrca, command string) int {
 func runCodex(t *testing.T, fake *fakeOrca, review orca.HookReview, p orca.Poll) ([]string, error) {
 	t.Helper()
 	return orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.CodexStartup(review), false, p)
+}
+
+func runTrustedCodex(t *testing.T, fake *fakeOrca, review orca.HookReview, p orca.Poll) ([]string, error) {
+	t.Helper()
+	return orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.CodexStartup(review), true, p)
 }
 
 func assertNoTrust(t *testing.T, fake *fakeOrca) {
@@ -328,6 +360,151 @@ func TestCodexReviewStartsAfterTheIdleWaitReportsThePrompt(t *testing.T) {
 	}
 	if fake.called(waitIdle) != 2 || fake.called(sendTrust) != 1 || position(fake, waitIdle, 0) > position(fake, sendEnter, 0) {
 		t.Errorf("waits %d, trust %d", fake.called(waitIdle), fake.called(sendTrust))
+	}
+}
+
+func TestCodexTrustsTheFolderBeforeReviewingHooks(t *testing.T) {
+	reads, downs := acceptedReads(t)
+	tests := []struct {
+		name  string
+		early []string
+		waits int
+	}{
+		{"folder screen first", nil, 1},
+		{"after the idle wait reports it", []string{historyLost(t, []string{""})}, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeOrca(t).on(sendEnter, ok(accepted)).on(sendDown, ok(accepted)).on(sendUp, ok(accepted)).
+				on(sendTrust, ok(accepted)).on(sendEscape, ok(accepted))
+			if tt.early != nil {
+				fake.on(waitIdle, ok(trustWait))
+			}
+			fake.on(waitIdle, ok(idleWait))
+			for _, screen := range slices.Concat(tt.early, []string{historyLost(t, folderShown), reads[0]}, reads) {
+				fake.on(readScreen, screen)
+			}
+			probe := &probeRecorder{t: t, fake: fake, out: exactProbe, enters: 1}
+			steps, err := runTrustedCodex(t, fake, probe.review(captainPins), bootstrapPoll)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(steps, []string{"trust", "hooks"}) || probe.calls != 1 {
+				t.Fatalf("steps %v, probes %d", steps, probe.calls)
+			}
+			assertSent(t, fake, map[string]int{sendEnter: 2, sendDown: downs, sendUp: downs, sendTrust: 1, sendEscape: 1, waitIdle: tt.waits})
+			folder, review := position(fake, sendEnter, 0), position(fake, sendEnter, 1)
+			if folder >= review || review >= position(fake, sendDown, 0) || lastPosition(fake, sendEscape) >= lastPosition(fake, waitIdle) {
+				t.Errorf("order folder Enter %d, review Enter %d, first Down %d", folder, review, position(fake, sendDown, 0))
+			}
+			if tt.early != nil && position(fake, waitIdle, 0) >= folder {
+				t.Error("the folder was trusted before the idle wait reported it")
+			}
+		})
+	}
+}
+
+func TestCodexFolderTrustRefusesAnUnlistedOwnerBeforeAnyInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		reads [][]string
+		waits []string
+	}{
+		{"folder screen", [][]string{folderShown}, nil},
+		{"after the idle wait reports it", [][]string{{""}, folderShown}, []string{trustWait}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeOrca(t)
+			for _, screen := range tt.reads {
+				fake.on(readScreen, historyLost(t, screen))
+			}
+			for _, wait := range tt.waits {
+				fake.on(waitIdle, ok(wait))
+			}
+			probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+			steps, err := runCodex(t, fake, probe.review(captainPins), refusalPoll)
+			if !errors.Is(err, orca.ErrUntrusted) || len(steps) != 0 || probe.calls != 0 {
+				t.Fatalf("Bootstrap = %v, %v, probes %d, want ErrUntrusted before any probe", steps, err, probe.calls)
+			}
+			assertSent(t, fake, map[string]int{sendEnter: 0, sendUp: 0, sendDown: 0, sendTrust: 0, sendEscape: 0, waitIdle: len(tt.waits)})
+		})
+	}
+}
+
+func TestCodexFolderTrustEntersOnlyTheVerifiedChoice(t *testing.T) {
+	other := slices.Replace(folderAccess(""), 5, 6, "› 3. Something else")
+	tests := []struct {
+		name   string
+		reads  [][]string
+		steps  []string
+		want   string
+		ups    int
+		enters int
+	}{
+		{"already ready", [][]string{codexReady}, nil, "", 0, 0},
+		{"trust selected", [][]string{folderShown, codexReady}, []string{"trust"}, "", 0, 1},
+		{"quit selected", [][]string{folderAccess(quitChoice), folderAccess(trustChoice), codexReady}, []string{"trust"}, "", 1, 1},
+		{"never reaches trust", [][]string{folderAccess(quitChoice), other, folderAccess(quitChoice), other, folderAccess(quitChoice)}, nil, "trust: 4 moves never selected", 4, 0},
+		{"no selection", [][]string{folderAccess("")}, nil, "matched no known startup state", 1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := codexFake(t)
+			for _, screen := range tt.reads {
+				fake.on(readScreen, historyLost(t, screen))
+			}
+			probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+			steps, err := runTrustedCodex(t, fake, probe.review(captainPins), refusalPoll)
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
+			}
+			if !slices.Equal(steps, tt.steps) || probe.calls != 0 {
+				t.Errorf("steps %v (want %v), probes %d", steps, tt.steps, probe.calls)
+			}
+			idle := 0
+			if tt.want == "" {
+				idle = 1
+			}
+			assertSent(t, fake, map[string]int{sendUp: tt.ups, sendEnter: tt.enters, sendDown: 0, sendTrust: 0, sendEscape: 0, waitIdle: idle})
+			if tt.ups > 0 && tt.enters > 0 && lastPosition(fake, sendUp) >= position(fake, sendEnter, 0) {
+				t.Error("Enter was sent before the selection was verified")
+			}
+		})
+	}
+}
+
+func TestCodexFolderTrustNeverResendsEnter(t *testing.T) {
+	folder := historyLost(t, folderShown)
+	tests := []struct {
+		name   string
+		read   string
+		enter  func(*fakeOrca)
+		want   string
+		enters int
+	}{
+		{"folder screen for another terminal", otherTerminal(folder), nil, `orca terminal read on task-a answered for terminal "term-2", not term-1`, 0},
+		{"folder screen from another runtime", strings.Replace(folder, `"runtimeId":"`+runtimeID+`"`, `"runtimeId":"rt-2"`, 1), nil, `answered from runtime "rt-2"`, 0},
+		{"Enter receipt for another terminal", folder, func(f *fakeOrca) { f.on(sendEnter, otherTerminal(ok(accepted))) }, `trust: orca terminal send on task-a answered for terminal "term-2", not term-1`, 1},
+		{"ambiguous Enter", folder, func(f *fakeOrca) { f.fail(sendEnter, "", errors.New("connection reset")) }, "trust: connection reset", 1},
+		{"screen stays after Enter", folder, func(f *fakeOrca) { f.on(sendEnter, ok(accepted)) }, "matched no known startup state", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeOrca(t).on(readScreen, tt.read)
+			if tt.enter != nil {
+				tt.enter(fake)
+			}
+			probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+			steps, err := runTrustedCodex(t, fake, probe.review(captainPins), refusalPoll)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || len(steps) != 0 {
+				t.Fatalf("Bootstrap = %v, %v, want %q", steps, err, tt.want)
+			}
+			if probe.calls != 0 {
+				t.Errorf("probes %d after a failed folder trust", probe.calls)
+			}
+			assertSent(t, fake, map[string]int{sendEnter: tt.enters, sendUp: 0, sendDown: 0, sendTrust: 0, sendEscape: 0, waitIdle: 0})
+		})
 	}
 }
 

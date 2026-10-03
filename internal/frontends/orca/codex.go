@@ -21,6 +21,7 @@ const (
 	screenSource    = "screen"
 	probeSchema     = 1
 	reviewBlocked   = `"agent-hooks-review-prompt"`
+	trustBlocked    = `"agent-trust-workspace"`
 	browserSelector = "›"
 	hooksTitle      = "Hooks"
 	hooksSubtitle   = "Lifecycle hooks from config and enabled plugins."
@@ -175,6 +176,7 @@ var (
 	reviewRow         = regexp.MustCompile(`^(›| ) ([A-Za-z]+) +(\d+) +(\d+) +(\d+) +\S.*$`)
 	trustedRow        = regexp.MustCompile(`^(›| ) ([A-Za-z]+) +(\d+) +(\d+) +\S.*$`)
 	sha256Hex         = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	folderTrust       = Gate{Name: "trust", Screen: regexp.MustCompile(`(?ms)^ *Folder access *$.*^ *Trust this folder\? Codex can read.*^ *enter continue · esc quit *$`), Choice: regexp.MustCompile(`^1\. Trust and continue$`), Move: KeyUp, Trust: true}
 )
 
 type Pin struct {
@@ -227,7 +229,7 @@ type hookRows struct {
 }
 
 func CodexStartup(review HookReview) Startup {
-	return Startup{Hooks: &review}
+	return Startup{Gates: []Gate{folderTrust}, Hooks: &review}
 }
 
 func (e HookRefusal) Error() string {
