@@ -253,10 +253,10 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
     expose_native "$HOME/"'.claude/plugins/cache/market/hooks/1.0.0' 'bin/hooks'
   fi
 `
-	stale := `  if [ -z "${added_marketplaces['market']:-}" ] && stale_marketplace "$working" 'hooks@market 1.0.0'; then
+	stale := `  if ! grep -qxF 'market' <<< "$added_marketplaces" && stale_marketplace "$working" 'hooks@market 1.0.0'; then
     claude plugin marketplace update 'market'
   fi
-  if [ -z "${added_marketplaces['secret']:-}" ] && stale_marketplace "$working" 'vault@secret 2.0.0'; then
+  if ! grep -qxF 'secret' <<< "$added_marketplaces" && stale_marketplace "$working" 'vault@secret 2.0.0'; then
     claude plugin marketplace update 'secret'
   fi
   install_plugin 'hooks@market' '1.0.0' "$1"
