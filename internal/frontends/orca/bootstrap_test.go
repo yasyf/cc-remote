@@ -20,7 +20,7 @@ const (
 	accepted   = `{"send":{"handle":"term-1","accepted":true,"bytesWritten":1}}`
 )
 
-var fastPoll = orca.Poll{Interval: time.Millisecond, Timeout: 2 * time.Second}
+var bootstrapPoll = orca.Poll{Interval: time.Millisecond, Timeout: 2 * time.Second}
 
 func screenOf(t *testing.T, lines ...string) string {
 	t.Helper()
@@ -45,7 +45,7 @@ func TestBootstrapWalksClaudesFirstRunScreens(t *testing.T) {
 	for _, screen := range []string{theme, keyNo, keyNo, keyYes, security, security, trust, trust, bypassNo, bypassNo, bypassYes, ready, ready} {
 		fake.on(readScreen, screen)
 	}
-	steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, fastPoll)
+	steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestBootstrapWalksClaudesFirstRunScreens(t *testing.T) {
 
 func TestBootstrapRefusesTrustWithoutAuthorization(t *testing.T) {
 	fake := newFakeOrca(t).on(readScreen, screenOf(t, "Do you trust the files in this folder?", "❯ 1. Yes, proceed", "  2. No, exit"))
-	_, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, false, fastPoll)
+	_, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, false, bootstrapPoll)
 	if !errors.Is(err, orca.ErrUntrusted) {
 		t.Errorf("Bootstrap = %v, want ErrUntrusted", err)
 	}
@@ -89,7 +89,7 @@ func TestBootstrapStopsWhenTheSelectionNeverReachesTheChoice(t *testing.T) {
 	for _, screen := range []string{stuck, moved, stuck, moved, stuck} {
 		fake.on(readScreen, screen)
 	}
-	_, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, fastPoll)
+	_, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
 	if err == nil || !strings.Contains(err.Error(), "bypass: 4 moves never selected") {
 		t.Errorf("Bootstrap = %v", err)
 	}
@@ -102,7 +102,7 @@ func TestCodexStartupOnlyWaitsForIdle(t *testing.T) {
 	fake := newFakeOrca(t).
 		on(readScreen, screenOf(t, ">_ OpenAI Codex", "model: gpt-6-astra xhigh")).
 		on(waitIdle, ok(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null}}`))
-	steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.StartupOf(orca.Agent{Kind: orca.AgentCodex}), false, fastPoll)
+	steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.StartupOf(orca.Agent{Kind: orca.AgentCodex}), false, bootstrapPoll)
 	if err != nil || len(steps) != 0 || fake.called(waitIdle) != 1 {
 		t.Errorf("Bootstrap = %v, %v", steps, err)
 	}
