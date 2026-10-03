@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 )
 
@@ -53,6 +54,24 @@ func NewOrcaControl() (string, error) {
 		return "", fmt.Errorf("create private SSH control directory: %w", err)
 	}
 	return filepath.Join(dir, "%C"), nil
+}
+
+func EnsureOrcaControl(control string) error {
+	dir := filepath.Dir(control)
+	if control != filepath.Join(dir, "%C") || filepath.Dir(dir) != "/tmp" || !strings.HasPrefix(filepath.Base(dir), "ccr-") {
+		return fmt.Errorf("invalid recorded SSH control path %q", control)
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("restore SSH control directory: %w", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("stat SSH control directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 || int(info.Sys().(*syscall.Stat_t).Uid) != os.Getuid() {
+		return fmt.Errorf("SSH control directory %s must be a private directory owned by the current user", dir)
+	}
+	return nil
 }
 
 func (d Dir) OrcaForwardLog(name string) string {

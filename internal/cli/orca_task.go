@@ -93,6 +93,9 @@ func (t orcaTunnel) up(ctx context.Context) bool {
 }
 
 func (t orcaTunnel) ensure(ctx context.Context, port int) error {
+	if err := state.EnsureOrcaControl(t.Control); err != nil {
+		return err
+	}
 	if t.up(ctx) {
 		return nil
 	}

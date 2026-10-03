@@ -128,6 +128,14 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 	for _, runtimeID := range []string{"rt-1", "rt-2"} {
 		t.Run(runtimeID, func(t *testing.T) {
 			dir, bin := state.Dir(t.TempDir()), t.TempDir()
+			control, err := state.NewOrcaControl()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(filepath.Dir(control)) })
+			if err := os.Remove(filepath.Dir(control)); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\ncase \" $* \" in *' -O check '*) exit 1;; esac\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -137,7 +145,7 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 			if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "absent", Profile: "lean", Environment: "task-a", RuntimeID: "rt-1", Port: 7001, Forward: orcaTunnel{Host: "task-a", Config: "/recorded/config", Control: "/recorded/control", Log: dir.OrcaForwardLog("task-a")}}
+			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "absent", Profile: "lean", Environment: "task-a", RuntimeID: "rt-1", Port: 7001, Forward: orcaTunnel{Host: "task-a", Config: "/recorded/config", Control: control, Log: dir.OrcaForwardLog("task-a")}}
 			if err := state.Save(dir.Orca("task-a"), task); err != nil {
 				t.Fatal(err)
 			}
@@ -152,13 +160,16 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 			cmd := newOrcaReconnectCmd(runner)
 			cmd.SetArgs([]string{"task-a", "--config", path})
 			cmd.SetOut(io.Discard)
-			err := cmd.ExecuteContext(t.Context())
+			err = cmd.ExecuteContext(t.Context())
 			if (err == nil) != (runtimeID == "rt-1") || calls != 1 {
 				t.Fatalf("reconnect = %v, calls = %d", err, calls)
 			}
 			loaded, err := loadTask(dir, "task-a")
 			if err != nil || loaded.RuntimeID != "rt-1" || loaded.Forward != task.Forward {
 				t.Errorf("recorded task changed: %+v, %v", loaded, err)
+			}
+			if info, err := os.Stat(filepath.Dir(control)); err != nil || info.Mode().Perm() != 0o700 {
+				t.Errorf("recorded control parent was not restored: %v, %v", info, err)
 			}
 		})
 	}
