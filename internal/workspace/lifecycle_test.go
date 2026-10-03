@@ -1149,7 +1149,7 @@ func TestAnExpiredDirectPayloadAbandonsTheMachine(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "fetch payload "+sha+": ") || !strings.Contains(err.Error(), "HTTP 403") {
 		t.Fatalf("Create = %v", err)
 	}
-	if !expired.ran() || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
+	if !expired.ran() || h.machine.ran("ws-1", payloadPhase) != 0 || h.machine.ran("ws-1", packagesPhase) != 0 || h.machine.ran("ws-1", mergesPlugins) != 0 || h.machine.ran("ws-1", installs) != 0 || h.machine.ran("ws-1", publishes) != 0 {
 		t.Errorf("an expired download ran %q", h.machine.scripts["ws-1"])
 	}
 	if !strings.Contains(h.calls(), "destroy ws-1") {
@@ -2186,39 +2186,64 @@ func TestOpenRefusesAPayloadWithoutAptPayload(t *testing.T) {
 	}
 }
 
-func TestTheResidentPackagesInstallWhileThePayloadStreams(t *testing.T) {
-	h := newPayloadHarness(t)
-	var creating sync.WaitGroup
-	t.Cleanup(creating.Wait)
-	streaming, packaging := h.machine.hold(t, stagesPayload), h.machine.hold(t, packagesPhase)
-	created := make(chan error, 1)
-	creating.Go(func() {
-		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
-		created <- err
-	})
-	streaming.awaitEntered(t)
-	packaging.awaitEntered(t)
-	if mounts := h.machine.ran("ws-1", payloadPhase); mounts != 0 {
-		t.Errorf("the payload mounted %d times while its stream was still held", mounts)
+func TestTheResidentPackagesWaitForThePayloadToMount(t *testing.T) {
+	tests := []struct {
+		name     string
+		harness  func(*testing.T) *harness
+		transfer string
+	}{
+		{name: "local payload", harness: newPayloadHarness, transfer: stagesPayload},
+		{name: "direct payload", harness: func(t *testing.T) *harness {
+			h, _ := newDirectPayloadHarness(t, "printf '%s\\n' '"+payloadURL+"'")
+			return h
+		}, transfer: fetchesPayload},
 	}
-	packaging.release <- providers.Result{}
-	streaming.release <- providers.Result{}
-	if err := <-created; err != nil {
-		t.Fatal(err)
-	}
-	staged := h.ordered(0, stagesDebs+packagesSHA, packagesPhase+" resident "+packagesSHA, payloadPhase+sha+" ", loaderPhase)
-	if stage := h.machine.scripts["ws-1"][staged[0]]; !strings.HasPrefix(stage, "sudo bash -c ") || !strings.HasSuffix(stage, " "+stagesDebs+packagesSHA) {
-		t.Errorf("the packages archive was staged by %q", stage)
-	}
-	if got := h.machine.stdins["ws-1"][staged[0]]; got != packagesBytes {
-		t.Errorf("staged the packages archive from %q, want %q", got, packagesBytes)
-	}
-	if mount := h.machine.scripts["ws-1"][staged[2]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
-		t.Errorf("the payload phase ran as %q, want it to carry the packages pin", mount)
-	}
-	h.ordered(0, stagesPayload+sha, payloadPhase+sha+" ", loaderPhase)
-	if h.machine.ran("ws-1", stagesDebs) != 1 || h.machine.ran("ws-1", fetchesDebs) != 0 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 {
-		t.Errorf("the create ran %q", h.machine.scripts["ws-1"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := tt.harness(t)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			streaming, mounting := h.machine.hold(t, tt.transfer), h.machine.hold(t, payloadPhase)
+			packaging, installing := h.machine.hold(t, packagesPhase), h.machine.hold(t, installs)
+			checkingOut := h.machine.hold(t, checkout)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			streaming.awaitEntered(t)
+			checkingOut.awaitEntered(t)
+			checkingOut.release <- providers.Result{}
+			packaging.stillParked(t, "while the payload transfer was still running")
+			if mounting.ran() {
+				t.Error("the payload mounted while its transfer was still held")
+			}
+			streaming.release <- providers.Result{}
+			mounting.awaitEntered(t)
+			packaging.stillParked(t, "while the payload mount was still running")
+			mounting.release <- providers.Result{}
+			packaging.awaitEntered(t)
+			installing.awaitEntered(t)
+			installing.release <- providers.Result{}
+			packaging.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			staged := h.ordered(0, payloadPhase+sha+" ", stagesDebs+packagesSHA, packagesPhase+" resident "+packagesSHA, loaderPhase)
+			if stage := h.machine.scripts["ws-1"][staged[1]]; !strings.HasPrefix(stage, "sudo bash -c ") || !strings.HasSuffix(stage, " "+stagesDebs+packagesSHA) {
+				t.Errorf("the packages archive was staged by %q", stage)
+			}
+			if got := h.machine.stdins["ws-1"][staged[1]]; got != packagesBytes {
+				t.Errorf("staged the packages archive from %q, want %q", got, packagesBytes)
+			}
+			if mount := h.machine.scripts["ws-1"][staged[0]]; mount != payloadPhase+sha+" "+h.session.Scripts.Fingerprint()+" "+packagesSHA {
+				t.Errorf("the payload phase ran as %q, want it to carry the packages pin", mount)
+			}
+			h.ordered(0, tt.transfer+sha, payloadPhase+sha+" ", loaderPhase)
+			if h.machine.ran("ws-1", stagesDebs) != 1 || h.machine.ran("ws-1", fetchesDebs) != 0 || h.machine.ran("ws-1", packagesPhase+" resident") != 1 {
+				t.Errorf("the create ran %q", h.machine.scripts["ws-1"])
+			}
+		})
 	}
 }
 
@@ -2385,7 +2410,7 @@ func TestAResumeRemountsAndRejectsAPackagesPinTheReadyPayloadWasNotBuiltWith(t *
 		t.Errorf("the rejected resume moved the ready stamp from %s to %q", h.session.Stamp, h.machine.ready["ws-1"])
 	}
 	for _, script := range h.machine.scripts["ws-1"][before:] {
-		if strings.Contains(script, publishes) || strings.Contains(script, loaderPhase) {
+		if strings.Contains(script, packagesPhase) || strings.Contains(script, publishes) || strings.Contains(script, loaderPhase) {
 			t.Errorf("the rejected resume ran %q", script)
 		}
 	}
