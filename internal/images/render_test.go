@@ -177,7 +177,7 @@ func TestRenderPluginsServicesAndEnv(t *testing.T) {
 	if want := "  mkdir -p ~/.example\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
 		t.Errorf("plugins.sh lacks the configure step %q", want)
 	}
-	if want := "  (\n    cd \"$HOME\"\n    mkdir -p ~/.cache/example\n  )\n  local link_check=spelling\n  verify_user\n}\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
+	if want := "  (\n    cd \"$HOME\"\n    mkdir -p ~/.cache/example\n  )\n  local link_check=spelling\n  verify_user\n  install_codex_hooks\n}\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
 		t.Errorf("plugins.sh lacks the prepare block %q", want)
 	}
 	if want := "  local stamp=\"${1:?publish needs the ready stamp}\"\n  verify_system\n  verify_user_links\n  mkdir -p \"$state_dir\"\n"; !bytes.Contains(scripts.Plugins, []byte(want)) {
@@ -508,7 +508,7 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 			if !bytes.Contains(scripts.ProvisionScript, []byte("mount -t squashfs -o ro,loop ")) || !bytes.Contains(scripts.ProvisionScript, []byte("  packages) provision_packages ;;\n")) {
 				t.Errorf("an inventory without apt.payload changed the payload mount or the packages phase")
 			}
-			if !bytes.Contains(scripts.ProvisionScript, []byte("  verify_bin 'cc-transcript' '--version'\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  local link_check=spelling\n  verify_user\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  verify_system\n  verify_user_links\n  mkdir -p \"$state_dir\"\n")) {
+			if !bytes.Contains(scripts.ProvisionScript, []byte("  verify_bin 'cc-transcript' '--version'\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  local link_check=spelling\n  verify_user\n  install_codex_hooks\n}\n")) || !bytes.Contains(scripts.Plugins, []byte("  verify_system\n  verify_user_links\n  mkdir -p \"$state_dir\"\n")) {
 				t.Errorf("an inventory without apt.payload deferred its executable probes")
 			}
 			for _, rendered := range [][]byte{scripts.ProvisionScript, scripts.Plugins, context.Provision} {
@@ -664,9 +664,17 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
+	beforeHooks, hooks, found := strings.Cut(string(scripts.ProvisionScript), "captain_codex_pin() {\n")
+	if !found {
+		t.Fatal("the user provision script has no Codex hook capture helpers")
+	}
+	_, pack, found := strings.Cut(hooks, "\nprovision_pack() {\n")
+	if !found {
+		t.Fatal("the user provision script has no pack function after its hook helpers")
+	}
 	var system []string
-	for line := range strings.Lines(string(scripts.ProvisionScript)) {
-		if line != "  pack_codex_hooks\n" && ((!strings.HasPrefix(line, "  pack_path ") && !strings.HasPrefix(line, "  pack_native ")) || !strings.Contains(line, `"$user_home/"`)) {
+	for line := range strings.Lines(beforeHooks + "provision_pack() {\n" + pack) {
+		if line != "  pack_codex_hooks\n" && line != "  check_codex_config \"$user_home/.codex/config.toml\"\n" && ((!strings.HasPrefix(line, "  pack_path ") && !strings.HasPrefix(line, "  pack_native ")) || !strings.Contains(line, `"$user_home/"`)) {
 			system = append(system, line)
 		}
 	}

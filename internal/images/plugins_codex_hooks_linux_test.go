@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -203,7 +204,7 @@ func TestProvisionPackCapturesOnlyGenericCodexHooks(t *testing.T) {
 	var captured []byte
 	for {
 		header, err := reader.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -268,11 +269,12 @@ func TestProvisionPackRejectsStaleCodexHookSources(t *testing.T) {
 				hooks := doc["hooks"].(map[string]any)
 				entries := hooks["Stop"].([]any)
 				entry := entries[0].(map[string]any)
-				if change == "duplicate handler" {
+				switch change {
+				case "duplicate handler":
 					hooks["Stop"] = append(entries, entry)
-				} else if change == "extra handler field" {
+				case "extra handler field":
 					entry["runtimeOwner"] = "other-host"
-				} else {
+				default:
 					entry["hooks"].([]any)[0].(map[string]any)["command"] = "CAPT_HOOK_PROVIDER=codex '/runtime/other-captain/bin/hook' run Stop"
 				}
 				writePluginTestFile(t, path, mustJSON(t, doc), 0o600)

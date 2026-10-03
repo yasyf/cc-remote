@@ -569,6 +569,8 @@ pack_native() {
   pack_once "$runner"
 }
 
+{{- if and .CodexRuntime .HomeTrees}}
+
 {{template "captain-codex-helpers" .}}
 
 check_codex_config() {
@@ -621,6 +623,7 @@ pack_codex_hooks() {
   ' "$user_home/.codex/hooks.json" > "$staged"
   staged_paths+=("${user_home#/}/.codex/hooks.json")
 }
+{{- end}}
 
 provision_pack() {
   local fingerprint="${1:?pack needs the tools fingerprint}" user_home version{{if .Closure}} packages_sha256{{end}}
@@ -631,7 +634,7 @@ provision_pack() {
   apt-get install -y -qq --no-install-recommends squashfs-tools > /dev/null
   user_home="$(passwd_home)"
   version="$(os_version)"
-{{- if .CodexRuntime}}
+{{- if and .CodexRuntime .HomeTrees}}
   check_codex_config "$user_home/.codex/config.toml"
 {{- end}}
 {{- if .Closure}}
