@@ -569,14 +569,71 @@ pack_native() {
   pack_once "$runner"
 }
 
+{{template "captain-codex-helpers" .}}
+
+check_codex_config() {
+  python3 - "$1" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as source:
+    config = tomllib.load(source)
+
+
+def check(table):
+    for key, value in table.items():
+        if key == "hooks" and (not isinstance(value, dict) or value.keys() - {"enabled"}):
+            sys.exit("cc-remote: Codex config contains hook handlers or trust state; pack from a clean fresh builder")
+        if key == "projects" and any("trust_level" in project for project in value.values()):
+            sys.exit("cc-remote: Codex config contains project trust; pack from a clean fresh builder")
+        if isinstance(value, dict):
+            check(value)
+
+
+check(config)
+PY
+}
+
+pack_codex_hooks() {
+  local pin id version root command staged="$tmp_dir/home$user_home/.codex/hooks.json"
+  pin="$(captain_codex_pin)"
+  if [ -z "$pin" ]; then
+    return
+  fi
+  id="$(jq -r .ID <<< "$pin")"
+  version="$(jq -r .Version <<< "$pin")"
+  root="$user_home/.claude/plugins/cache/${id#*@}/${id%@*}/$version"
+  if ! jq -se --arg id "$id" --arg version "$version" --arg root "$root" '
+    length == 1 and (.[0].plugins[$id] | map(select(.scope == "user")) | length == 1 and .[0].version == $version and .[0].installPath == $root)
+  ' "$user_home/.claude/plugins/installed_plugins.json" > /dev/null; then
+    echo "cc-remote: Captain Hook plugin metadata differs from $id at $version in $root" >&2
+    exit 1
+  fi
+  captain_codex_root "$root" "$version"
+  command="CAPT_HOOK_PROVIDER=codex $(jq -rn --arg path "$root/bin/hook" '$path | @sh')"
+  mkdir -p "$(dirname "$staged")"
+  jq -s --arg command "$command" '
+    if length != 1 then error("expected one hooks document") else .[0] end |
+    . as $live | ({{template "captain-codex-definitions"}}) as $captain |
+    {hooks: ($captain | with_entries(
+      . as $entry | .value = [$live.hooks[$entry.key][] | select(. == $entry.value[0])] |
+      if (.value | length) == 1 then . else error("missing or duplicate generic Captain Hook handler for " + .key) end))}
+  ' "$user_home/.codex/hooks.json" > "$staged"
+  staged_paths+=("${user_home#/}/.codex/hooks.json")
+}
+
 provision_pack() {
   local fingerprint="${1:?pack needs the tools fingerprint}" user_home version{{if .Closure}} packages_sha256{{end}}
   local -a paths=()
+  local -a staged_paths=()
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   apt-get install -y -qq --no-install-recommends squashfs-tools > /dev/null
   user_home="$(passwd_home)"
   version="$(os_version)"
+{{- if .CodexRuntime}}
+  check_codex_config "$user_home/.codex/config.toml"
+{{- end}}
 {{- if .Closure}}
   provision_capture "$user_home"
   tar -C "$debs_dir" --numeric-owner -cf "$packages_pack" .
@@ -587,7 +644,11 @@ provision_pack() {
   pack_path {{.Requirement}} {{q .Path}}
 {{- end}}
 {{- range .HomeTrees}}
+{{- if eq .Path ".codex/hooks.json"}}
+  pack_codex_hooks
+{{- else}}
   pack_path {{.Requirement}} {{under "user_home" .Path}}
+{{- end}}
 {{- end}}
 {{- range .Natives}}
   pack_native {{under "user_home" .Dir}} {{q .Bin}}
@@ -595,7 +656,8 @@ provision_pack() {
   jq -n --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages_sha256"{{end}} \
     '{schemaVersion: {{if .Closure}}2{{else}}1{{end}}, tools: $tools, home: $home, arch: $arch, os: $os{{if .Closure}}, packages: $packages{{end}}}' > "$tmp_dir/cc-remote-payload.json"
   install -d /var/lib/cc-remote/build
-  tar -C / --numeric-owner --exclude=.in_use --exclude=.orphaned_at --exclude=.lock -cpf - "${paths[@]}" -C "$tmp_dir" cc-remote-payload.json \
+  mkdir -p "$tmp_dir/home"
+  tar -C / --numeric-owner --exclude=.in_use --exclude=.orphaned_at --exclude=.lock -cpf - "${paths[@]}" -C "$tmp_dir/home" "${staged_paths[@]}" -C "$tmp_dir" cc-remote-payload.json \
     | mksquashfs - /var/lib/cc-remote/build/payload.sqfs -tar -comp zstd -noappend -no-progress -quiet
 }
 

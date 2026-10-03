@@ -203,6 +203,7 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
 }
 `
 	pack := `  version="$(os_version)"
+  check_codex_config "$user_home/.codex/config.toml"
   pack_path required '/opt/cc-remote/tools/uv-0.1.0'
   pack_path required '/opt/cc-remote/tools/claude-2.0.0'
   pack_path required '/opt/cc-remote/tools/codex-0.2.0'
@@ -220,6 +221,7 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
   pack_path required "$user_home/"'.claude/settings.json'
   pack_path required "$user_home/"'.cache/codex-runtimes/codex-primary-runtime'
   pack_path required "$user_home/"'.codex/config.toml'
+  pack_codex_hooks
   pack_path required "$user_home/"'.codex/plugins/cache/openai-primary-runtime'
   pack_path required "$user_home/"'.daemonkit/tools/capt-hook/1.0.0'
   pack_path optional "$user_home/"'.local/share/uv/python'
@@ -243,6 +245,7 @@ func TestRenderExposesPayloadTrees(t *testing.T) {
     expose copy required "$HOME/"'.claude/settings.json'
     expose link required "$HOME/"'.cache/codex-runtimes/codex-primary-runtime'
     expose copy required "$HOME/"'.codex/config.toml'
+    expose copy optional "$HOME/"'.codex/hooks.json'
     expose copy required "$HOME/"'.codex/plugins/cache/openai-primary-runtime'
     expose children required "$HOME/"'.daemonkit/tools/capt-hook/1.0.0'
     expose link optional "$HOME/"'.local/share/uv/python'
@@ -663,7 +666,7 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	}
 	var system []string
 	for line := range strings.Lines(string(scripts.ProvisionScript)) {
-		if (!strings.HasPrefix(line, "  pack_path ") && !strings.HasPrefix(line, "  pack_native ")) || !strings.Contains(line, `"$user_home/"`) {
+		if line != "  pack_codex_hooks\n" && ((!strings.HasPrefix(line, "  pack_path ") && !strings.HasPrefix(line, "  pack_native ")) || !strings.Contains(line, `"$user_home/"`)) {
 			system = append(system, line)
 		}
 	}
@@ -672,7 +675,7 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 	}
 }
 
-func TestNoPayloadRendersOnlyAddOpenSSLToPreClosureTemplates(t *testing.T) {
+func TestNoPayloadRendersMatchPinnedTemplates(t *testing.T) {
 	before := os.DirFS("testdata/ddfe484")
 	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
 	for name, inv := range map[string]Inventory{"full": validInventory(), "bare": {Version: SchemaVersion}} {
