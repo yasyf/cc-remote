@@ -486,7 +486,14 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 
 func (s *Session) installLanes(run *lanes, machine string, staged transfers) (packages, tools <-chan struct{}) {
 	mounted := run.Go(func(ctx context.Context) error { return s.mountPayload(ctx, machine, staged.payload) })
-	packages = run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine, staged.packages) })
+	packages = run.Go(func(ctx context.Context) error {
+		if s.payload != nil {
+			if err := run.after(mounted); err != nil {
+				return err
+			}
+		}
+		return s.installPackages(ctx, machine, staged.packages)
+	})
 	tools = run.Go(func(ctx context.Context) error {
 		if err := run.after(mounted); err != nil {
 			return err
