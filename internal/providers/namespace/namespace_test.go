@@ -511,7 +511,7 @@ func TestExecRunsTheFramedCommandThroughTheNativeContainerSSH(t *testing.T) {
 		}
 	}
 	framing := regexp.MustCompile(`^LC_ALL=C python3 -I -S -c '[^']+' ([0-9a-f]{64}) `)
-	var nonces []string
+	nonces := make([]string, 0, len(fake.Shells())-before)
 	for _, got := range fake.Shells()[before:] {
 		match := framing.FindStringSubmatch(got[len(got)-1])
 		if match == nil {
