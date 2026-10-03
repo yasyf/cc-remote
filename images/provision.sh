@@ -19,6 +19,9 @@ closure_fonts_conf=/etc/fonts/conf.d/99-cc-remote-closure.conf
 closure_lock=/var/lib/cc-remote/ldconfig.lock
 closure_registered=/var/lib/cc-remote/closure.registered
 build_dir=/var/lib/cc-remote/build
+debs_dir=/var/lib/cc-remote/build/resident
+packages_pack=/var/lib/cc-remote/build/packages.tar
+packages_store=/var/lib/cc-remote/packages
 closure_packages=({{range $i, $name := .Closure}}{{if $i}} {{end}}{{q $name}}{{end}})
 {{- end}}
 prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)
@@ -70,6 +73,10 @@ installed_packages() {
   dpkg-query -W -f '${db:Status-Abbrev}\t${Package}\n'
 }
 
+base_packages() {
+  dpkg-query -W -f '${db:Status-Status}\t${Package}=${Version}\n' | sed -n 's/^installed\t//p' | LC_ALL=C sort
+}
+
 closure_package() {
   local package
   for package in "${closure_packages[@]}"; do
@@ -102,29 +109,101 @@ resident_packages() {
   done
 }
 
+stage_deb() {
+  local file="$build_dir/artifacts/$1-$2.deb"
+  fetch "$3" "$file" "$4" "$5"
+  record_deb "$file"
+  staged+=("$file")
+}
+
+uncaptured() {
+  awk -F= -v list="$tmp_dir/captured" 'BEGIN { while ((getline name < list) > 0) captured[name] } !($1 in captured)'
+}
+
+check_base() {
+  local manifest="$1" drift
+  {
+    jq -r '.debs[].package, .artifacts[].package' "$manifest"
+{{- if $.Apt.Remove}}
+    printf '%s\n'{{range $.Apt.Remove}} {{q .}}{{end}}
+{{- end}}
+  } > "$tmp_dir/captured"
+  jq -r '.base[]' "$manifest" | uncaptured > "$tmp_dir/base.payload"
+  base_packages | uncaptured > "$tmp_dir/base.machine"
+  drift="$(LC_ALL=C comm -3 "$tmp_dir/base.payload" "$tmp_dir/base.machine" | sed -e 's/^\t/+/' -e t -e 's/^/-/')"
+  if [ -n "$drift" ]; then
+    echo "cc-remote: the packages on this machine differ from the base its payload captured the resident packages against (-payload +machine), so they cannot install offline; rebuild the payload on this base:" >&2
+    printf '%s\n' "$drift" >&2
+    exit 1
+  fi
+}
+
+admit_packages() {
+  local sha256="$1" extracted
+  local archive="$packages_store/$sha256.tar"
+  if [ ! -f "$archive.admitted" ]; then
+    echo "cc-remote: no packages archive is admitted at $archive.admitted" >&2
+    exit 1
+  fi
+  (
+    flock 9
+    extracted="$(mktemp -d "$packages_store/$sha256.XXXXXXXX.partial")"
+    trap 'rm -rf "$extracted"' EXIT
+    tar -xf "$archive.admitted" -C "$extracted" --no-same-owner
+    rm -rf "${packages_store:?}/$sha256"
+    mv "$extracted" "$packages_store/$sha256"
+    rm -f "$archive.admitted"
+  ) 9> "$packages_store/.lock"
+}
+
 provision_packages() {
-  local mode="${1:-full}" listing status package
-  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=()
+  local mode="${1:-full}" sha256="${2:-}" listing status package manifest digest file deb_dir
+  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=() resident=() staged=() captured=() deb_flags=()
   case "$mode" in
-    full | resident) ;;
+    full) ;;
+    resident)
+      if [ -z "$sha256" ]; then
+        echo "provision: packages resident takes the packages archive sha256" >&2
+        exit 2
+      fi
+      ;;
     *)
       echo "provision: packages takes full or resident, not $mode" >&2
       exit 2
       ;;
   esac
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
-  packages+=("${t64_packages[@]}")
   if [ "$mode" = resident ]; then
-    deb_seeds=/dev/null
-    mapfile -t packages < <(resident_packages "${packages[@]}")
-    apt-get install -y -qq --no-install-recommends "${packages[@]}" > /dev/null
+    deb_dir="$packages_store/$sha256"
+    manifest="$deb_dir/debs.json"
+    deb_flags=(--no-download)
+    admit_packages "$sha256"
+    check_base "$manifest"
+    jq -r '.debs[] | "\(.sha256) \(.file)"' "$manifest" > "$tmp_dir/debs"
+    install -d -m 0755 "$tmp_dir/apt-archives/partial"
+    while read -r digest file; do
+      verify_payload "$digest" "$deb_dir/$file"
+      install -m 0644 "$deb_dir/$file" "$tmp_dir/apt-archives/$file"
+      captured+=("$deb_dir/$file")
+    done < "$tmp_dir/debs"
+    apt-get install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null
   else
-    install -d -m 0755 "$build_dir"
+    apt-get update -qq
+    mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
+    packages+=("${t64_packages[@]}")
+    deb_dir="$build_dir/artifacts"
+    install -d -m 0755 "$build_dir" "$build_dir/debs/partial" "$deb_dir"
     deb_seeds="$build_dir/seeds"
     resident_packages "${packages[@]}" > "$deb_seeds"
+    mapfile -t resident < "$deb_seeds"
     installed_packages > "$build_dir/packages.before"
+    base_packages > "$build_dir/base"
+{{- range $.System}}
+{{- if eq .Format "deb"}}
+    {{stage .}}
+{{- end}}
+{{- end}}
+    apt-get install -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives="$build_dir/debs/" "${resident[@]}" "${staged[@]}" > /dev/null
     apt-get install -y -qq --no-install-recommends "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
   fi
 {{- else}}
@@ -259,7 +338,7 @@ JSON
 {{template "capture.py"}}PY
   cat > "$tmp_dir/loader.py" <<'PY'
 {{template "loader.py"}}PY
-  python3 "$tmp_dir/capture.py" "$tmp_dir/closure.json" / "$closure_root" "$build_dir" "$1" "$tmp_dir/loader.py"
+  python3 "$tmp_dir/capture.py" "$tmp_dir/closure.json" / "$closure_root" "$build_dir" "$1" "$tmp_dir/loader.py" "$debs_dir"
 }
 {{- end}}
 
@@ -324,11 +403,21 @@ verify_payload() {
 
 provision_payload() {
   local sha256="${1:?payload needs the image sha256}" fingerprint="${2:?payload needs the tools fingerprint}"
+{{- if .Closure}}
+  local packages_sha256="${3:?payload needs the packages archive sha256}"
+{{- end}}
   local image="$payload_store/$sha256.sqfs" payload="$payload_root/$sha256" user_home version mismatch device
+{{- if .Closure}}
+  if [ ! -f "$image.admitted" ] && [ ! -f "$image" ]; then
+    echo "cc-remote: no payload is admitted at $image.admitted" >&2
+    exit 1
+  fi
+{{- else}}
   if [ ! -f "$image.partial" ] && [ ! -f "$image" ]; then
     echo "cc-remote: no payload is staged at $image.partial" >&2
     exit 1
   fi
+{{- end}}
   cat > "$tmp_dir/payload-mount.sh" <<'SH'
 #!/bin/sh
 set -eu
@@ -340,6 +429,9 @@ verify() {
 }
 exec 9> /var/lib/cc-remote/payload/.lock
 flock 9
+{{- if .Closure}}
+boot="$(cat /proc/sys/kernel/random/boot_id)"
+{{- end}}
 for image in /var/lib/cc-remote/payload/*.sqfs; do
   if [ ! -e "$image" ]; then
     continue
@@ -348,12 +440,21 @@ for image in /var/lib/cc-remote/payload/*.sqfs; do
   dir="/opt/cc-remote/payload/$sha256"
   mkdir -p "$dir"
   if mountpoint -q "$dir"; then
+{{- if .Closure}}
+    if [ "$(cat "$image.boot" 2> /dev/null)" != "$boot" ]; then
+      verify "$sha256" "$(findmnt -no SOURCE "$dir")"
+    fi
+{{- else}}
     device="$(findmnt -no SOURCE "$dir")"
     verify "$sha256" "$device"
+{{- end}}
   else
     verify "$sha256" "$image"
     mount -t squashfs -o ro{{if .Closure}},nosuid,nodev{{end}},loop "$image" "$dir"
   fi
+{{- if .Closure}}
+  echo "$boot" > "$image.boot"
+{{- end}}
 done
 {{- if .Closure}}
 if [ -e /var/lib/cc-remote/closure.registered ]; then
@@ -365,9 +466,14 @@ SH
   install -m 0755 "$tmp_dir/payload-mount.sh" /opt/cc-remote/payload-mount.sh
   (
     flock 9
+{{- if .Closure}}
+    if [ -f "$image.admitted" ]; then
+      mv -f "$image.admitted" "$image"
+{{- else}}
     if [ -f "$image.partial" ]; then
       verify_payload "$sha256" "$image.partial"
       mv -f "$image.partial" "$image"
+{{- end}}
     elif ! mountpoint -q "$payload"; then
       verify_payload "$sha256" "$image"
     fi
@@ -377,6 +483,9 @@ SH
     else
       mount -t squashfs -o ro{{if .Closure}},nosuid,nodev{{end}},loop "$image" "$payload"
     fi
+{{- if .Closure}}
+    cat /proc/sys/kernel/random/boot_id > "$image.boot"
+{{- end}}
   ) 9> "$payload_store/.lock"
   if ! jq -se 'length == 1 and (.[0] | type == "object")' "$payload/cc-remote-payload.json" > /dev/null; then
     echo "cc-remote: payload $payload/cc-remote-payload.json is not exactly one JSON object" >&2
@@ -384,9 +493,9 @@ SH
   fi
   user_home="$(passwd_home)"
   version="$(os_version)"
-  mismatch="$(jq -r --arg dir "$payload" --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version" '
+  mismatch="$(jq -r --arg dir "$payload" --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages_sha256"{{end}} '
     . as $have
-    | {schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}
+    | {schemaVersion: {{if .Closure}}2{{else}}1{{end}}, tools: $tools, home: $home, arch: $arch, os: $os{{if .Closure}}, packages: $packages{{end}}}
     | to_entries[]
     | select($have[.key] != .value)
     | "cc-remote: payload \($dir) has \(.key) \($have[.key] | tojson), want \(.value | tojson)"
@@ -461,7 +570,7 @@ pack_native() {
 }
 
 provision_pack() {
-  local fingerprint="${1:?pack needs the tools fingerprint}" user_home version
+  local fingerprint="${1:?pack needs the tools fingerprint}" user_home version{{if .Closure}} packages_sha256{{end}}
   local -a paths=()
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
@@ -470,6 +579,9 @@ provision_pack() {
   version="$(os_version)"
 {{- if .Closure}}
   provision_capture "$user_home"
+  tar -C "$debs_dir" --numeric-owner -cf "$packages_pack" .
+  packages_sha256="$(sha256sum "$packages_pack")"
+  packages_sha256="${packages_sha256%% *}"
 {{- end}}
 {{- range .SystemTrees}}
   pack_path {{.Requirement}} {{q .Path}}
@@ -480,8 +592,8 @@ provision_pack() {
 {{- range .Natives}}
   pack_native {{under "user_home" .Dir}} {{q .Bin}}
 {{- end}}
-  jq -n --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version" \
-    '{schemaVersion: 1, tools: $tools, home: $home, arch: $arch, os: $os}' > "$tmp_dir/cc-remote-payload.json"
+  jq -n --arg tools "$fingerprint" --arg home "$user_home" --arg arch "$(uname -m)" --arg os "$version"{{if .Closure}} --arg packages "$packages_sha256"{{end}} \
+    '{schemaVersion: {{if .Closure}}2{{else}}1{{end}}, tools: $tools, home: $home, arch: $arch, os: $os{{if .Closure}}, packages: $packages{{end}}}' > "$tmp_dir/cc-remote-payload.json"
   install -d /var/lib/cc-remote/build
   tar -C / --numeric-owner --exclude=.in_use --exclude=.orphaned_at --exclude=.lock -cpf - "${paths[@]}" -C "$tmp_dir" cc-remote-payload.json \
     | mksquashfs - /var/lib/cc-remote/build/payload.sqfs -tar -comp zstd -noappend -no-progress -quiet
@@ -490,16 +602,16 @@ provision_pack() {
 case "$phase" in
   prerequisites) provision_prerequisites ;;
 {{- if .Closure}}
-  packages) provision_packages "${2:-}" ;;
+  packages) provision_packages "${2:-}" "${3:-}" ;;
   loader) provision_loader ;;
 {{- else}}
   packages) provision_packages ;;
 {{- end}}
   tools) provision_tools ;;
-  payload) provision_payload "${2:-}" "${3:-}" ;;
+  payload) provision_payload "${2:-}" "${3:-}"{{if .Closure}} "${4:-}"{{end}} ;;
   pack) provision_pack "${2:-}" ;;
   *)
-    echo "usage: provision.sh prerequisites|packages{{if .Closure}} [full|resident]|loader{{end}}|tools|payload SHA256 FINGERPRINT|pack FINGERPRINT" >&2
+    echo "usage: provision.sh prerequisites|packages{{if .Closure}} [full|resident SHA256]|loader{{end}}|tools|payload SHA256 FINGERPRINT{{if .Closure}} PACKAGES_SHA256{{end}}|pack FINGERPRINT" >&2
     exit 2
     ;;
 esac

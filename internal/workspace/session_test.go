@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,13 +32,15 @@ func TestTheExampleConfigRendersItsInventoryForEveryProfileAndProvider(t *testin
 	}
 }
 
-func TestOnlyThePayloadDigestMovesTheStamp(t *testing.T) {
+func TestOnlyThePayloadAndPackagesDigestsMoveTheStamp(t *testing.T) {
 	cfg := payloadConfig(t, "", inventory)
 	scripts := fullScripts(t, cfg)
 	other := strings.Repeat("ab", 32)
-	bare, mounted, remounted := images.Stamp(scripts, nil, ""), images.Stamp(scripts, nil, sha), images.Stamp(scripts, nil, other)
-	if bare == mounted || mounted == remounted || bare == remounted {
-		t.Fatalf("stamps collide: without a payload %s, with %s, with another digest %s", bare, mounted, remounted)
+	bare, mounted, remounted := images.Stamp(scripts, nil, "", ""), images.Stamp(scripts, nil, sha, ""), images.Stamp(scripts, nil, other, "")
+	paired, repaired := images.Stamp(scripts, nil, sha, packagesSHA), images.Stamp(scripts, nil, sha, other)
+	stamps := []string{bare, mounted, remounted, paired, repaired}
+	if distinct := slices.Compact(slices.Sorted(slices.Values(stamps))); len(distinct) != len(stamps) {
+		t.Fatalf("stamps collide: %q", stamps)
 	}
 	tests := []struct {
 		name    string
@@ -45,9 +48,13 @@ func TestOnlyThePayloadDigestMovesTheStamp(t *testing.T) {
 		want    string
 	}{
 		{"no payload", nil, bare},
-		{"a payload", &config.Payload{Path: "tools.sqfs", SHA256: sha}, mounted},
-		{"the same digest at another path", &config.Payload{Path: "moved/tools.sqfs", SHA256: sha}, mounted},
-		{"another digest", &config.Payload{Path: "tools.sqfs", SHA256: other}, remounted},
+		{"a payload", &config.Payload{Source: config.Source{Path: "tools.sqfs", SHA256: sha}}, mounted},
+		{"the same digest at another path", &config.Payload{Source: config.Source{Path: "moved/tools.sqfs", SHA256: sha}}, mounted},
+		{"another digest", &config.Payload{Source: config.Source{Path: "tools.sqfs", SHA256: other}}, remounted},
+		{"a packages archive", &config.Payload{Source: config.Source{Path: "tools.sqfs", SHA256: sha}, Packages: &config.Source{Path: "debs.tar", SHA256: packagesSHA}}, paired},
+		{"the same packages digest at another path", &config.Payload{Source: config.Source{Path: "tools.sqfs", SHA256: sha}, Packages: &config.Source{Path: "moved/debs.tar", SHA256: packagesSHA}}, paired},
+		{"a direct packages archive at the same digest", &config.Payload{Source: config.Source{Path: "tools.sqfs", SHA256: sha}, Packages: &config.Source{URLCommand: []string{"./packages-url"}, SHA256: packagesSHA, Size: 4}}, paired},
+		{"another packages digest", &config.Payload{Source: config.Source{Path: "tools.sqfs", SHA256: sha}, Packages: &config.Source{Path: "debs.tar", SHA256: other}}, repaired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

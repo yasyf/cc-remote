@@ -19,12 +19,16 @@ import (
 
 func TestPluginsOverlapCodexRuntimeWithClaudeReconciliation(t *testing.T) {
 	for _, tt := range []struct {
-		name           string
-		runtimeFailure bool
-		claudeFailure  bool
-		wantExit       int
+		name            string
+		closure         bool
+		runtimeFailure  bool
+		claudeFailure   bool
+		wantExit        int
+		installListings int
+		publishListings int
 	}{
-		{name: "success"},
+		{name: "success", installListings: 2, publishListings: 2},
+		{name: "closure success", closure: true, installListings: 1, publishListings: 2},
 		{name: "runtime digest failure", runtimeFailure: true, wantExit: 1},
 		{name: "Claude failure", claudeFailure: true, wantExit: 37},
 	} {
@@ -74,6 +78,9 @@ printf '{"build":"1.0.0"}\n' > "$HOME/.local/share/captain-hook/host/version.jso
 				CodexRuntime: &CodexRuntime{Version: "1.0.0", URL: server.URL + "/runtime", SHA256: sum, Plugins: []string{"documents"}},
 				CaptainHook:  &CaptainHook{Version: "1.0.0", URL: "file://" + hostArchive, SHA256: hostSum},
 				Prepare:      []string{`test -f "$HOME/captain-installed"`, `IFS= read -r remaining`, `test "$remaining" = retained-input`, `touch "$HOME/prepared"`},
+			}
+			if tt.closure {
+				inventory.Apt.Payload = &AptPayload{Closure: []string{"libnss3"}}
 			}
 			h := newPluginsHost(t, inventory, marketplaceCatalog("0.7.17"), fakeState{}, nil)
 			writePluginTestFile(t, filepath.Join(h.fakes, "claude-inner"), []byte(fakeClaude), 0o700)
@@ -183,8 +190,14 @@ exec %s "$@"
 			if h.version("hook@tools-market") != "1.0.0" {
 				t.Error("Claude plugin pin was not installed")
 			}
+			if got := countCall(h.calls(), "codex plugin list"); got != tt.installListings {
+				t.Errorf("install Codex plugin listings = %d, want %d", got, tt.installListings)
+			}
 			if out, err := h.plugins("publish", digest); err != nil {
 				t.Fatalf("publish after a successful install failed: %v\n%s", err, out)
+			}
+			if got := countCall(h.calls(), "codex plugin list"); got != tt.publishListings {
+				t.Errorf("Codex plugin listings after publish = %d, want %d", got, tt.publishListings)
 			}
 			if stamp, err := os.ReadFile(filepath.Join(h.home, ".cc-remote", "ready")); err != nil || string(stamp) != digest+"\n" {
 				t.Errorf("ready stamp after publish = %q, %v; want %q", stamp, err, digest+"\n")

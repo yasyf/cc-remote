@@ -13,7 +13,7 @@ to replace before installation; rendering and fingerprinting need no provider si
 | `cc-remote images render` | `--inventory`, `--profile`, `--out` | Writes `plugins.sh` and `provision.sh`; with `image`, also writes `Dockerfile` and `start.sh`. |
 | `cc-remote images fingerprint` | `--inventory`, `--profile` | Prints JSON with `tools`, and `image` when configured. |
 | `cc-remote images build` | `--inventory` | Builds and publishes the configured Namespace image through `devbox image build`. Requires a logged-in `devbox` CLI. |
-| `cc-remote payload build` | `--out` | Builds a private `SquashFS` payload on a fresh Sprite. Accepts `--config`, `--provider`, and `--profile`; prints JSON with `sha256`, `size`, `tools`, `machine`, and `path`. |
+| `cc-remote payload build` | `--out`, `--packages-out` | Builds a private `SquashFS` payload and resident packages archive on a fresh Sprite. Accepts `--config`, `--provider`, and `--profile`; prints JSON with `sha256`, `size`, `tools`, `machine`, and `path`, plus the archive's `sha256`, `size`, and `path` under `packages`. |
 
 The committed example has this fingerprint output:
 
@@ -33,7 +33,7 @@ cc-remote images fingerprint --inventory examples/inventory.yaml --profile agent
 | Section | Fields | Meaning |
 | --- | --- | --- |
 | `image` | `name`, `base`, `user`, `workspaceDir`, `layer` | Optional Namespace image. `base` requires an `@sha256:` digest; `workspaceDir` is an absolute path. `layer` adds single-line Dockerfile instructions after provisioning and forbids `FROM`, continuations, and heredocs. |
-| `apt` | `install`, `t64`, `remove`, `payload` | Root package lists. `t64` accommodates the distribution's package suffix. `payload` is optional and applies only to machines mounting a verified payload. `resident` names the packages every machine installs with their maintainer scripts; `closure` names the packages the payload build captures from a full install into `/opt/cc-remote/closure`, which a machine loads through `ld.so.conf.d` and `fonts/conf.d` entries; `bins` are closure executables linked into `/usr/local/bin`; `fonts` are families readiness proves with `fc-match`; `consumers` are home-relative or `/opt/cc-remote` executables whose libraries readiness lists with the real loader; `projections` are closure directories linked at their compiled-in paths (a closure copy that is itself a symlink must resolve inside the closure); a resident package that later installs a real directory at a projected path makes the next activation fail closed. Resident mode fails when any `closure` package is installed, naming each with its dpkg status and version, so a machine provisioned in full mode stays on full mode and is never converted; the closure targets fresh payload machines and their same-mode resumes. With a closure, the tool and plugin installs check pins and link spelling only; the executable probes run at publish, after the loader has registered the closure, and the boot remount re-runs `ldconfig` only once that registration has happened. Without `payload`, the rendered scripts are unchanged. |
+| `apt` | `install`, `t64`, `remove`, `payload` | Root package lists. `t64` accommodates the distribution's package suffix. `payload` is required when building or mounting a verified payload. `resident` names the packages every machine installs with their maintainer scripts. The payload build downloads the resident transaction once, records the build machine's installed packages as its base, and writes the `.deb` files with a `debs.json` manifest into a separate packages archive, outside the SquashFS, whose sha256 the payload manifest records; `payload build --packages-out` saves it, and the machine's `payload.packages` pins it like the payload itself, as a `path` to stream or a `url_command` with a `size`. A fresh machine admits the archive under `/var/lib/cc-remote/packages` only when its sha256 matches, extracts it, and installs it with `apt-get install --no-download` after checking each sha256 and its own installed packages against that base, without waiting for the payload mount, and runs no `apt-get update`. The payload phase fails when the mounted manifest names another archive. A base that differs fails before apt runs and needs a payload rebuilt on the new base; there is no online fallback. A closure payload declares `schemaVersion` 2. `closure` names the packages the payload build captures from a full install into `/opt/cc-remote/closure`, which a machine loads through `ld.so.conf.d` and `fonts/conf.d` entries; `bins` are closure executables linked into `/usr/local/bin`; `fonts` are families readiness proves with `fc-match`; `consumers` are home-relative or `/opt/cc-remote` executables whose libraries readiness lists with the real loader; `projections` are closure directories linked at their compiled-in paths (a closure copy that is itself a symlink must resolve inside the closure); a resident package that later installs a real directory at a projected path makes the next activation fail closed. Resident mode fails when any `closure` package is installed, naming each with its dpkg status and version, so a machine provisioned in full mode stays on full mode and is never converted; the closure targets fresh payload machines and their same-mode resumes. With a closure, the tool and plugin installs check pins and link spelling only; the executable probes run at publish, after the loader has registered the closure, and the boot remount re-runs `ldconfig` only once that registration has happened. Without `payload`, the rendered scripts are unchanged. |
 | `system` | Artifact list | Root artifacts under `/opt/cc-remote/tools`, linked into `/usr/local/bin`. |
 | `tools` | Artifact list | User artifacts under `$HOME/.local/share/cc-remote/tools`, or their explicit `dest`, linked into `$HOME/.local/bin`. |
 | `links` | Executable names | Adds user links to installed system executables. |
@@ -125,19 +125,55 @@ reinstall those plugins. Plugin reinstallation uses the version as its identity.
 
 ## Machine payloads
 
-A profile machine can select a private local `SquashFS` file with
+A profile machine can select a private `SquashFS` image with
 `profiles.<profile>.machine.<provider>.payload`. Payloads require a machine
 provisioned in place with the `sprite-env` supervisor and exclude `image`.
+The local `path` source remains the default; `url_command` opts into a direct
+HTTPS download by the machine. Exactly one of `path` and `url_command` must be set.
 
 | Field | Contract |
 | --- | --- |
 | `path` | Must resolve to a local regular file owned by the current user, with no group or other permissions; symlinks are followed, and relative paths resolve from the config file's directory. Other file types fail creation before streaming. |
+| `url_command` | YAML list whose first element names an executable and whose remaining elements are its arguments. The executable resolves relative to the config file's directory or uses an absolute path; it is never searched for on `PATH`. |
 | `sha256` | File digest as 64 lowercase hexadecimal characters. |
+| `size` | Positive byte count pinned for a direct download. Required with `url_command`; forbidden with `path`. |
+
+cc-remote appends `sha256` and decimal `size`, in that order, to the configured
+`url_command` arguments. It runs the command in the config file's directory with
+empty stdin and a 60 s timeout. On create, it runs after the name and tailnet
+checks, before saving the workspace record or creating a machine. On a resume
+that needs tool reinstallation because the readiness stamp changed, it runs
+again immediately before the reinstall.
+
+The command's output contract is:
+
+| Output | Contract |
+| --- | --- |
+| Stdout | Exactly one absolute `https://` URL with a host and no userinfo, optionally followed by one newline. The URL is at most 8192 bytes of printable ASCII, with no spaces, double quotes (`"`), or backslashes (`\`). |
+| Stderr | Discarded on success, failure, timeout, and kill; never reaches the CLI, Orca, slog, errors, state, or results. The command must never print the URL on stderr. |
+| Exit 0 | Supplies the URL on stdout; malformed output still fails creation before a machine exists. |
+| Nonzero exit | Fails creation before a machine exists, reported only as `payload url_command <argv0>: <exit status or signal>`. A timeout also fails at this point. |
+
+A site command can use `aws s3api head-object` to confirm the object exists and
+its `ContentLength` equals the supplied `size`, returning exit status `3`
+otherwise. It then runs
+`aws s3 presign` with `--expires-in 900` and prints the URL. The URL must use the
+regional endpoint to avoid a `301` or `307` redirect and remain valid for at least
+600 s.
+
+The helper should put diagnostics, such as AWS SSO sign-in guidance, in its own log
+or a message it prints when run by hand. It must print the URL only on stdout.
+
+The URL is a bearer credential. cc-remote keeps it only in memory and sends it to
+the machine solely on the stdin of one remote command, as the curl config
+`url = "..."`. It never appears in process arguments or environment, logs, state,
+result JSON, or error strings. Every `fmt` verb formats the Go URL value as
+`[payload url]`.
 
 With a configured Sprites provider and `lean` profile, a build command is:
 
 ```sh
-cc-remote payload build --config ./config.yaml --provider sprites --profile lean --out ./tools.sqfs
+cc-remote payload build --config ./config.yaml --provider sprites --profile lean --out ./tools.sqfs --packages-out ./packages.tar
 ```
 
 The build installs the full inventory, including private marketplaces and the
@@ -147,24 +183,69 @@ Sprite only on the install phase's stdin.
 
 Before packing, `plugins.sh verify` checks system and user tools and links,
 including running each target's verify arguments; a failed check stops the build.
-The build packs an explicit allowlist of installed trees, streams the file back,
-and computes its SHA-256 and byte size.
-The build refuses to create `--out` if it exists or its parent directory is
-writable by group or others; the new file has mode `0600`. The build destroys its
-Sprite and confirms its absence before returning success. Its returned `path` and
-`sha256` supply the machine's payload fields.
+The build packs an explicit allowlist of installed trees and a separate resident
+packages archive, streams both files back, and computes each file's SHA-256 and
+byte size. It refuses either output path if it exists or its parent directory is
+writable by group or others; both new files have mode `0600`. The build destroys
+its Sprite and confirms its absence before returning success. The returned
+`path` and `sha256` supply the machine's payload fields; `packages.path` and
+`packages.sha256` supply `payload.packages`.
 
-Create streams the local file into the Sprite as a staged file; the payload phase
-checks its SHA-256, atomically renames it over the cached `<sha256>.sqfs`, and mounts
-it read-only under `/opt/cc-remote/payload/<sha256>`. Without a staged file, it
-verifies the cached image before mounting. An existing mount is accepted only
-when the loop device behind it hashes to the digest, even if a staged file
-replaced the image. A digest mismatch fails creation.
+With `path`, the Sprite runs
+`sudo bash -c <stage script> stage-payload <sha256>` with the laptop file on the
+provider's exec stdin. The script runs `cat | tee <staging file> | sha256sum`,
+writing and hashing the bytes in one pass. It checks every pipeline stage's exit
+status and compares the digest to the pin before renaming the staging file to
+`/var/lib/cc-remote/payload/<sha256>.sqfs.admitted` under the store lock (`.lock`).
 
-The manifest `cc-remote-payload.json` must have `schemaVersion: 1` and match the
+With `url_command`, the machine runs
+`sudo bash -c <fetch script> fetch-payload <sha256> <size>`. The script runs
+`curl -q --config - --silent --fail --proto =https --max-filesize <size>` with a
+30 s connection timeout and a 600 s transfer timeout. It pipes the response
+through `tee` into native `sha256sum`, writing the staging file and hashing the
+bytes in one pass. The checksum overlaps the transfer; the downloaded file is
+never re-read for admission. The script checks every pipeline stage's exit
+status, requires HTTP `200`, and compares the file's size and SHA-256 with both
+pins. Only then does it rename the staging file to `<sha256>.sqfs.admitted` under
+the store lock (`.lock`).
+
+HTTP errors, including `403` and `404`, fail with the HTTP code; a `403` diagnostic
+notes that the presigned URL may have expired. Redirects are not followed.
+Truncation, a failed pipeline stage, a timeout, a size mismatch, or a digest
+mismatch fails the transfer.
+
+Both scripts enable `pipefail` and use `mktemp` to create a file with mode `0600`
+named `<sha256>.sqfs.<8 random chars>.partial` in the store for each invocation.
+A canceled transfer that is still running cannot overwrite another transfer's
+bytes. Their `EXIT` traps remove staging files on failure. Both sources report a
+digest mismatch as
+`cc-remote: the payload has sha256 <got>, want <pinned>`.
+
+Both sources run inside the existing tools lane, concurrently with checkout and
+packages. No additional lane is created. The `provision.sh payload` phase accepts
+these forms under `/var/lib/cc-remote/payload`:
+
+| File | Admission before mount |
+| --- | --- |
+| `<sha256>.sqfs.admitted` | Already verified during transfer; renamed to `<sha256>.sqfs` under the store lock without a second hash. |
+| `<sha256>.sqfs` | Cached file; hashed before mount. |
+
+The payload phase never reads `.partial` files. Without an admitted or cached
+image, it fails with `cc-remote: no payload is admitted at <image>.admitted`.
+
+The payload phase mounts the image read-only under
+`/opt/cc-remote/payload/<sha256>`. An existing mount is accepted only when the loop
+device behind it hashes to the digest, even if a staged file replaced the image.
+A digest mismatch fails creation. Source selection leaves the local file's owner
+and mode checks and the mounted image's manifest checks unchanged.
+
+The manifest `cc-remote-payload.json` must have `schemaVersion: 2` and match the
 rendered tools fingerprint, the target account's passwd home directory, `uname -m`,
 and the OS `VERSION_ID`. A mismatch or missing required tree fails creation.
 Packing also fails when a required tree is missing on the build Sprite.
+The direct download admission logic in `provision.sh` changes the tools
+fingerprint. Payloads built before this change fail the manifest check with
+`has tools "<old>", want "<new>"` and require a rebuild.
 
 The allowlist uses the following exposure rules for entries in the inventory:
 
@@ -196,6 +277,7 @@ and SSH/tailnet state. Packing also excludes `.in_use` and `.orphaned_at`.
 
 The `cc-remote-payload` service checks each stored payload, or the loop device
 behind its existing mount, against its digest and remounts the files at boot.
+It verifies every `*.sqfs` and ignores `.partial` and `.admitted` files.
 Inventory services registered with `sprite-env` depend on it.
 
 ## Script phases
@@ -206,9 +288,9 @@ readiness publication:
 | Invocation | Result |
 | --- | --- |
 | `provision.sh prerequisites` | Checks for `curl`, `git`, `jq`, `python3`, `unzip`, `xz`, and `/etc/ssl/certs/ca-certificates.crt`; only if any are missing, runs `apt-get update` and installs `ca-certificates`, `curl`, `git`, `jq`, `python3`, `unzip`, and `xz-utils`. Runs no apt command when all exist. |
-| `provision.sh packages` | Installs prerequisite packages, inventory packages, and Debian artifacts with `apt-get`, verifies the artifacts, and clears package lists. |
+| `provision.sh packages` | Installs prerequisite packages, inventory packages, and Debian artifacts with `apt-get`, verifies the artifacts, and clears package lists. With `apt.payload`, `full` also downloads and records the resident transaction for capture, and `resident SHA256` installs the captured `.deb` files offline from that mounted payload. |
 | `provision.sh tools` | Installs and verifies non-Debian system artifacts and system Python tools; writes managed Claude settings. |
-| `provision.sh payload SHA256 FINGERPRINT` | Validates and mounts the staged payload, registers boot remounting, and exposes system trees. |
+| `provision.sh payload SHA256 FINGERPRINT` | Accepts `<sha256>.sqfs.admitted` without a second hash or hashes a cached `<sha256>.sqfs`; fails if neither exists. Mounts the payload, validates its manifest, registers boot remounting, and exposes system trees. Existing mounts require a loop-device hash check. |
 | `provision.sh pack FINGERPRINT` | Packs the allowlisted trees and manifest into a `SquashFS` file with zstd compression. |
 | `plugins.sh install [PAYLOAD_DIR]` | Clears readiness, optionally exposes home trees, reconciles tools and plugins, runs inventory preparation, and verifies user tools; links are checked by target path only, since a Debian target may still be installing. |
 | `plugins.sh publish STAMP` | Verifies system tools and user links, including that each target runs its verify arguments, then writes the readiness stamp. |
@@ -224,7 +306,7 @@ Namespace image builds run `packages` followed by `tools`.
 | --- | --- |
 | Tool fingerprint | Rendered `provision.sh` and `plugins.sh` for the selected profile, including its tool and prepare additions. |
 | Image fingerprint | Rendered `Dockerfile`, system-only `provision.sh`, and `start.sh`; user artifact and plugin versions are excluded. |
-| Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host or the configured payload `sha256` for a machine with a payload; payload `path` is excluded. |
+| Readiness stamp | Tool fingerprint, plus the image fingerprint for an image-backed host or the configured payload `sha256` for a machine with a payload, plus `payload.packages.sha256` when the payload pins a packages archive; payload and archive `path`, `url_command`, and `size` are excluded. |
 
 Each uses SHA-256 with its own domain and file-name/length framing. The image
 description includes `cc-remote-image=<fingerprint>`.

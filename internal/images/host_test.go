@@ -1,13 +1,18 @@
 package images
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
 )
+
+const presignedURL = "https://bucket.s3.us-west-2.amazonaws.com/cache-seeds/sources/" + digest + "/tools.sqfs?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=0123456789abcdef"
 
 type call struct {
 	argv  []string
@@ -31,6 +36,10 @@ func (r *recorder) exec(_ context.Context, argv []string, stdin io.Reader) error
 func TestHostOperations(t *testing.T) {
 	scripts := Scripts{ProvisionScript: []byte("provision"), Plugins: []byte("plugins"), Env: []string{"PORT", "URL"}}
 	fingerprint := scripts.Fingerprint()
+	presigned, err := ParsePayloadURL(presignedURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	run := `exec bash "$HOME/.cc-remote/plugins.sh" "$@"`
 	tests := []struct {
 		name string
@@ -39,8 +48,8 @@ func TestHostOperations(t *testing.T) {
 	}{
 		{"provision packages", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhasePackages) }, call{[]string{"sudo", "bash", "-s", "packages"}, "provision"}},
 		{"provision resident packages", func(ctx context.Context, exec Exec) error {
-			return scripts.Provision(ctx, exec, PhasePackages, PackagesResident)
-		}, call{[]string{"sudo", "bash", "-s", "packages", "resident"}, "provision"}},
+			return scripts.Provision(ctx, exec, PhasePackages, PackagesResident, digest)
+		}, call{[]string{"sudo", "bash", "-s", "packages", "resident", digest}, "provision"}},
 		{"provision loader", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhaseLoader) }, call{[]string{"sudo", "bash", "-s", "loader"}, "provision"}},
 		{"provision tools", func(ctx context.Context, exec Exec) error { return scripts.Provision(ctx, exec, PhaseTools) }, call{[]string{"sudo", "bash", "-s", "tools"}, "provision"}},
 		{"provision payload", func(ctx context.Context, exec Exec) error {
@@ -50,12 +59,21 @@ func TestHostOperations(t *testing.T) {
 			return scripts.Provision(ctx, exec, PhasePack, fingerprint)
 		}, call{[]string{"sudo", "bash", "-s", "pack", fingerprint}, "provision"}},
 		{"stage payload", func(ctx context.Context, exec Exec) error {
-			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), digest)
-		}, call{[]string{"sudo", "sh", "-c", "install -d -m 0755 /var/lib/cc-remote/payload && cat > /var/lib/cc-remote/payload/$1.sqfs.partial", "stage-payload", digest}, "image"}},
-		{"enable payload plugins", func(ctx context.Context, exec Exec) error {
-			return scripts.EnablePayloadPlugins(ctx, exec, digest)
-		}, call{[]string{"sh", "-c", enablePayloadPlugins, "enable-payload-plugins", "/opt/cc-remote/payload/" + digest}, ""}},
-		{"stage", scripts.StagePlugins, call{[]string{"sh", "-c", stagePlugins}, "plugins"}},
+			return scripts.Stage(ctx, exec, PayloadArtifact, strings.NewReader("image"), digest)
+		}, call{[]string{"sudo", "bash", "-c", PayloadArtifact.stageScript(), "stage-payload", digest}, "image"}},
+		{"stage packages archive", func(ctx context.Context, exec Exec) error {
+			return scripts.Stage(ctx, exec, PackagesArtifact, strings.NewReader("debs"), digest)
+		}, call{[]string{"sudo", "bash", "-c", PackagesArtifact.stageScript(), "stage-packages", digest}, "debs"}},
+		{"fetch payload", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PayloadArtifact, presigned, digest, 1643491328)
+		}, call{[]string{"sudo", "bash", "-c", PayloadArtifact.fetchScript(), "fetch-payload", digest, "1643491328"}, "url = \"" + presignedURL + "\"\n"}},
+		{"fetch packages archive", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PackagesArtifact, presigned, digest, 52428800)
+		}, call{[]string{"sudo", "bash", "-c", PackagesArtifact.fetchScript(), "fetch-packages", digest, "52428800"}, "url = \"" + presignedURL + "\"\n"}},
+		{"stage", func(ctx context.Context, exec Exec) error { return scripts.StagePlugins(ctx, exec, "") }, call{[]string{"sh", "-c", stagePlugins}, "plugins"}},
+		{"stage enabling the payload's plugins", func(ctx context.Context, exec Exec) error {
+			return scripts.StagePlugins(ctx, exec, digest)
+		}, call{[]string{"sh", "-c", stagePluginsEnabling, "stage-plugins", "/opt/cc-remote/payload/" + digest}, "plugins"}},
 		{"install", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "token", "") }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install"}, "token\n"}},
 		{"install without token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "") }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install"}, "\n"}},
 		{"install from payload", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "token", digest) }, call{[]string{"env", "bash", "-c", run, "plugins.sh", "install", "/opt/cc-remote/payload/" + digest}, "token\n"}},
@@ -78,6 +96,11 @@ func TestHostOperations(t *testing.T) {
 			got := r.calls[0]
 			if !slices.Equal(got.argv, tt.want.argv) || got.stdin != tt.want.stdin {
 				t.Errorf("call = %q stdin %q, want %q stdin %q", got.argv, got.stdin, tt.want.argv, tt.want.stdin)
+			}
+			for _, arg := range got.argv {
+				if strings.Contains(arg, "X-Amz") {
+					t.Errorf("argv %q carries the payload URL", got.argv)
+				}
 			}
 		})
 	}
@@ -134,14 +157,26 @@ func TestHostOperationsRejectBadInput(t *testing.T) {
 		want string
 	}{
 		{"stage payload digest", func(ctx context.Context, exec Exec) error {
-			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), "../"+digest)
+			return scripts.Stage(ctx, exec, PayloadArtifact, strings.NewReader("image"), "../"+digest)
 		}, `stage payload: "../` + digest + `" is not a sha256 digest`},
 		{"stage payload uppercase digest", func(ctx context.Context, exec Exec) error {
-			return scripts.StagePayload(ctx, exec, strings.NewReader("image"), strings.Repeat("A", 64))
+			return scripts.Stage(ctx, exec, PayloadArtifact, strings.NewReader("image"), strings.Repeat("A", 64))
 		}, `stage payload: "` + strings.Repeat("A", 64) + `" is not a sha256 digest`},
-		{"enable payload plugins digest", func(ctx context.Context, exec Exec) error {
-			return scripts.EnablePayloadPlugins(ctx, exec, "../"+digest)
-		}, `enable payload plugins: "../` + digest + `" is not a sha256 digest`},
+		{"stage packages archive digest", func(ctx context.Context, exec Exec) error {
+			return scripts.Stage(ctx, exec, PackagesArtifact, strings.NewReader("debs"), "../"+digest)
+		}, `stage packages archive: "../` + digest + `" is not a sha256 digest`},
+		{"fetch payload digest", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PayloadArtifact, PayloadURL{}, "../"+digest, 1)
+		}, `fetch payload: "../` + digest + `" is not a sha256 digest`},
+		{"fetch payload size", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PayloadArtifact, PayloadURL{}, digest, 0)
+		}, "fetch payload: size 0 is not a byte count"},
+		{"fetch packages archive size", func(ctx context.Context, exec Exec) error {
+			return scripts.Fetch(ctx, exec, PackagesArtifact, PayloadURL{}, digest, -1)
+		}, "fetch packages archive: size -1 is not a byte count"},
+		{"stage plugins payload digest", func(ctx context.Context, exec Exec) error {
+			return scripts.StagePlugins(ctx, exec, "../"+digest)
+		}, `stage plugins.sh: payload "../` + digest + `" is not a sha256 digest`},
 		{"multi-line token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "a\nb", digest) }, "plugins install: the GitHub token spans lines"},
 		{"carriage-return token", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "a\rb", "") }, "plugins install: the GitHub token spans lines"},
 		{"install payload", func(ctx context.Context, exec Exec) error { return scripts.Install(ctx, exec, "", "latest") }, `plugins install: payload "latest" is not a sha256 digest`},
@@ -164,6 +199,67 @@ func TestHostOperationsRejectBadInput(t *testing.T) {
 			}
 			if len(r.calls) != 0 {
 				t.Errorf("ran %q despite the error", r.calls[0].argv)
+			}
+		})
+	}
+}
+
+func TestParsePayloadURLKeepsTheURLOutOfEveryRendering(t *testing.T) {
+	ascii := "payload url: the URL must be printable ASCII without spaces, quotes or backslashes"
+	shape := "payload url: the URL must be an absolute https URL with a host and no userinfo"
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"a presigned url", presignedURL, ""},
+		{"http", "http://bucket.example/tools.sqfs", shape},
+		{"file", "file:///etc/passwd", shape},
+		{"nothing", "", "payload url: the command printed nothing"},
+		{"no host", "https:///tools.sqfs", shape},
+		{"userinfo", "https://user:secret@bucket.example/tools.sqfs", shape},
+		{"a space", "https://bucket.example/tools sqfs", ascii},
+		{"a double quote", `https://bucket.example/tools.sqfs"`, ascii},
+		{"a backslash", `https://bucket.example/tools\sqfs`, ascii},
+		{"a newline", "https://bucket.example/tools.sqfs\n", ascii},
+		{"a carriage return", "https://bucket.example/tools.sqfs\r", ascii},
+		{"a second line", "https://bucket.example/tools.sqfs\nhttps://bucket.example/other.sqfs", ascii},
+		{"a delete byte", "https://bucket.example/tools.sqfs\x7f", ascii},
+		{"over the limit", "https://bucket.example/" + strings.Repeat("a", payloadURLLimit), "payload url: 8215 bytes is over the 8192-byte limit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source, err := ParsePayloadURL(tt.raw)
+			if tt.want != "" {
+				if err == nil || err.Error() != tt.want {
+					t.Fatalf("ParsePayloadURL = %v, want %q", err, tt.want)
+				}
+				if strings.Contains(err.Error(), "bucket") {
+					t.Errorf("the error %q echoes the input", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := string(source.curlConfig()); got != "url = \""+tt.raw+"\"\n" {
+				t.Errorf("curlConfig = %q", got)
+			}
+			var text, structured bytes.Buffer
+			slog.New(slog.NewTextHandler(&text, nil)).Info("fetching", "url", source)
+			slog.New(slog.NewJSONHandler(&structured, nil)).Info("fetching", "url", source)
+			renderings := map[string]string{
+				"fmt":  fmt.Sprintf("%v %+v %#v %s %q %d %x", source, source, source, source, source, source, source),
+				"text": text.String(),
+				"json": structured.String(),
+			}
+			for name, rendered := range renderings {
+				if strings.Contains(rendered, "X-Amz") || strings.Contains(rendered, "bucket") || strings.Contains(rendered, digest) {
+					t.Errorf("the %s rendering %q carries the URL", name, rendered)
+				}
+			}
+			if want := strings.TrimSuffix(strings.Repeat("[payload url] ", 7), " "); renderings["fmt"] != want {
+				t.Errorf("fmt rendering = %q, want %q", renderings["fmt"], want)
 			}
 		})
 	}

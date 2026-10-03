@@ -189,8 +189,10 @@ func TestPluginsInstallOverStockSettingsNeedsThePayloadMerge(t *testing.T) {
 			writePluginTestFile(t, filepath.Join(h.fakes, "curl"), []byte(failingCurl), 0o700)
 			writePluginTestFile(t, filepath.Join(h.home, ".local/share/captain-hook/host/version.json"), []byte(installedHooks), 0o600)
 			if tt.merge {
-				if out, err := h.run("sh", "-c", enablePayloadPlugins, "enable-payload-plugins", payload); err != nil {
-					t.Fatalf("enable payload plugins: %v\n%s", err, out)
+				stage := h.command("sh", "-c", stagePluginsEnabling, "stage-plugins", payload)
+				stage.Stdin = strings.NewReader("plugins")
+				if out, err := stage.CombinedOutput(); err != nil {
+					t.Fatalf("stage plugins.sh enabling the payload's plugins: %v\n%s", err, out)
 				}
 			}
 			out, err := h.plugins("install", payload)
@@ -222,7 +224,7 @@ func TestPluginsInstallOverStockSettingsNeedsThePayloadMerge(t *testing.T) {
 	}
 }
 
-func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
+func TestStagingPluginsWithAPayloadMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 	hooks := []byte(`{"hooks":{}}`)
 	userFile := func(user, _ string) string { return user }
 	imageFile := func(_, image string) string { return image }
@@ -287,11 +289,15 @@ func TestEnablePayloadPluginsMergesOnlyTheImagesEnabledPlugins(t *testing.T) {
 			if tt.image != nil {
 				writePluginTestFile(t, image, tt.image, 0o644)
 			}
-			cmd := exec.Command("sh", "-c", enablePayloadPlugins, "enable-payload-plugins", payload)
+			cmd := exec.Command("sh", "-c", stagePluginsEnabling, "stage-plugins", payload)
 			cmd.Env = append(os.Environ(), "HOME="+home)
+			cmd.Stdin = strings.NewReader("plugins")
 			var stderr strings.Builder
 			cmd.Stderr = &stderr
 			err := cmd.Run()
+			if staged, readErr := os.ReadFile(filepath.Join(home, ".cc-remote", "plugins.sh")); readErr != nil || string(staged) != "plugins" {
+				t.Errorf("staged plugins.sh = %q, %v; want the script from stdin, staged before any merge", staged, readErr)
+			}
 			if tt.refuses != nil {
 				want := "cc-remote: " + tt.refuses(settings, image) + " is not one JSON object whose enabledPlugins, when present, is an object"
 				if exitCode(err) != 1 || !strings.Contains(stderr.String(), want) {
@@ -341,34 +347,36 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 	good, bad := "hsqs verified payload", "hsqs tampered payload"
 	sum := sha256.Sum256([]byte(good))
 	sha := hex.EncodeToString(sum[:])
-	staged, stored, loop := filepath.Join("store", sha+".sqfs.partial"), filepath.Join("store", sha+".sqfs"), "loop0"
+	stored, loop := filepath.Join("store", sha+".sqfs"), "loop0"
 	tests := []struct {
-		name    string
-		boot    bool
-		partial string
-		cached  string
-		mounted string
-		hashed  []string
-		mounts  bool
-		wantErr string
-		after   string
+		name     string
+		boot     bool
+		partial  bool
+		admitted string
+		cached   string
+		mounted  string
+		hashed   []string
+		mounts   bool
+		wantErr  string
+		after    string
 	}{
-		{name: "a staged payload is verified once and mounted", partial: good, hashed: []string{staged}, mounts: true, after: good},
-		{name: "a staged payload replaces a corrupt cached image", partial: good, cached: bad, hashed: []string{staged}, mounts: true, after: good},
-		{name: "a staged payload replaces the file under a verified mount", partial: good, cached: bad, mounted: good, hashed: []string{staged, loop}, after: good},
-		{name: "a staged payload does not vouch for a tampered mount", partial: good, cached: bad, mounted: bad, hashed: []string{staged, loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
-		{name: "a corrupt staged payload is fatal", partial: bad, hashed: []string{staged}, wantErr: "cc-remote: %[1]s.partial does not match its sha256 %[2]s"},
+		{name: "an admitted payload is mounted without a second hash", admitted: good, mounts: true, after: good},
+		{name: "an admitted payload replaces a corrupt cached image", admitted: good, cached: bad, mounts: true, after: good},
+		{name: "an admitted payload replaces the file under a verified mount", admitted: good, cached: bad, mounted: good, hashed: []string{loop}, after: good},
+		{name: "an admitted payload does not vouch for a tampered mount", admitted: good, cached: bad, mounted: bad, hashed: []string{loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
 		{name: "a cached image is verified before it mounts", cached: good, hashed: []string{stored}, mounts: true, after: good},
 		{name: "a corrupt cached image is fatal", cached: bad, hashed: []string{stored}, wantErr: "cc-remote: %[1]s does not match its sha256 %[2]s", after: bad},
 		{name: "an existing mount is verified through its loop device", cached: good, mounted: good, hashed: []string{loop}, after: good},
 		{name: "a tampered existing mount is fatal", cached: good, mounted: bad, hashed: []string{loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
-		{name: "nothing staged is fatal", wantErr: "cc-remote: no payload is staged at %[1]s.partial"},
+		{name: "a partial transfer is never admitted", partial: true, wantErr: "cc-remote: no payload is admitted at %[1]s.admitted"},
+		{name: "nothing admitted is fatal", wantErr: "cc-remote: no payload is admitted at %[1]s.admitted"},
+		{name: "boot leaves an admitted payload to the phase", boot: true, admitted: good},
 		{name: "boot verifies a stored image before it mounts", boot: true, cached: good, hashed: []string{stored}, mounts: true, after: good},
 		{name: "boot refuses a corrupt stored image", boot: true, cached: bad, hashed: []string{stored}, wantErr: "cc-remote: %[1]s does not match its sha256 %[2]s", after: bad},
 		{name: "boot verifies an existing mount through its loop device", boot: true, cached: good, mounted: good, hashed: []string{loop}, after: good},
 		{name: "boot refuses a tampered existing mount", boot: true, cached: good, mounted: bad, hashed: []string{loop}, wantErr: "cc-remote: %[3]s does not match its sha256 %[2]s", after: good},
 	}
-	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
+	scripts, err := Render(scriptInventory(), "agents")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,36 +391,29 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root, fakes := t.TempDir(), t.TempDir()
-			store, payloads := filepath.Join(root, "store"), filepath.Join(root, "payload")
-			image, dir := filepath.Join(store, sha+".sqfs"), filepath.Join(payloads, sha)
-			for name, content := range map[string]string{
-				"id":         "#!/bin/sh\necho 0\n",
-				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
-				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
-				"mount":      fakeMount,
-				"sprite-env": "#!/bin/sh\nexit 0\n",
-				"sha256sum":  "#!/bin/sh\nline=\"$(cat)\"\nprintf '%s\\n' \"$line\" >> \"$TEST_ROOT/hashes\"\nprintf '%s\\n' \"$line\" | exec " + sha256sum + " \"$@\"\n",
-			} {
-				writePluginTestFile(t, filepath.Join(fakes, name), []byte(content), 0o700)
-			}
+			sandbox := newPayloadSandbox(t, sha, map[string]string{
+				"sha256sum": "#!/bin/sh\nline=\"$(cat)\"\nprintf '%s\\n' \"$line\" >> \"$TEST_ROOT/hashes\"\nprintf '%s\\n' \"$line\" | exec " + sha256sum + " \"$@\"\n",
+			})
+			root, store, payloads := sandbox.root, sandbox.store, sandbox.payloads
+			image := filepath.Join(store, sha+".sqfs")
 			if err := os.MkdirAll(store, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if tt.partial != "" {
-				writePluginTestFile(t, image+".partial", []byte(tt.partial), 0o644)
+			if tt.partial {
+				writePluginTestFile(t, image+".partial", []byte(good), 0o644)
+				writePluginTestFile(t, image+".a1b2c3d4.partial", []byte(good), 0o600)
+			}
+			if tt.admitted != "" {
+				writePluginTestFile(t, image+".admitted", []byte(tt.admitted), 0o644)
 			}
 			if tt.cached != "" {
 				writePluginTestFile(t, image, []byte(tt.cached), 0o644)
 			}
-			env := append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
+			env := sandbox.env()
 			if tt.mounted != "" {
 				served := filepath.Join(root, "served.sqfs")
 				writePluginTestFile(t, served, []byte(tt.mounted), 0o644)
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				premount := exec.Command(filepath.Join(fakes, "mount"), "-t", "squashfs", "-o", "ro,loop", served, dir)
+				premount := exec.Command(filepath.Join(sandbox.fakes, "mount"), "-t", "squashfs", "-o", "ro,nosuid,nodev,loop", served, sandbox.dir)
 				premount.Env = env
 				if out, err := premount.CombinedOutput(); err != nil {
 					t.Fatalf("premount: %v\n%s", err, out)
@@ -426,16 +427,12 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 				cmd = exec.Command("sh", "-c", strings.NewReplacer(
 					"/var/lib/cc-remote/payload/", store+"/",
 					"/opt/cc-remote/payload/", payloads+"/",
+					"/var/lib/cc-remote/closure.registered", filepath.Join(root, "closure.registered"),
 				).Replace(helper))
+				cmd.Env = env
 			} else {
-				provision := strings.NewReplacer(
-					"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
-					"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
-					` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
-				).Replace(string(scripts.ProvisionScript))
-				cmd = exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
+				cmd = sandbox.phase(scripts, sha)
 			}
-			cmd.Env = env
 			out, err := cmd.CombinedOutput()
 			if tt.wantErr != "" {
 				if want := fmt.Sprintf(tt.wantErr, image, sha, filepath.Join(root, loop)); exitCode(err) != 1 || !strings.Contains(string(out), want) {
@@ -465,8 +462,8 @@ func TestProvisionPayloadVerifiesEveryImageBeforeItMounts(t *testing.T) {
 			case tt.after != "" && (err != nil || string(cached) != tt.after):
 				t.Errorf("the cache holds %q, %v; want %q", cached, err, tt.after)
 			}
-			if _, err := os.Stat(image + ".partial"); tt.wantErr == "" && !os.IsNotExist(err) {
-				t.Errorf("the staged payload outlived a successful phase: %v", err)
+			if _, err := os.Stat(image + ".admitted"); tt.wantErr == "" && !tt.boot && !os.IsNotExist(err) {
+				t.Errorf("the admitted payload outlived a successful phase: %v", err)
 			}
 		})
 	}
@@ -489,35 +486,19 @@ func TestProvisionPayloadRegistersTheRemountService(t *testing.T) {
 	sum := sha256.Sum256([]byte(image))
 	sha := hex.EncodeToString(sum[:])
 	wantCreate := []string{"services", "create", "cc-remote-payload", "--cmd", "sudo", "--args", "-n,sh,-c,/opt/cc-remote/payload-mount.sh && exec sleep infinity", "--duration", "1ms", "--no-stream"}
-	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
+	scripts, err := Render(scriptInventory(), "agents")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, existing := range []bool{true, false} {
 		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
-			root, fakes := t.TempDir(), t.TempDir()
-			store, payloads := filepath.Join(root, "store"), filepath.Join(root, "payload")
-			for name, content := range map[string]string{
-				"id":         "#!/bin/sh\necho 0\n",
-				"mountpoint": "#!/bin/sh\n[ -e \"$2/.mounted\" ]\n",
-				"findmnt":    "#!/bin/sh\n[ \"$*\" = \"-no SOURCE $3\" ] || exit 2\nexec cat \"$3/.source\"\n",
-				"mount":      fakeMount,
-				"sprite-env": fakeSpriteEnv,
-			} {
-				writePluginTestFile(t, filepath.Join(fakes, name), []byte(content), 0o700)
-			}
+			sandbox := newPayloadSandbox(t, sha, map[string]string{"sprite-env": fakeSpriteEnv})
+			root := sandbox.root
 			if existing {
 				writePluginTestFile(t, filepath.Join(root, "service"), nil, 0o600)
 			}
-			writePluginTestFile(t, filepath.Join(store, sha+".sqfs.partial"), []byte(image), 0o644)
-			provision := strings.NewReplacer(
-				"payload_root=/opt/cc-remote/payload\n", "payload_root="+quote(payloads)+"\n",
-				"payload_store=/var/lib/cc-remote/payload\n", "payload_store="+quote(store)+"\n",
-				` /opt/cc-remote/payload-mount.sh`+"\n", " "+quote(filepath.Join(root, "payload-mount.sh"))+"\n",
-			).Replace(string(scripts.ProvisionScript))
-			cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePayload, sha, "tools-fingerprint")
-			cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "SUDO_USER=root", "FINGERPRINT=tools-fingerprint")
-			if out, err := cmd.CombinedOutput(); err != nil {
+			writePluginTestFile(t, filepath.Join(sandbox.store, sha+".sqfs.admitted"), []byte(image), 0o600)
+			if out, err := sandbox.phase(scripts, sha).CombinedOutput(); err != nil {
 				t.Fatalf("payload failed: %v\n%s", err, out)
 			}
 			calls := logLines(t, filepath.Join(root, "sprite-env.log"))

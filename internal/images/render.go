@@ -283,13 +283,16 @@ func (s Scripts) Fingerprint() string {
 	return fingerprint(toolDomain, file{"provision.sh", s.ProvisionScript}, file{"plugins.sh", s.Plugins})
 }
 
-func Stamp(scripts Scripts, image *Context, payload string) string {
+func Stamp(scripts Scripts, image *Context, payload, packages string) string {
 	files := []file{{"tools", []byte(scripts.Fingerprint())}}
 	if image != nil {
 		files = append(files, file{"image", []byte(image.Fingerprint())})
 	}
 	if payload != "" {
 		files = append(files, file{"payload", []byte(payload)})
+	}
+	if packages != "" {
+		files = append(files, file{"packages", []byte(packages)})
 	}
 	return fingerprint(stampDomain, files...)
 }
@@ -346,7 +349,9 @@ func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, 
 		"q":          quote,
 		"json":       indentJSON,
 		"install":    installCall,
+		"stage":      stageCall,
 		"verify":     verifyCalls,
+		"probed":     probedCalls,
 		"expand":     expand,
 		"executable": serviceExecutable,
 		"spec":       spec,
@@ -443,10 +448,34 @@ func installCall(a Artifact, toolDir, binDir string) string {
 	return strings.Join(words, " ")
 }
 
+func stageCall(a Artifact) string {
+	algorithm, digest := a.digest()
+	return strings.Join([]string{"stage_deb", quote(a.Name), quote(a.Version), quote(a.URL), algorithm, quote(digest)}, " ")
+}
+
 func verifyCalls(a Artifact, toolDir, binDir string) []string {
+	return linkCalls(a, toolDir, binDir, func(link, target string, args []string) []string {
+		return []string{strings.Join(append([]string{"verify_link", link, target}, args...), " ")}
+	})
+}
+
+func probedCalls(a Artifact, toolDir, binDir string) []string {
+	return linkCalls(a, toolDir, binDir, func(link, target string, args []string) []string {
+		return []string{
+			"verify_link " + link + " " + target,
+			strings.Join(append([]string{"probe", link}, args...), " "),
+		}
+	})
+}
+
+func linkCalls(a Artifact, toolDir, binDir string, check func(link, target string, args []string) []string) []string {
 	_, digest := a.digest()
 	bins := a.bins()
-	calls := make([]string, 0, 1+len(bins))
+	args := make([]string, 0, len(a.Verify))
+	for _, arg := range a.Verify {
+		args = append(args, quote(arg))
+	}
+	calls := make([]string, 0, 1+2*len(bins))
 	calls = append(calls, "verify_pin "+artifactDir(a, toolDir)+" "+quote(digest))
 	for _, bin := range slices.Sorted(maps.Keys(bins)) {
 		target := quote(bins[bin])
@@ -457,12 +486,7 @@ func verifyCalls(a Artifact, toolDir, binDir string) []string {
 				target = under(toolDir, a.dir()+"/"+bins[bin])
 			}
 		}
-		words := make([]string, 0, 3+len(a.Verify))
-		words = append(words, "verify_link", under(binDir, bin), target)
-		for _, arg := range a.Verify {
-			words = append(words, quote(arg))
-		}
-		calls = append(calls, strings.Join(words, " "))
+		calls = append(calls, check(under(binDir, bin), target, args)...)
 	}
 	return calls
 }

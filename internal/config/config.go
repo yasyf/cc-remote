@@ -61,8 +61,15 @@ type Machine struct {
 }
 
 type Payload struct {
-	Path   string `yaml:"path"`
-	SHA256 string `yaml:"sha256"`
+	Source   `yaml:",inline"`
+	Packages *Source `yaml:"packages"`
+}
+
+type Source struct {
+	Path       string   `yaml:"path"`
+	URLCommand []string `yaml:"url_command"`
+	SHA256     string   `yaml:"sha256"`
+	Size       int64    `yaml:"size"`
 }
 
 type Forward struct {
@@ -222,11 +229,32 @@ func (m Machine) validate() error {
 	if m.Image != "" {
 		return fmt.Errorf("payload and image %q exclude each other; a payload is mounted on a fresh machine, an image carries its tools", m.Image)
 	}
-	if m.Payload.Path == "" {
-		return errors.New("payload.path names the SquashFS payload file, relative to this config file")
+	return m.Payload.validate()
+}
+
+func (p Payload) validate() error {
+	if err := p.Source.validate("payload", "SquashFS payload"); err != nil {
+		return err
 	}
-	if !digest.MatchString(m.Payload.SHA256) {
-		return fmt.Errorf("payload.sha256 %q must be the 64 lowercase hex digits of the payload's sha256", m.Payload.SHA256)
+	if p.Packages == nil {
+		return nil
+	}
+	return p.Packages.validate("payload.packages", "packages archive")
+}
+
+func (s Source) validate(key, file string) error {
+	direct := len(s.URLCommand) > 0
+	switch {
+	case (s.Path == "") == !direct:
+		return fmt.Errorf("%s.path names a local %s to stream; %s.url_command names a command that prints a private HTTPS URL; set exactly one, relative to this config file", key, file, key)
+	case direct && s.URLCommand[0] == "":
+		return fmt.Errorf("%s.url_command needs the command to run as its first element", key)
+	case direct && s.Size <= 0:
+		return fmt.Errorf("%s.size %d must pin the byte count a direct download has to match", key, s.Size)
+	case !direct && s.Size != 0:
+		return fmt.Errorf("%s.size %d applies only to a url_command source; a streamed path is hashed as it is read", key, s.Size)
+	case !digest.MatchString(s.SHA256):
+		return fmt.Errorf("%s.sha256 %q must be the 64 lowercase hex digits of the %s's sha256", key, s.SHA256, file)
 	}
 	return nil
 }

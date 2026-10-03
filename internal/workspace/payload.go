@@ -27,10 +27,16 @@ type Downloader interface {
 }
 
 type PayloadBuild struct {
-	SHA256  string `json:"sha256"`
-	Size    int64  `json:"size"`
-	Tools   string `json:"tools"`
-	Machine string `json:"machine"`
+	SHA256   string        `json:"sha256"`
+	Size     int64         `json:"size"`
+	Tools    string        `json:"tools"`
+	Machine  string        `json:"machine"`
+	Packages PackagesBuild `json:"packages,omitzero"`
+}
+
+type PackagesBuild struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 type byteCount int64
@@ -44,7 +50,7 @@ func GitToken(cfg *config.Config) func(context.Context) (string, error) {
 	return (&Session{Config: cfg}).gitToken
 }
 
-func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Provider, kind, profile string, token func(context.Context) (string, error), out, stderr io.Writer) (PayloadBuild, error) {
+func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Provider, kind, profile string, token func(context.Context) (string, error), out, packages, stderr io.Writer) (PayloadBuild, error) {
 	downloader, ok := provider.(Downloader)
 	if !ok {
 		return PayloadBuild{}, fmt.Errorf("the %s provider cannot download a file from a machine, so it cannot build a payload", kind)
@@ -60,6 +66,12 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	rendered, err := render(cfg, profile, machine, true)
 	if err != nil {
 		return PayloadBuild{}, err
+	}
+	if !rendered.closure {
+		return PayloadBuild{}, fmt.Errorf("profile %s: a payload build needs apt.payload in the inventory; only a closure payload is admitted and mounted", profile)
+	}
+	if packages == nil {
+		return PayloadBuild{}, fmt.Errorf("profile %s's inventory declares apt.payload, so its payload build also writes the resident packages archive; name its file with --packages-out", profile)
 	}
 	var githubToken string
 	if rendered.private {
@@ -79,7 +91,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	}
 	slog.Info("created the payload build machine", "machine", name)
 	builder := &Session{Provider: provider, Stderr: stderr}
-	built, err := packPayload(ctx, builder.exec(name), downloader, rendered.scripts, githubToken, name, out)
+	built, err := packPayload(ctx, builder.exec(name), downloader, rendered.scripts, githubToken, name, out, packages)
 	if err != nil {
 		diagnosePayloadBuild(ctx, rendered.scripts, builder.capture(name), name)
 	}
@@ -89,12 +101,12 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	return built, nil
 }
 
-func packPayload(ctx context.Context, run images.Exec, downloader Downloader, scripts images.Scripts, githubToken, machine string, out io.Writer) (PayloadBuild, error) {
+func packPayload(ctx context.Context, run images.Exec, downloader Downloader, scripts images.Scripts, githubToken, machine string, out, packages io.Writer) (PayloadBuild, error) {
 	tools := scripts.Fingerprint()
 	steps := []func() error{
 		func() error { return scripts.Provision(ctx, run, images.PhasePackages, images.PackagesFull) },
 		func() error { return scripts.Provision(ctx, run, images.PhaseTools) },
-		func() error { return scripts.StagePlugins(ctx, run) },
+		func() error { return scripts.StagePlugins(ctx, run, "") },
 		func() error { return scripts.Install(ctx, run, githubToken, "") },
 		func() error { return scripts.Natives(ctx, run) },
 		func() error { return scripts.Verify(ctx, run) },
@@ -106,12 +118,27 @@ func packPayload(ctx context.Context, run images.Exec, downloader Downloader, sc
 		}
 	}
 	slog.Info("packed the payload", "machine", machine, "tools", tools[:12])
-	digest := sha256.New()
-	var size byteCount
-	if err := downloader.Download(ctx, machine, images.PackPath, io.MultiWriter(out, digest, &size)); err != nil {
+	built := PayloadBuild{Tools: tools, Machine: machine}
+	var err error
+	if built.SHA256, built.Size, err = download(ctx, downloader, machine, images.PackPath, out); err != nil {
 		return PayloadBuild{}, err
 	}
-	return PayloadBuild{SHA256: hex.EncodeToString(digest.Sum(nil)), Size: int64(size), Tools: tools, Machine: machine}, nil
+	if packages == nil {
+		return built, nil
+	}
+	if built.Packages.SHA256, built.Packages.Size, err = download(ctx, downloader, machine, images.PackagesPack, packages); err != nil {
+		return PayloadBuild{}, err
+	}
+	return built, nil
+}
+
+func download(ctx context.Context, downloader Downloader, machine, path string, w io.Writer) (string, int64, error) {
+	digest := sha256.New()
+	var size byteCount
+	if err := downloader.Download(ctx, machine, path, io.MultiWriter(w, digest, &size)); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), int64(size), nil
 }
 
 func diagnosePayloadBuild(ctx context.Context, scripts images.Scripts, capture images.Capture, machine string) {

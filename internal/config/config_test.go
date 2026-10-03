@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,57 @@ const digest64 = "008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33c
 func payload(path, sha256 string) func(string) string {
 	return func(s string) string {
 		return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { path: "+path+", sha256: "+sha256+" } }", 1)
+	}
+}
+
+func direct(command, sha256, size string) func(string) string {
+	return func(s string) string {
+		return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { url_command: "+command+", sha256: "+sha256+", size: "+size+" } }", 1)
+	}
+}
+
+func packages(source string) func(string) string {
+	return func(s string) string {
+		return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { path: p.sqfs, sha256: "+digest64+", packages: { "+source+" } } }", 1)
+	}
+}
+
+func TestParseReadsADirectPayloadSource(t *testing.T) {
+	cfg, err := Parse([]byte(direct(`[./payload-url, --expires-in, "900"]`, digest64, "1643491328")(minimal)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Profiles["lean"].Machine["fake"].Payload
+	want := &Payload{Source: Source{URLCommand: []string{"./payload-url", "--expires-in", "900"}, SHA256: digest64, Size: 1643491328}}
+	if got == nil || got.Path != want.Path || !slices.Equal(got.URLCommand, want.URLCommand) || got.SHA256 != want.SHA256 || got.Size != want.Size || got.Packages != nil {
+		t.Errorf("payload = %+v, want %+v", got, want)
+	}
+}
+
+func TestParseReadsAPayloadWithItsPackagesArchive(t *testing.T) {
+	archive := strings.Repeat("ab", 32)
+	tests := []struct {
+		name   string
+		source string
+		want   Source
+	}{
+		{"a streamed archive", "path: payloads/agent-debs.tar, sha256: " + archive, Source{Path: "payloads/agent-debs.tar", SHA256: archive}},
+		{"a direct archive", `url_command: [./payload-url, --expires-in, "900"], sha256: ` + archive + ", size: 52428800", Source{URLCommand: []string{"./payload-url", "--expires-in", "900"}, SHA256: archive, Size: 52428800}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(packages(tt.source)(minimal)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.Profiles["lean"].Machine["fake"].Payload
+			if got == nil || got.Path != "p.sqfs" || got.SHA256 != digest64 || got.Packages == nil {
+				t.Fatalf("payload = %+v", got)
+			}
+			if got.Packages.Path != tt.want.Path || !slices.Equal(got.Packages.URLCommand, tt.want.URLCommand) || got.Packages.SHA256 != tt.want.SHA256 || got.Packages.Size != tt.want.Size {
+				t.Errorf("payload.packages = %+v, want %+v", *got.Packages, tt.want)
+			}
+		})
 	}
 }
 
@@ -92,7 +144,7 @@ func TestParseAcceptsAPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := cfg.Profiles["lean"].Machine["fake"].Payload
-	if got == nil || *got != (Payload{Path: "payloads/agent.sqfs", SHA256: digest64}) {
+	if got == nil || got.Path != "payloads/agent.sqfs" || got.SHA256 != digest64 || len(got.URLCommand) != 0 || got.Size != 0 {
 		t.Errorf("payload = %+v", got)
 	}
 }
@@ -175,6 +227,28 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"payload sha256 in upper case", payload("p.sqfs", strings.ToUpper(digest64)), "payload.sha256"},
 		{"payload sha256 too short", payload("p.sqfs", digest64[:40]), "payload.sha256"},
 		{"payload without a sha256", payload("p.sqfs", `""`), "payload.sha256"},
+		{"payload with a path and a url_command", func(s string) string {
+			return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { path: p.sqfs, url_command: [./payload-url], sha256: "+digest64+", size: 1 } }", 1)
+		}, "set exactly one"},
+		{"payload with neither a path nor a url_command", direct("[]", digest64, "1"), "set exactly one"},
+		{"payload url_command with an empty command", direct(`[""]`, digest64, "1"), "payload.url_command"},
+		{"payload url_command without a size", func(s string) string {
+			return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { url_command: [./payload-url], sha256: "+digest64+" } }", 1)
+		}, "payload.size"},
+		{"payload url_command with a zero size", direct("[./payload-url]", digest64, "0"), "payload.size"},
+		{"payload url_command with a negative size", direct("[./payload-url]", digest64, "-1"), "payload.size"},
+		{"payload path with a size", func(s string) string {
+			return strings.Replace(s, "fake: { size: s }", "fake: { size: s, payload: { path: p.sqfs, sha256: "+digest64+", size: 1 } }", 1)
+		}, "payload.size"},
+		{"payload url_command with a short sha256", direct("[./payload-url]", digest64[:40], "1"), "payload.sha256"},
+		{"packages without a path", packages(`path: "", sha256: ` + digest64), "payload.packages.path names a local packages archive to stream; payload.packages.url_command names a command that prints a private HTTPS URL; set exactly one"},
+		{"packages with a path and a url_command", packages("path: debs.tar, url_command: [./packages-url], sha256: " + digest64 + ", size: 1"), "payload.packages.path names a local packages archive"},
+		{"packages sha256 too short", packages("path: debs.tar, sha256: " + digest64[:40]), `payload.packages.sha256 "` + digest64[:40] + `" must be the 64 lowercase hex digits of the packages archive's sha256`},
+		{"packages without a sha256", packages(`path: debs.tar, sha256: ""`), `payload.packages.sha256 "" must be`},
+		{"packages path with a size", packages("path: debs.tar, sha256: " + digest64 + ", size: 4"), "payload.packages.size 4 applies only to a url_command source"},
+		{"packages url_command with an empty command", packages(`url_command: [""], sha256: ` + digest64 + ", size: 4"), "payload.packages.url_command needs the command"},
+		{"packages url_command without a size", packages("url_command: [./packages-url], sha256: " + digest64), "payload.packages.size 0 must pin the byte count"},
+		{"packages url_command with a negative size", packages("url_command: [./packages-url], sha256: " + digest64 + ", size: -4"), "payload.packages.size -4 must pin the byte count"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
