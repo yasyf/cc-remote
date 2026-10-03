@@ -73,40 +73,45 @@ func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, t
 	var last Screen
 	pending := -1
 	_, err := poll(ctx, p, func(ctx context.Context) (struct{}, bool, error) {
-		screen, err := r.Screen(ctx, handle)
-		if err != nil {
-			return struct{}{}, false, err
-		}
-		last = screen
-		if startup.Hooks != nil {
-			count, found, err := reviewPrompt(screen.Tail)
+		for {
+			if err := ctx.Err(); err != nil {
+				return struct{}{}, false, err
+			}
+			screen, err := r.Screen(ctx, handle)
 			if err != nil {
 				return struct{}{}, false, err
 			}
-			if found {
-				pending = count
-				return struct{}{}, true, completeFrame(screen)
+			last = screen
+			if startup.Hooks != nil {
+				count, found, err := reviewPrompt(screen.Tail)
+				if err != nil {
+					return struct{}{}, false, err
+				}
+				if found {
+					pending = count
+					return struct{}{}, true, completeFrame(screen)
+				}
 			}
-		}
-		gate, found := startup.gate(screen.Tail)
-		switch {
-		case found && gate.Trust && !trusted:
-			return struct{}{}, false, ErrUntrusted
-		case found:
-			if err := r.answer(ctx, handle, gate, screen, p); err != nil {
-				return struct{}{}, false, fmt.Errorf("%s: %w", gate.Name, err)
+			gate, found := startup.gate(screen.Tail)
+			switch {
+			case found && gate.Trust && !trusted:
+				return struct{}{}, false, ErrUntrusted
+			case found:
+				if err := r.answer(ctx, handle, gate, screen, p); err != nil {
+					return struct{}{}, false, fmt.Errorf("%s: %w", gate.Name, err)
+				}
+				steps = append(steps, gate.Name)
+				continue
+			case startup.Ready != nil && !startup.Ready.MatchString(screenText(screen.Tail)):
+				return struct{}{}, false, nil
 			}
-			steps = append(steps, gate.Name)
-			return struct{}{}, false, nil
-		case startup.Ready != nil && !startup.Ready.MatchString(screenText(screen.Tail)):
-			return struct{}{}, false, nil
+			wait, err := r.WaitIdle(ctx, handle, idleTimeout)
+			blocked := string(bytes.TrimSpace(wait.BlockedReason))
+			if err != nil && startup.Hooks != nil && (blocked == reviewBlocked || blocked == trustBlocked) {
+				return struct{}{}, false, nil
+			}
+			return struct{}{}, err == nil, err
 		}
-		wait, err := r.WaitIdle(ctx, handle, idleTimeout)
-		blocked := string(bytes.TrimSpace(wait.BlockedReason))
-		if err != nil && startup.Hooks != nil && (blocked == reviewBlocked || blocked == trustBlocked) {
-			return struct{}{}, false, nil
-		}
-		return struct{}{}, err == nil, err
 	})
 	if errors.Is(err, context.DeadlineExceeded) {
 		return steps, UnknownScreenError{Steps: steps, Screen: Redact(last.Tail), Cause: err}

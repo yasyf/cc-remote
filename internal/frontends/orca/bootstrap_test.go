@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
@@ -56,6 +58,42 @@ func TestBootstrapWalksClaudesFirstRunScreens(t *testing.T) {
 		if got := fake.called(command); got != want {
 			t.Errorf("%q called %d times, want %d", command, got, want)
 		}
+	}
+}
+
+func TestBootstrapPollsOnlyWhenTheNextScreenIsNotReady(t *testing.T) {
+	for _, loading := range []bool{false, true} {
+		t.Run(fmt.Sprint(loading), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				security := screenOf(t, "Security notes:", "Press Enter to continue…")
+				ready := screenOf(t, "Opus 5.5 (xhigh) · API Usage Billing")
+				fake := newFakeOrca(t).on(sendEnter, ok(accepted)).
+					on(waitIdle, ok(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null}}`)).
+					on(readScreen, security)
+				if loading {
+					starting := screenOf(t, "Starting Claude…")
+					fake.on(readScreen, starting).on(readScreen, starting)
+				} else {
+					fake.on(readScreen, ready)
+				}
+				fake.on(readScreen, ready)
+				started := time.Now()
+				steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, orca.Poll{Interval: time.Second, Timeout: time.Minute})
+				if err != nil || strings.Join(steps, ",") != "security" {
+					t.Fatalf("Bootstrap = %v, %v", steps, err)
+				}
+				var want time.Duration
+				if loading {
+					want = time.Second
+				}
+				if elapsed := time.Since(started); elapsed != want {
+					t.Errorf("elapsed = %v, want %v", elapsed, want)
+				}
+				if fake.called(sendEnter) != 1 || fake.called(waitIdle) != 1 {
+					t.Errorf("Enter calls = %d, idle calls = %d", fake.called(sendEnter), fake.called(waitIdle))
+				}
+			})
+		})
 	}
 }
 
