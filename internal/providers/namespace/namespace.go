@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path"
@@ -55,7 +56,7 @@ type Config struct {
 	StateDir     string        `yaml:"-"`
 	Platform     string        `yaml:"platform"`
 	Container    string        `yaml:"container"`
-	ExportPort   int           `yaml:"exportPort"`
+	ExportPort   int32         `yaml:"exportPort"`
 	VolumeSizeGB int           `yaml:"volumeSizeGB"`
 	Duration     time.Duration `yaml:"duration"`
 	CallTimeout  time.Duration `yaml:"callTimeout"`
@@ -211,9 +212,10 @@ func (p *Provider) Check(context.Context) error {
 }
 
 func (p *Provider) ValidateSpec(spec providers.Spec) error {
+	if _, _, err := shapeOf(spec.Size); err != nil {
+		return err
+	}
 	switch {
-	case !shapeSize.MatchString(spec.Size):
-		return fmt.Errorf("a namespace spec needs a size of <vcpu>x<memory GB>, like 8x16, not %q", spec.Size)
 	case spec.Image == "":
 		return errors.New("a namespace spec needs an image")
 	case !pinnedImage.MatchString(spec.Image):
@@ -222,12 +224,29 @@ func (p *Provider) ValidateSpec(spec providers.Spec) error {
 	return nil
 }
 
-func (p *Provider) shape(size string) *computev1beta.InstanceShape {
+func shapeOf(size string) (vcpus, memoryMB int32, err error) {
 	match := shapeSize.FindStringSubmatch(size)
-	cpu, _ := strconv.Atoi(match[1])
-	memory, _ := strconv.Atoi(match[2])
+	if match == nil {
+		return 0, 0, fmt.Errorf("a namespace spec needs a size of <vcpu>x<memory GB>, like 8x16, not %q", size)
+	}
+	cpu, err := strconv.ParseInt(match[1], 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("namespace size %q asks for more than the %d vCPUs a Compute shape can carry", size, math.MaxInt32)
+	}
+	gb, err := strconv.ParseInt(match[2], 10, 32)
+	if err != nil || gb > math.MaxInt32/1024 {
+		return 0, 0, fmt.Errorf("namespace size %q asks for more than the %d GB a Compute shape can carry in megabytes", size, math.MaxInt32/1024)
+	}
+	return int32(cpu), int32(gb) * 1024, nil
+}
+
+func (p *Provider) shape(size string) (*computev1beta.InstanceShape, error) {
+	vcpus, memoryMB, err := shapeOf(size)
+	if err != nil {
+		return nil, err
+	}
 	osName, arch, _ := strings.Cut(p.Platform, "/")
-	return &computev1beta.InstanceShape{VirtualCpu: int32(cpu), MemoryMegabytes: int32(memory * 1024), MachineArch: arch, Os: osName}
+	return &computev1beta.InstanceShape{VirtualCpu: vcpus, MemoryMegabytes: memoryMB, MachineArch: arch, Os: osName}, nil
 }
 
 func translate(labels map[string]string) ([]*stdlib.Label, error) {
@@ -256,8 +275,12 @@ func (p *Provider) request(spec providers.Spec, tag string, deadline time.Time) 
 		return nil, err
 	}
 	labels = append([]*stdlib.Label{{Name: labelName, Value: spec.Name}}, labels...)
+	shape, err := p.shape(spec.Size)
+	if err != nil {
+		return nil, err
+	}
 	return &computev1beta.CreateInstanceRequest{
-		Shape:             p.shape(spec.Size),
+		Shape:             shape,
 		DocumentedPurpose: "cc-remote workspace " + spec.Name,
 		Labels:            labels,
 		Deadline:          timestamppb.New(deadline),
@@ -273,7 +296,7 @@ func (p *Provider) request(spec providers.Spec, tag string, deadline time.Time) 
 			ImageRef:    spec.Image,
 			Entrypoint:  []string{"sleep", "infinity"},
 			Environment: map[string]string{"HOME": spec.Home},
-			ExportPorts: []*computev1beta.ContainerPort{{Proto: computev1beta.ContainerPort_TCP, ContainerPort: int32(p.ExportPort)}},
+			ExportPorts: []*computev1beta.ContainerPort{{Proto: computev1beta.ContainerPort_TCP, ContainerPort: p.ExportPort}},
 			Experimental: &computev1beta.ContainerRequest_ExperimentalFeatures{
 				HostMount: []*computev1beta.ContainerRequest_ExperimentalFeatures_HostMount{{HostPath: hostMount, ContainerPath: spec.Root}},
 			},
@@ -320,7 +343,7 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 		Endpoint:      p.Endpoint,
 		Image:         spec.Image,
 		Volume:        providers.Volume{Tag: tag, HostMount: hostMount, ContainerMount: spec.Root},
-		ContainerPort: p.ExportPort,
+		ContainerPort: int(p.ExportPort),
 	}}
 	project(&saved.Instance, created)
 	unready := func(cause error) (providers.Machine, error) {

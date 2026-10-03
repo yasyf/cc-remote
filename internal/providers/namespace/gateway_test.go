@@ -91,7 +91,7 @@ func TestForwardBridgesEachConnectionToTheCurrentExportedPort(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
 	go func() { served <- p.Forward(ctx, "inst1", listener) }()
-	var hosts []int
+	hosts := make([]int, 0, 2)
 	for round := range 2 {
 		if round == 1 {
 			if err := p.Suspend(t.Context(), "inst1"); err != nil {

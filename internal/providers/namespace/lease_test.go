@@ -46,7 +46,7 @@ func keep(t *testing.T, p *Provider, clock *fakeClock, rounds int, between func(
 func at(offset time.Duration) time.Time { return epoch.Add(offset) }
 
 func checks(leases []Lease) []time.Time {
-	var times []time.Time
+	times := make([]time.Time, 0, len(leases))
 	for _, lease := range leases {
 		times = append(times, lease.CheckedAt)
 	}

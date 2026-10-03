@@ -268,18 +268,19 @@ func TestOverlappingCreatesOnOneSessionSummarizeOnlyTheirOwnPhases(t *testing.T)
 		if got, want := summary["execs"], float64(execsOn(h.fake.Calls(), workspace)); got != want {
 			t.Errorf("%s counted %v execs, want the %v made on it", workspace, got, want)
 		}
-		if start, end := spanOf(workspace, "machine.create"); start != 3 || end != 4 {
-			t.Errorf("%s machine.create spans %v..%v, want 3..4 from its own origin", workspace, start, end)
+		if start, end := spanOf(workspace, "machine.create"); start != 3 || end != 5 {
+			t.Errorf("%s machine.create spans %v..%v, want 3..5 from its own origin, with the allocation record saved inside it", workspace, start, end)
 		}
-		if start, _ := spanOf(workspace, "prerequisites"); start != 6 {
-			t.Errorf("%s prerequisites starts at %v, want 6 from its own origin", workspace, start)
+		if start, _ := spanOf(workspace, "prerequisites"); start != 7 {
+			t.Errorf("%s prerequisites starts at %v, want 7 from its own origin", workspace, start)
 		}
 	}
-	if _, end := spanOf("ws-2", "prerequisites"); end != 7 {
-		t.Errorf("ws-2 prerequisites ends at %v, want 7", end)
+	if _, end := spanOf("ws-2", "prerequisites"); end != 8 {
+		t.Errorf("ws-2 prerequisites ends at %v, want 8", end)
 	}
-	if _, end := spanOf("ws-1", "prerequisites"); end != summaries["ws-2"]["seconds"].(float64)+8 {
-		t.Errorf("ws-1 prerequisites ends at %v, want %v: parked across the whole of ws-2", end, summaries["ws-2"]["seconds"].(float64)+8)
+	held, resumed := spanOf("ws-1", "prerequisites")
+	if other := summaries["ws-2"]["seconds"].(float64); resumed != held+other+2 {
+		t.Errorf("ws-1 prerequisites ends at %v, want %v: held from %v, ws-2 began on the next reading and ran %v, and ws-1 resumed on the reading after ws-2's summary", resumed, held+other+2, held, other)
 	}
 }
 

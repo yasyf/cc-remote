@@ -241,6 +241,7 @@ func TestCreateRefusesBadInputBeforeAnyCall(t *testing.T) {
 		{"a relative root", providers.Spec{Name: "alpha", Size: "8x16", Image: testImage, Root: "workspaces", Home: "/home/agent"}, `a namespace instance needs an absolute workspace root and HOME, not "workspaces" and "/home/agent"`},
 		{"no home", providers.Spec{Name: "alpha", Size: "8x16", Image: testImage, Root: "/workspaces"}, `a namespace instance needs an absolute workspace root and HOME, not "/workspaces" and ""`},
 		{"an unpinned image", providers.Spec{Name: "alpha", Size: "8x16", Image: "nscr.io/tenant/agent:latest", Root: "/workspaces", Home: "/home/agent"}, `namespace image "nscr.io/tenant/agent:latest" must be pinned by its @sha256 digest`},
+		{"memory past the shape's megabytes", providers.Spec{Name: "alpha", Size: "8x2097152", Image: testImage, Root: "/workspaces", Home: "/home/agent"}, `namespace size "8x2097152" asks for more than the 2097151 GB a Compute shape can carry in megabytes`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -279,6 +280,10 @@ func TestValidateSpec(t *testing.T) {
 		{"zero vcpu", providers.Spec{Size: "0x16", Image: testImage}, `a namespace spec needs a size of <vcpu>x<memory GB>, like 8x16, not "0x16"`},
 		{"no image", providers.Spec{Size: "8x16"}, "a namespace spec needs an image"},
 		{"tag only", providers.Spec{Size: "8x16", Image: "cc-remote-linux"}, `namespace image "cc-remote-linux" must be pinned by its @sha256 digest`},
+		{"the largest representable shape", providers.Spec{Size: "2147483647x2097151", Image: testImage}, ""},
+		{"vcpus past int32", providers.Spec{Size: "2147483648x16", Image: testImage}, `namespace size "2147483648x16" asks for more than the 2147483647 vCPUs a Compute shape can carry`},
+		{"memory one gigabyte past int32 megabytes", providers.Spec{Size: "8x2097152", Image: testImage}, `namespace size "8x2097152" asks for more than the 2097151 GB a Compute shape can carry in megabytes`},
+		{"memory past int32 gigabytes", providers.Spec{Size: "8x2147483648", Image: testImage}, `namespace size "8x2147483648" asks for more than the 2097151 GB a Compute shape can carry in megabytes`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,6 +298,21 @@ func TestValidateSpec(t *testing.T) {
 				t.Errorf("ValidateSpec = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestShapeCarriesTheLargestRepresentableSizeExactly(t *testing.T) {
+	p, _, _ := newProvider(t)
+	shape, err := p.shape("2147483647x2097151")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &computev1beta.InstanceShape{VirtualCpu: 2147483647, MemoryMegabytes: 2097151 * 1024, MachineArch: "amd64", Os: "linux"}
+	if !proto.Equal(shape, want) {
+		t.Errorf("shape = %v, want %v", shape, want)
+	}
+	if _, err := p.shape("1x2097152"); err == nil {
+		t.Error("a memory size past the int32 megabyte field produced a shape")
 	}
 }
 
@@ -315,7 +335,7 @@ func TestListReadsEveryPageAndKeepsSuspendedInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ids []string
+	ids := make([]string, 0, len(machines))
 	for _, machine := range machines {
 		ids = append(ids, machine.ID)
 		if machine.Compute.ExportedPort == 0 {
