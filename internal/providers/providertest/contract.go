@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,6 +32,7 @@ func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
 		{"ListFiltersByLabels", listFiltersByLabels},
 		{"ExecReportsExitAndStreams", execReportsExitAndStreams},
 		{"ExecKeepsArgumentVector", execKeepsArgumentVector},
+		{"ExecKeepsStatusesAndBytes", execKeepsStatusesAndBytes},
 		{"WakeAndSuspend", wakeAndSuspend},
 		{"Access", access},
 		{"Destroy", destroy},
@@ -158,6 +160,21 @@ func execKeepsArgumentVector(t *testing.T, h Harness) {
 	}
 	if want := "a b|it's||$HOME|*|"; string(result.Stdout) != want {
 		t.Errorf("Exec stdout = %q, want %q", result.Stdout, want)
+	}
+}
+
+func execKeepsStatusesAndBytes(t *testing.T, h Harness) {
+	alpha := create(t, h, "alpha", nil)
+	for _, code := range []int{0, 3, 7, 255} {
+		result, err := h.Provider.Exec(t.Context(), alpha.ID, []string{"sh", "-c", "exit " + strconv.Itoa(code)}, nil)
+		if err != nil || len(result.Stdout) != 0 || len(result.Stderr) != 0 || result.ExitCode != code {
+			t.Errorf("Exec(exit %d) = %q, %q, exit %d, %v; want empty streams and exit %d", code, result.Stdout, result.Stderr, result.ExitCode, err, code)
+		}
+	}
+	input := "\x00\xff\xfe\r\nno trailing newline"
+	result, err := h.Provider.Exec(t.Context(), alpha.ID, []string{"sh", "-c", `cat; printf '\000\377\n' >&2`}, strings.NewReader(input))
+	if want := "\x00\xff\n"; err != nil || string(result.Stdout) != input || string(result.Stderr) != want || result.ExitCode != 0 {
+		t.Errorf("Exec = %q, %q, exit %d, %v; want %q, %q, exit 0", result.Stdout, result.Stderr, result.ExitCode, err, input, want)
 	}
 }
 

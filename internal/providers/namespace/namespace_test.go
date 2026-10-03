@@ -1,9 +1,13 @@
 package namespace
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -494,22 +498,309 @@ func TestExtendRecordsTheDeadlineTheProviderAnswered(t *testing.T) {
 	}
 }
 
-func TestExecRunsTheNativeContainerSSH(t *testing.T) {
+func TestExecRunsTheFramedCommandThroughTheNativeContainerSSH(t *testing.T) {
 	p, fake, _ := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
 	}
 	before := len(fake.Shells())
-	result, err := p.Exec(t.Context(), "inst1", []string{"sh", "-c", "cat; exit 4"}, strings.NewReader("key"))
-	if err != nil || string(result.Stdout) != "key" || result.ExitCode != 4 {
-		t.Errorf("Exec = %q, exit %d, %v", result.Stdout, result.ExitCode, err)
+	for range 2 {
+		result, err := p.Exec(t.Context(), "inst1", []string{"sh", "-c", "cat; exit 4"}, strings.NewReader("key"))
+		if err != nil || string(result.Stdout) != "key" || result.ExitCode != 4 {
+			t.Errorf("Exec = %q, exit %d, %v", result.Stdout, result.ExitCode, err)
+		}
 	}
-	if got := fake.Shells()[before]; !slices.Equal(got, []string{"ssh", "--container_name", "agent", "-T", "inst1", "sh -c 'cat; exit 4'"}) {
-		t.Errorf("nsc argv = %q", got)
+	framing := regexp.MustCompile(`^LC_ALL=C python3 -I -S -c '[^']+' ([0-9a-f]{64}) `)
+	var nonces []string
+	for _, got := range fake.Shells()[before:] {
+		match := framing.FindStringSubmatch(got[len(got)-1])
+		if match == nil {
+			t.Fatalf("nsc argv = %q, want the framed wrapper", got)
+		}
+		want := []string{"ssh", "--container_name", "agent", "-T", "inst1", "LC_ALL=C " + providers.ShellQuote("python3", "-I", "-S", "-c", frameWrapper, match[1]) + ` "${LC_ALL+=$LC_ALL}" sh -c 'cat; exit 4'`}
+		if !slices.Equal(got, want) {
+			t.Errorf("nsc argv = %q, want %q", got, want)
+		}
+		nonces = append(nonces, match[1])
+	}
+	if len(nonces) != 2 || nonces[0] == nonces[1] {
+		t.Errorf("nonces = %q, want a fresh one per Exec", nonces)
 	}
 	fake.set("inst1", computev1beta.InstanceMetadata_DESTROYED)
 	if _, err := p.Exec(t.Context(), "inst1", []string{"true"}, nil); !errors.Is(err, providers.ErrNotFound) {
 		t.Errorf("Exec on a destroyed instance = %v, want ErrNotFound", err)
+	}
+}
+
+func TestExecKeepsTheRemoteStatusTheNativeSSHCollapses(t *testing.T) {
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := p.load("inst1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	native, err := p.Runner.Run(t.Context(), p.container(saved.Instance, []string{"sh", "-c", "exit 7"}, nil))
+	if err != nil || native.ExitCode != 1 || !strings.Contains(string(native.Stderr), "exit code 7") {
+		t.Fatalf("unframed native ssh = exit %d, %q, %v; want the native collapse to exit 1", native.ExitCode, native.Stderr, err)
+	}
+	tests := []struct {
+		script string
+		want   int
+	}{
+		{"exit 0", 0},
+		{"exit 3", 3},
+		{"exit 7", 7},
+		{"exit 255", 255},
+		{"kill -KILL $$", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.script, func(t *testing.T) {
+			result, err := p.Exec(t.Context(), "inst1", []string{"sh", "-c", "printf out; printf err >&2; " + tt.script}, nil)
+			if err != nil || string(result.Stdout) != "out" || string(result.Stderr) != "err" || result.ExitCode != tt.want {
+				t.Errorf("Exec = %q, %q, exit %d, %v; want \"out\", \"err\", exit %d", result.Stdout, result.Stderr, result.ExitCode, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecKeepsBinaryStreamsAndFrameLikeOutputAsPayload(t *testing.T) {
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	input := "\x00\xff\xfe\r\nCCRNSX1\x00" + strings.Repeat("\x00", 32) + "\x03\x00\x00\x00\x04\x00\x00\x00\x00no newline"
+	result, err := p.Exec(t.Context(), "inst1", []string{"sh", "-c", `cat; printf '\003\000\000\000\004\000\000\000\007' >&2`}, strings.NewReader(input))
+	if want := "\x03\x00\x00\x00\x04\x00\x00\x00\x07"; err != nil || string(result.Stdout) != input || string(result.Stderr) != want || result.ExitCode != 0 {
+		t.Errorf("Exec = %q, %q, exit %d, %v; want %q, %q, exit 0", result.Stdout, result.Stderr, result.ExitCode, err, input, want)
+	}
+}
+
+func TestTheWrapperGivesTheCommandItsOriginalEnvironment(t *testing.T) {
+	nonce := []byte("0123456789abcdef0123456789abcdef")
+	child := []string{"sh", "-c", `env >&2; printf '\376\000' >&2; printf '%s|' "$@"; cat`, "child", "a b", "", "it's", "$HOME", "*", "\xff"}
+	input := "\x00\xffin"
+	unrelated := []string{"PATH=" + os.Getenv("PATH"), "CC_REMOTE_TEXT=a b'c\"$d\\", "CC_REMOTE_EMPTY="}
+	tests := []struct {
+		name   string
+		locale []string
+	}{
+		{"no locale", nil},
+		{"C language", []string{"LANG=C"}},
+		{"POSIX language", []string{"LANG=POSIX"}},
+		{"C character type", []string{"LC_CTYPE=C"}},
+		{"POSIX character type", []string{"LANG=C.UTF-8", "LC_CTYPE=POSIX"}},
+		{"empty character type", []string{"LANG=C", "LC_CTYPE="}},
+		{"C override", []string{"LC_ALL=C"}},
+		{"POSIX override", []string{"LC_ALL=POSIX", "LC_CTYPE=C"}},
+		{"empty override", []string{"LC_ALL=", "LC_CTYPE=C"}},
+		{"empty override alone", []string{"LC_ALL="}},
+		{"coercion requested", []string{"LC_CTYPE=C", "PYTHONCOERCECLOCALE=1"}},
+		{"coercion disabled", []string{"LANG=POSIX", "LC_ALL=", "PYTHONCOERCECLOCALE=0"}},
+		{"empty coercion control", []string{"LC_CTYPE=POSIX", "PYTHONCOERCECLOCALE="}},
+		{"coercion warning", []string{"LANG=C", "PYTHONCOERCECLOCALE=warn"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := slices.Concat(unrelated, tt.locale)
+			native := exec.CommandContext(t.Context(), "sh", "-c", framed(nonce, child))
+			native.Env = fixture
+			native.Stdin = strings.NewReader(input)
+			var stdout, stderr bytes.Buffer
+			native.Stdout, native.Stderr = &stdout, &stderr
+			if err := native.Run(); err != nil || stderr.Len() != 0 {
+				t.Fatalf("the framed command = %v with native stderr %q", err, stderr.Bytes())
+			}
+			result, status, err := unframe(stdout.Bytes(), nonce)
+			if err != nil || status != 0 {
+				t.Fatalf("unframe = %d, %v", status, err)
+			}
+			if want := "a b||it's|$HOME|*|\xff|" + input; string(result.Stdout) != want {
+				t.Errorf("stdout = %q, want %q", result.Stdout, want)
+			}
+			listing, ok := strings.CutSuffix(string(result.Stderr), "\xfe\x00")
+			if !ok {
+				t.Fatalf("stderr = %q, want the environment listing then the binary suffix", result.Stderr)
+			}
+			want := map[string]string{}
+			for _, entry := range fixture {
+				key, value, _ := strings.Cut(entry, "=")
+				want[key] = value
+			}
+			got := map[string]string{}
+			for line := range strings.SplitSeq(listing, "\n") {
+				key, value, _ := strings.Cut(line, "=")
+				if _, supplied := want[key]; supplied || key == "LANG" || strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "PYTHON") {
+					got[key] = value
+				}
+			}
+			if !maps.Equal(got, want) {
+				t.Errorf("the command saw %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestExecDrainsBothStreamsBeforeTheCommandReadsItsInput(t *testing.T) {
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	const size = 2 << 20
+	result, err := p.Exec(t.Context(), "inst1", []string{"sh", "-c", "head -c 2097152 /dev/zero >&2; head -c 2097152 /dev/zero; cat"}, strings.NewReader("tail"))
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Exec = exit %d, %v", result.ExitCode, err)
+	}
+	if string(result.Stdout) != strings.Repeat("\x00", size)+"tail" {
+		t.Errorf("stdout carries %d bytes, want %d zero bytes then the input", len(result.Stdout), size)
+	}
+	if string(result.Stderr) != strings.Repeat("\x00", size) {
+		t.Errorf("stderr carries %d bytes, want %d zero bytes", len(result.Stderr), size)
+	}
+}
+
+func TestExecRefusesAStatusTheNativeTransportDidNotDeliver(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(*fakeNamespace)
+		cmd    []string
+		stdout string
+		detail string
+	}{
+		{"launch failure", func(*fakeNamespace) {}, []string{"/nonexistent/cc-remote-command"}, "", "cannot start the command"},
+		{"native exit after a complete frame", func(f *fakeNamespace) { f.nativeExit = 255 }, []string{"cat"}, "secret-input", "the native ssh exited 255"},
+		{"native diagnostic", func(f *fakeNamespace) { f.nativeStderr = "Warning: rotated keys\n" }, []string{"cat"}, "secret-input", "Warning: rotated keys"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, fake, _ := newProvider(t)
+			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(fake)
+			result, err := p.Exec(t.Context(), "inst1", tt.cmd, strings.NewReader("secret-input"))
+			if err == nil || errors.Is(err, providers.ErrNotFound) || !strings.Contains(err.Error(), tt.detail) {
+				t.Fatalf("Exec = %v, want a transport error naming %q", err, tt.detail)
+			}
+			if strings.Contains(err.Error(), "secret-input") || strings.Contains(err.Error(), "CCRNSX1") {
+				t.Errorf("Exec error %q prints the input or the framing", err)
+			}
+			if string(result.Stdout) != tt.stdout || len(result.Stderr) != 0 || result.ExitCode != 0 {
+				t.Errorf("Exec = %q, %q, exit %d; want %q with no status", result.Stdout, result.Stderr, result.ExitCode, tt.stdout)
+			}
+		})
+	}
+}
+
+func TestExecReportsTheDeadlineAfterPartialOutput(t *testing.T) {
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	result, err := p.Exec(ctx, "inst1", []string{"sh", "-c", "printf partial; exec sleep 5"}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || string(result.Stdout) != "partial" || result.ExitCode != 0 {
+		t.Errorf("Exec = %q, exit %d, %v; want the partial output and the deadline", result.Stdout, result.ExitCode, err)
+	}
+}
+
+func TestExecAcceptsOnlyThisCallsCompleteFraming(t *testing.T) {
+	exit7 := "\x03\x00\x00\x00\x04\x00\x00\x00\x07"
+	tests := []struct {
+		name   string
+		stream func(nonce string) string
+		err    error
+		want   error
+		stdout string
+	}{
+		{"a status before the deadline", func(nonce string) string { return "CCRNSX1\x00" + nonce + "\x01\x00\x00\x00\x07partial" + exit7 }, context.DeadlineExceeded, context.DeadlineExceeded, "partial"},
+		{"unframed output", func(string) string { return "secret-output" }, nil, errFraming, ""},
+		{"another call's nonce", func(string) string {
+			return "CCRNSX1\x00" + strings.Repeat("\x00", 32) + "\x01\x00\x00\x00\x0dsecret-output" + exit7
+		}, nil, errFraming, ""},
+	}
+	nonceArg := regexp.MustCompile(`[0-9a-f]{64}`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, _, _ := newProvider(t)
+			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+				t.Fatal(err)
+			}
+			p.Runner = runnerFunc(func(_ context.Context, cmd providers.Command) (providers.Result, error) {
+				raw, err := hex.DecodeString(nonceArg.FindString(cmd.Args[len(cmd.Args)-1]))
+				if err != nil || len(raw) != 32 {
+					t.Fatalf("nsc argv %q carries no call nonce", cmd.Args)
+				}
+				return providers.Result{Stdout: []byte(tt.stream(string(raw)))}, tt.err
+			})
+			result, err := p.Exec(t.Context(), "inst1", []string{"true"}, nil)
+			if !errors.Is(err, tt.want) || string(result.Stdout) != tt.stdout || result.ExitCode != 0 {
+				t.Fatalf("Exec = %q, exit %d, %v; want %q and %v with no status", result.Stdout, result.ExitCode, err, tt.stdout, tt.want)
+			}
+			if strings.Contains(err.Error(), "secret-output") {
+				t.Errorf("Exec error %q prints the command output", err)
+			}
+		})
+	}
+}
+
+func TestUnframeAcceptsOnlyOneCompleteRecordStream(t *testing.T) {
+	nonce := "Kq7Zp2Wm9Xc4Vb8Nl1Hj6Gf3Ds5Ar0Tu"
+	head := "CCRNSX1\x00" + nonce
+	exit0 := "\x03\x00\x00\x00\x04\x00\x00\x00\x00"
+	exit7 := "\x03\x00\x00\x00\x04\x00\x00\x00\x07"
+	secret := "\x01\x00\x00\x00\x06secret"
+	tests := []struct {
+		name           string
+		stream         string
+		stdout, stderr string
+		status         int
+		ok             bool
+	}{
+		{"status only", head + exit7, "", "", 7, true},
+		{"interleaved streams", head + "\x01\x00\x00\x00\x02ab\x02\x00\x00\x00\x03\x00\xff\n\x01\x00\x00\x00\x00\x01\x00\x00\x00\x01c\x03\x00\x00\x00\x04\x00\x00\x00\xff", "abc", "\x00\xff\n", 255, true},
+		{"signal", head + "\x03\x00\x00\x00\x04\xff\xff\xff\xff", "", "", -1, true},
+		{"output resembling framing", head + "\x01\x00\x00\x00\x31" + head + exit7 + exit0, head + exit7, "", 0, true},
+		{"empty", "", "", "", 0, false},
+		{"truncated prefix", head[:20], "", "", 0, false},
+		{"wrong magic", "CCRNSX2\x00" + nonce + exit7, "", "", 0, false},
+		{"wrong nonce", "CCRNSX1\x00" + strings.ToLower(nonce) + exit7, "", "", 0, false},
+		{"truncated header", head + secret + "\x01\x00\x00", "secret", "", 0, false},
+		{"truncated payload", head + "\x01\x00\x00\x00\x09secret", "", "", 0, false},
+		{"overlong length", head + "\x01\xff\xff\xff\xffsecret" + exit7, "", "", 0, false},
+		{"unknown tag", head + "\x04\x00\x00\x00\x06secret" + exit7, "", "", 0, false},
+		{"zero tag", head + "\x00\x00\x00\x00\x06secret" + exit7, "", "", 0, false},
+		{"missing status", head + secret, "secret", "", 0, false},
+		{"truncated status", head + secret + "\x03\x00\x00\x00\x04\x00\x00", "secret", "", 0, false},
+		{"short status", head + "\x03\x00\x00\x00\x03\x00\x00\x07", "", "", 0, false},
+		{"long status", head + "\x03\x00\x00\x00\x05\x00\x00\x00\x00\x07", "", "", 0, false},
+		{"duplicate status", head + exit7 + exit7, "", "", 0, false},
+		{"record after status", head + exit7 + secret, "", "", 0, false},
+		{"trailing byte", head + exit7 + "\x00", "", "", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, status, err := unframe([]byte(tt.stream), []byte(nonce))
+			if string(result.Stdout) != tt.stdout || string(result.Stderr) != tt.stderr || result.ExitCode != 0 {
+				t.Errorf("unframe output = %q, %q, exit %d; want %q, %q", result.Stdout, result.Stderr, result.ExitCode, tt.stdout, tt.stderr)
+			}
+			if tt.ok {
+				if err != nil || status != tt.status {
+					t.Errorf("unframe = %d, %v; want %d", status, err, tt.status)
+				}
+				return
+			}
+			if !errors.Is(err, errFraming) || status != 0 {
+				t.Fatalf("unframe = %d, %v; want a framing error", status, err)
+			}
+			for _, private := range []string{"secret", nonce, "CCRNSX"} {
+				if strings.Contains(err.Error(), private) {
+					t.Errorf("unframe error %q prints %q", err, private)
+				}
+			}
+		})
 	}
 }
 

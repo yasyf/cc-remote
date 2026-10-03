@@ -64,6 +64,12 @@ type closerFunc func() error
 
 func (c closerFunc) Close() error { return c() }
 
+type runnerFunc func(context.Context, providers.Command) (providers.Result, error)
+
+func (r runnerFunc) Run(ctx context.Context, cmd providers.Command) (providers.Result, error) {
+	return r(ctx, cmd)
+}
+
 type fakeInstance struct {
 	request  *computev1beta.CreateInstanceRequest
 	metadata *computev1beta.InstanceMetadata
@@ -75,23 +81,25 @@ type fakeNamespace struct {
 	t     *testing.T
 	clock *fakeClock
 
-	createErr   error
-	anonymous   bool
-	waitErr     error
-	unexported  bool
-	describeErr error
-	lingers     bool
-	extendErr   error
-	clamp       time.Time
-	limit       time.Duration
-	latency     time.Duration
-	readyAfter  time.Duration
-	ownAfter    time.Duration
-	stall       string
-	page        int
-	uid, gid    string
-	chownExit   int
-	readonly    bool
+	createErr    error
+	anonymous    bool
+	waitErr      error
+	unexported   bool
+	describeErr  error
+	lingers      bool
+	extendErr    error
+	clamp        time.Time
+	limit        time.Duration
+	latency      time.Duration
+	readyAfter   time.Duration
+	ownAfter     time.Duration
+	stall        string
+	page         int
+	uid, gid     string
+	chownExit    int
+	readonly     bool
+	nativeExit   int
+	nativeStderr string
 
 	mu        sync.Mutex
 	instances map[string]*fakeInstance
@@ -394,6 +402,7 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 		f.t.Errorf("ssh into container %q, want %q", container, want)
 	}
 	uid, gid, chownExit, readonly, stall := f.uid, f.gid, f.chownExit, f.readonly, f.stall
+	nativeExit, nativeStderr := f.nativeExit, f.nativeStderr
 	f.mu.Unlock()
 	switch {
 	case script == stall:
@@ -412,7 +421,19 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 		}
 		return providers.Result{}, nil
 	}
-	return providers.OSRunner{}.Run(ctx, providers.Command{Name: "sh", Args: []string{"-c", script}, Env: cmd.Env, Stdin: cmd.Stdin, Stdout: cmd.Stdout})
+	result, err := providers.OSRunner{}.Run(ctx, providers.Command{Name: "sh", Args: []string{"-c", script}, Env: cmd.Env, Stdin: cmd.Stdin, Stdout: cmd.Stdout})
+	if err != nil {
+		return result, err
+	}
+	if result.ExitCode != 0 {
+		result.Stderr = fmt.Appendf(result.Stderr, "Failed: exec failed with exit code %d\n", result.ExitCode)
+		result.ExitCode = 1
+	}
+	result.Stderr = append(result.Stderr, nativeStderr...)
+	if nativeExit != 0 {
+		result.ExitCode = nativeExit
+	}
+	return result, nil
 }
 
 func newProvider(t *testing.T) (*Provider, *fakeNamespace, *fakeClock) {
