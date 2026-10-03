@@ -20,6 +20,30 @@ func TestDefaultFollowsXDGStateHome(t *testing.T) {
 	}
 }
 
+func TestOrcaControlUsesDistinctShortPrivateDirectories(t *testing.T) {
+	seen := map[string]bool{}
+	for range 2 {
+		control, err := NewOrcaControl()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Dir(control)
+		t.Cleanup(func() { _ = os.Remove(dir) })
+		if seen[control] {
+			t.Fatalf("control path reused: %s", control)
+		}
+		seen[control] = true
+		expanded := strings.ReplaceAll(control, "%C", strings.Repeat("a", 40))
+		if filepath.Dir(dir) != "/tmp" || len(expanded)+17 >= 104 {
+			t.Errorf("control path leaves no room for the SSH temporary socket: %s", expanded)
+		}
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Errorf("control directory = %v, %v", info, err)
+		}
+	}
+}
+
 func TestValidateNameBoundsTheProviderNameLimit(t *testing.T) {
 	tests := []struct {
 		name string

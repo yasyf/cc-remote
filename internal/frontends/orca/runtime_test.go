@@ -194,7 +194,11 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(bin, tt.agent.Kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command("sh", "-c", tt.agent.Command(dir))
+			command := tt.agent.Command(dir)
+			if !strings.HasPrefix(command, "exec sh -c ") {
+				t.Fatalf("worker command relies on the terminal's configured shell: %s", command)
+			}
+			cmd := exec.Command("sh", "-c", command)
 			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), tt.cleared+"=oauth-token", tt.variable+"=stale")
 			go func() {
 				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)

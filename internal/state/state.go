@@ -46,7 +46,15 @@ func (d Dir) SSHInclude() string { return filepath.Join(string(d), "ssh", "*.ssh
 func (d Dir) Orca(name string) string {
 	return filepath.Join(string(d), "orca", name+".json")
 }
-func (d Dir) OrcaControl() string { return filepath.Join(string(d), "orca", "%C") }
+
+func NewOrcaControl() (string, error) {
+	dir, err := os.MkdirTemp("/tmp", "ccr-")
+	if err != nil {
+		return "", fmt.Errorf("create private SSH control directory: %w", err)
+	}
+	return filepath.Join(dir, "%C"), nil
+}
+
 func (d Dir) OrcaForwardLog(name string) string {
 	return filepath.Join(string(d), "orca", name+".forward.log")
 }

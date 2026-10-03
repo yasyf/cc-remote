@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ const (
 	orcaTaskSchema = 1
 	keyTimeout     = 30 * time.Second
 	keyPipeTimeout = 2 * time.Minute
+	keyDropTimeout = 5 * time.Second
 	submitWait     = 15 * time.Second
 )
 
@@ -116,6 +118,13 @@ func (t orcaTunnel) run(ctx context.Context, script string, stdin io.Reader) ([]
 	return providers.Output(ctx, providers.OSRunner{}, t.command(script, stdin))
 }
 
+func (t orcaTunnel) dropKey(ctx context.Context, dir string) error {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), keyDropTimeout)
+	defer cancel()
+	_, err := t.run(cleanup, orca.KeyDropScript(dir), nil)
+	return err
+}
+
 func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
 	return []*cobra.Command{
 		newOrcaCreateCmd(runner),
@@ -161,12 +170,16 @@ record, also kept under the state directory for status, reconnect, send, and rea
 				return err
 			}
 			defer clear(key)
-			result, err := session.Create(cmd.Context(), args[0], workspace.Source{Ref: cmp.Or(ref, session.Config.Ref)})
+			control, err := state.NewOrcaControl()
 			if err != nil {
 				return err
 			}
+			result, err := session.Create(cmd.Context(), args[0], workspace.Source{Ref: cmp.Or(ref, session.Config.Ref)})
+			if err != nil {
+				return errors.Join(err, os.Remove(filepath.Dir(control)))
+			}
 			driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
-			task, err := driver.task(result, agent)
+			task, err := driver.task(result, agent, control)
 			if err == nil {
 				err = driver.launch(cmd.Context(), session, task, runtime, key, cmp.Or(title, result.Name), prompt)
 			}
@@ -226,10 +239,10 @@ func newOrcaReconnectCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "reconnect <name>",
-		Short: "Resume a task's workspace, start its Orca runtime if it is down, and restore the forward",
-		Long: `reconnect resumes the recorded workspace, runs the same idempotent runtime start that create ran,
-checks that the runtime kept its recorded id, reopens the SSH forward when it is down, and confirms the
-paired environment answers from that runtime. It never stops a runtime, worker, or forward.`,
+		Short: "Restore a task's SSH forward to its recorded live Orca runtime",
+		Long: `reconnect reopens the recorded SSH forward when it is down and confirms the paired environment
+answers from the recorded live runtime. It does not resume a machine or start a runtime or worker.
+Recovery after a runtime exits or a machine loses its processes is not supported by this command.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := flags.load()
@@ -240,34 +253,10 @@ paired environment answers from that runtime. It never stops a runtime, worker, 
 			if err != nil {
 				return err
 			}
-			flags.provider, flags.profile = task.Provider, task.Profile
-			session, err := flags.open()
-			if err != nil {
-				return err
-			}
-			runtime, err := orcaRuntime(session)
-			if err != nil {
-				return err
-			}
-			result, err := session.Resume(cmd.Context(), task.Workspace)
-			if err != nil {
-				return err
-			}
-			if result.ProjectRoot != task.ProjectRoot {
-				return fmt.Errorf("workspace %s now checks out at %s, not the recorded %s", task.Workspace, result.ProjectRoot, task.ProjectRoot)
-			}
-			driver := orcaDriver{client: orca.NewClient(runner), state: cfg.State(), log: session.Log}
-			ready, _, err := driver.start(cmd.Context(), session, task, runtime)
-			if err != nil {
-				return err
-			}
-			if ready.RuntimeID != task.RuntimeID {
-				return fmt.Errorf("the Orca runtime on %s is now %s, not the paired %s; its terminals and receipts belong to the old runtime", task.Machine, ready.RuntimeID, task.RuntimeID)
-			}
 			if err := task.Forward.ensure(cmd.Context(), task.Port); err != nil {
 				return err
 			}
-			if _, err := driver.client.On(task.Environment, task.RuntimeID).Status(cmd.Context()); err != nil {
+			if _, err := orca.NewClient(runner).On(task.Environment, task.RuntimeID).Status(cmd.Context()); err != nil {
 				return err
 			}
 			return emit(cmd.OutOrStdout(), task)
@@ -279,13 +268,14 @@ paired environment answers from that runtime. It never stops a runtime, worker, 
 
 func newOrcaSendCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
-	var promptFile, retry string
+	var promptFile string
 	cmd := &cobra.Command{
 		Use:   "send <name>",
 		Short: "Send a prompt to a task's worker terminal and print its receipt",
-		Long: `send submits one prompt through orca terminal send and records the receipt. It never resends on
-silence: after an ambiguous failure, rerun it with the same prompt and --retry-request set to the
-reported request id, which the Orca runtime binds to that prompt and terminal.`,
+		Long: `send submits one prompt through orca terminal send and records the receipt. When input was
+accepted but no turn start was observed, inspect the task with status and read. The command keeps
+the accepted receipt and never resends the prompt. Native request replay is not exposed because
+the supported Orca runtime can deliver the prompt again when replaying an accepted request.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prompt, err := readPrompt(cmd, promptFile)
@@ -304,7 +294,7 @@ reported request id, which the Orca runtime binds to that prompt and terminal.`,
 				return errors.New("the forward is down; run cc-remote orca reconnect " + task.Workspace)
 			}
 			driver := orcaDriver{client: orca.NewClient(runner), state: cfg.State(), log: slog.Default()}
-			receipt, err := driver.prompt(cmd.Context(), task, prompt, retry)
+			receipt, err := driver.prompt(cmd.Context(), task, prompt)
 			if receipt == nil {
 				return err
 			}
@@ -313,7 +303,6 @@ reported request id, which the Orca runtime binds to that prompt and terminal.`,
 	}
 	flags.bind(cmd)
 	cmd.Flags().StringVar(&promptFile, "prompt-file", "", "file holding the prompt, or - for stdin")
-	cmd.Flags().StringVar(&retry, "retry-request", "", "request id of an earlier send of this same prompt whose delivery is unknown")
 	_ = cmd.MarkFlagRequired("prompt-file")
 	return cmd
 }
@@ -353,7 +342,7 @@ type orcaDriver struct {
 	log    *slog.Logger
 }
 
-func (d orcaDriver) task(result *workspace.Result, agent orca.Agent) (*orcaTask, error) {
+func (d orcaDriver) task(result *workspace.Result, agent orca.Agent, control string) (*orcaTask, error) {
 	port, err := workspace.FreePort()
 	if err != nil {
 		return nil, err
@@ -367,7 +356,7 @@ func (d orcaDriver) task(result *workspace.Result, agent orca.Agent) (*orcaTask,
 		ProjectRoot:   result.ProjectRoot,
 		Service:       orca.RuntimeService,
 		Port:          port,
-		Forward:       orcaTunnel{Host: result.Name, Config: result.SSH.Config, Control: d.state.OrcaControl(), Log: d.state.OrcaForwardLog(result.Name)},
+		Forward:       orcaTunnel{Host: result.Name, Config: result.SSH.Config, Control: control, Log: d.state.OrcaForwardLog(result.Name)},
 		Environment:   result.Name,
 		Agent:         agent,
 	}
@@ -422,7 +411,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err := errors.Join(err, d.save(task)); err != nil {
 		return err
 	}
-	_, err = d.prompt(ctx, task, prompt, "")
+	_, err = d.prompt(ctx, task, prompt)
 	return err
 }
 
@@ -455,7 +444,7 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 	}
 	terminal, err := native.CreateTerminal(ctx, task.WorktreeID, title, task.Agent.Command(dir))
 	if err != nil {
-		_, dropped := task.Forward.run(context.WithoutCancel(ctx), orca.KeyDropScript(dir), nil)
+		dropped := task.Forward.dropKey(ctx, dir)
 		return "", errors.Join(err, dropped)
 	}
 	payload := append(slices.Clone(key), '\n')
@@ -463,14 +452,14 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 	write, cancel := context.WithTimeout(ctx, keyPipeTimeout)
 	defer cancel()
 	if _, err := task.Forward.run(write, orca.KeyWriteScript(dir), bytes.NewReader(payload)); err != nil {
-		_, dropped := task.Forward.run(context.WithoutCancel(ctx), orca.KeyDropScript(dir), nil)
+		dropped := task.Forward.dropKey(ctx, dir)
 		return terminal.Handle, errors.Join(fmt.Errorf("terminal %s never read its key: %w", terminal.Handle, err), dropped)
 	}
 	return terminal.Handle, nil
 }
 
-func (d orcaDriver) prompt(ctx context.Context, task *orcaTask, prompt, retry string) (*orca.Receipt, error) {
-	send, err := d.client.On(task.Environment, task.RuntimeID).Prompt(ctx, task.Terminal, prompt, submitWait, retry)
+func (d orcaDriver) prompt(ctx context.Context, task *orcaTask, prompt string) (*orca.Receipt, error) {
+	send, err := d.client.On(task.Environment, task.RuntimeID).Prompt(ctx, task.Terminal, prompt, submitWait)
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +469,7 @@ func (d orcaDriver) prompt(ctx context.Context, task *orcaTask, prompt, retry st
 		return &receipt, err
 	}
 	if !receipt.Submitted {
-		return &receipt, fmt.Errorf("%w for request %s (stages %v, provider %s); read the terminal, and resend only with --retry-request %s", ErrNotSubmitted, receipt.RequestID, receipt.Stages, receipt.Provider, receipt.RequestID)
+		return &receipt, fmt.Errorf("%w for request %s (stages %v, provider %s); inspect the task with status and read before deciding what to send next", ErrNotSubmitted, receipt.RequestID, receipt.Stages, receipt.Provider)
 	}
 	return &receipt, nil
 }

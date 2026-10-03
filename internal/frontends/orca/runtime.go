@@ -231,13 +231,14 @@ func (a Agent) Argv() []string {
 }
 
 func (a Agent) Command(dir string) string {
-	return strings.Join([]string{
+	script := strings.Join([]string{
 		"{ IFS= read -r key < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
 		"unset " + strings.Join(a.cleared(), " "),
 		"export " + a.variable() + `="$key"`,
 		"unset key",
 		"exec " + remote.QuoteAll(a.Argv()),
 	}, " && ")
+	return "exec sh -c " + remote.Quote(script)
 }
 
 func quoted(words []string) []string {

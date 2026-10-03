@@ -81,6 +81,11 @@ type Remote struct {
 	RuntimeID   string
 }
 
+type promptDeliveryError struct {
+	terminal string
+	cause    error
+}
+
 type envelope[T any] struct {
 	OK     bool `json:"ok"`
 	Result T    `json:"result"`
@@ -92,6 +97,12 @@ type envelope[T any] struct {
 		RuntimeID *string `json:"runtimeId"`
 	} `json:"_meta"`
 }
+
+func (e *promptDeliveryError) Error() string {
+	return fmt.Sprintf("prompt delivery to terminal %s is unverified; inspect the task with status and read without resending", e.terminal)
+}
+
+func (e *promptDeliveryError) Unwrap() error { return e.cause }
 
 func (c Client) AddEnvironment(ctx context.Context, name, pairing string) (Environment, error) {
 	label := "orca environment add --name " + name
@@ -218,16 +229,13 @@ func (r Remote) input(ctx context.Context, handle string, args ...string) error 
 	return nil
 }
 
-func (r Remote) Prompt(ctx context.Context, handle, text string, wait time.Duration, retry string) (Send, error) {
+func (r Remote) Prompt(ctx context.Context, handle, text string, wait time.Duration) (Send, error) {
 	args := []string{"terminal", "send", "--terminal", handle, "--text", text, "--enter", "--wait-submit", strconv.Itoa(int(wait.Seconds()))}
-	if retry != "" {
-		args = append(args, "--retry-request", retry)
-	}
 	result, err := scoped[struct {
 		Send Send `json:"send"`
 	}](ctx, r, "orca terminal send --enter", args...)
 	if err != nil {
-		return Send{}, err
+		return Send{}, &promptDeliveryError{terminal: handle, cause: err}
 	}
 	switch {
 	case !result.Send.Accepted:

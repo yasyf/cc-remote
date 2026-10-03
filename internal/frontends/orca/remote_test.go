@@ -108,26 +108,20 @@ func TestPromptSeparatesAcceptanceFromSubmission(t *testing.T) {
 	command := "terminal send --terminal term-1 --text do the task --enter --wait-submit 15" + scope
 	tests := []struct {
 		name      string
-		retry     string
 		out       string
 		submitted bool
 		want      string
 	}{
-		{"turn started", "", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"req-1","stages":["input_accepted","submitted","turn_started"],"provider":"claude","observation":"observed","processIncarnation":"p1"}}}`), true, ""},
-		{"accepted only", "", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"req-1","stages":["input_accepted"],"provider":"claude","observation":"timeout","processIncarnation":"p1"}}}`), false, ""},
-		{"old host", "", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"unsupported-old-host","stages":["input_accepted","turn_started"],"provider":"old-host","observation":"unsupported","processIncarnation":"unknown"}}}`), false, ""},
-		{"refused", "", ok(`{"send":{"handle":"term-1","accepted":false,"bytesWritten":0,"refusedReason":"terminal exited"}}`), false, "refused the prompt: terminal exited"},
-		{"no receipt", "", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11}}`), false, "without a prompt receipt"},
-		{"retry of the same request", "req-1", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"req-1","stages":["input_accepted","turn_started"],"provider":"claude","observation":"observed","processIncarnation":"p1"}}}`), true, ""},
+		{"turn started", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"req-1","stages":["input_accepted","submitted","turn_started"],"provider":"claude","observation":"observed","processIncarnation":"p1"}}}`), true, ""},
+		{"accepted only", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"req-1","stages":["input_accepted"],"provider":"claude","observation":"timeout","processIncarnation":"p1"}}}`), false, ""},
+		{"old host", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11,"prompt":{"requestId":"unsupported-old-host","stages":["input_accepted","turn_started"],"provider":"old-host","observation":"unsupported","processIncarnation":"unknown"}}}`), false, ""},
+		{"refused", ok(`{"send":{"handle":"term-1","accepted":false,"bytesWritten":0,"refusedReason":"terminal exited"}}`), false, "refused the prompt: terminal exited"},
+		{"no receipt", ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":11}}`), false, "without a prompt receipt"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sent := strings.TrimSuffix(command, scope)
-			if tt.retry != "" {
-				sent += " --retry-request " + tt.retry
-			}
-			fake := newFakeOrca(t).on(sent+scope, tt.out)
-			send, err := orca.NewClient(fake).On(env, runtimeID).Prompt(context.Background(), "term-1", "do the task", 15*time.Second, tt.retry)
+			fake := newFakeOrca(t).on(command, tt.out)
+			send, err := orca.NewClient(fake).On(env, runtimeID).Prompt(context.Background(), "term-1", "do the task", 15*time.Second)
 			if tt.want != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.want) {
 					t.Errorf("Prompt error = %v, want %q", err, tt.want)
@@ -142,6 +136,15 @@ func TestPromptSeparatesAcceptanceFromSubmission(t *testing.T) {
 				t.Errorf("Submitted = %t, receipt = %+v, want submitted %t", send.Submitted(), receipt, tt.submitted)
 			}
 		})
+	}
+}
+
+func TestPromptFailureDoesNotForwardNativeRetryAdvice(t *testing.T) {
+	command := "terminal send --terminal term-1 --text do the task --enter --wait-submit 15" + scope
+	fake := newFakeOrca(t).on(command, `{"ok":false,"error":{"code":"runtime_error","message":"Transport failed. Re-issue the exact command with --retry-request req-1 --wait-submit 15"},"_meta":{"runtimeId":"rt-1"}}`)
+	_, err := orca.NewClient(fake).On(env, runtimeID).Prompt(t.Context(), "term-1", "do the task", 15*time.Second)
+	if err == nil || errors.Unwrap(err) == nil || !strings.Contains(err.Error(), "status and read") || strings.Contains(err.Error(), "--retry-request") {
+		t.Fatalf("Prompt error = %v", err)
 	}
 }
 

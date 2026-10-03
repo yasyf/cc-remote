@@ -125,13 +125,19 @@ orca:
 | Command | Result |
 | --- | --- |
 | `cc-remote orca status task-name` | Reports the forward and whether the environment answers from the recorded runtime. |
-| `cc-remote orca reconnect task-name` | Resumes the workspace, starts the runtime if it is down, and reopens the forward. |
+| `cc-remote orca reconnect task-name` | Reopens the SSH forward and verifies the recorded live runtime. |
 | `cc-remote orca send task-name --prompt-file next.md` | Sends a prompt and prints its receipt. |
 | `cc-remote orca read task-name` | Prints the worker terminal's rendered screen. |
 
 A receipt counts as submitted only when Orca reports `turn_started`. `send`
-never resends on its own; after an ambiguous failure, rerun it with the same
-prompt and `--retry-request <requestId>`. These commands never stop the
+keeps accepted receipts when no turn start was observed. Use `status` and `read`
+to inspect delivery before deciding what to send next. The frontend does not
+expose native request replay because the supported runtime can deliver the
+prompt again. These commands never stop the
 runtime, the worker, or the forward. The Orca workspace card's Sleep and Delete
 controls do not manage the provider machine; use `cc-remote suspend` and
 `cc-remote destroy`.
+
+`reconnect` restores only the transport to an existing runtime. It does not
+resume a machine, restart a runtime, or recover a worker after process loss.
+The recorded runtime and receipt identities remain unchanged.
