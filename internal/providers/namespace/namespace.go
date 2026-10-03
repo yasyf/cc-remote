@@ -750,13 +750,28 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	if saved == nil {
 		return providers.Result{}, fmt.Errorf("namespace instance %s: %w", id, providers.ErrNotFound)
 	}
-	result, err := p.Runner.Run(ctx, p.container(saved.Instance, cmd, stdin))
-	if err != nil || result.ExitCode == 0 {
-		return result, err
-	}
-	if _, err := p.describe(ctx, *saved); errors.Is(err, providers.ErrNotFound) {
+	nonce := make([]byte, frameNonce)
+	if _, err := rand.Read(nonce); err != nil {
 		return providers.Result{}, err
 	}
+	native, err := p.Runner.Run(ctx, p.containerScript(saved.Instance, framed(nonce, cmd), stdin))
+	result, status, framing := unframe(native.Stdout, nonce)
+	if err != nil {
+		return result, fmt.Errorf("running a command on namespace instance %s: %w", id, err)
+	}
+	if native.ExitCode != 0 {
+		if _, err := p.describe(ctx, *saved); errors.Is(err, providers.ErrNotFound) {
+			return providers.Result{}, err
+		}
+		return result, fmt.Errorf("running a command on namespace instance %s: the native ssh exited %d: %s", id, native.ExitCode, bytes.TrimSpace(native.Stderr))
+	}
+	if len(native.Stderr) > 0 {
+		return result, fmt.Errorf("running a command on namespace instance %s: the native ssh wrote a diagnostic: %s", id, bytes.TrimSpace(native.Stderr))
+	}
+	if framing != nil {
+		return result, fmt.Errorf("running a command on namespace instance %s: %w", id, framing)
+	}
+	result.ExitCode = status
 	return result, nil
 }
 
