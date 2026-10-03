@@ -385,8 +385,8 @@ func (s payloadSandbox) phase(scripts Scripts, sha string) *exec.Cmd {
 }
 
 func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
-	download := "install -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server\n"
-	full := "update -qq\n" + download + "install -y -qq --no-install-recommends ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
+	download := "install -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server\n"
+	full := "update -qq\n" + download + "install -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
 	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\n"
 	tests := []struct {
 		name    string
@@ -647,7 +647,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	sum := sha512.Sum512([]byte("deb"))
 	inventory := scriptInventory()
 	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
-	full := "update -qq\ninstall -y -qq --no-install-recommends --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
+	full := "update -qq\ninstall -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
 	resident := "install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives=@CACHE@/\n"
 	tests := []struct {
 		name    string
