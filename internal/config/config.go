@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -19,6 +20,10 @@ const (
 	EnvPath                = "CC_REMOTE_CONFIG"
 	DefaultTailnetAPI      = "https://api.tailscale.com/api/v2"
 	DefaultKeychainService = "cc-remote-tailnet"
+	DefaultOrcaTool        = "orca-runtime"
+	DefaultOrcaEntry       = "squashfs-root/AppRun"
+	KeyAnthropic           = "anthropic"
+	KeyOpenAI              = "openai"
 	dirName                = "cc-remote"
 	fileName               = "config.yaml"
 )
@@ -43,6 +48,7 @@ type Config struct {
 	Forwards   []Forward            `yaml:"forwards"`
 	Tailnet    *Tailnet             `yaml:"tailnet"`
 	Git        Git                  `yaml:"git"`
+	Orca       Orca                 `yaml:"orca"`
 
 	Path string `yaml:"-"`
 }
@@ -85,6 +91,15 @@ type Tailnet struct {
 
 type Git struct {
 	TokenCommand []string `yaml:"token_command"`
+}
+
+type Orca struct {
+	Tool    string              `yaml:"tool"`
+	Entry   string              `yaml:"entry"`
+	Display []string            `yaml:"display"`
+	Args    []string            `yaml:"args"`
+	Keys    map[string][]string `yaml:"keys"`
+	Trust   []string            `yaml:"trust"`
 }
 
 var (
@@ -150,12 +165,58 @@ func (c *Config) applyDefaults() {
 	if len(c.Git.TokenCommand) == 0 {
 		c.Git.TokenCommand = []string{"gh", "auth", "token"}
 	}
+	c.Orca.applyDefaults()
 	for name, profile := range c.Profiles {
 		if profile.Checkout == "" {
 			profile.Checkout = Shallow
 			c.Profiles[name] = profile
 		}
 	}
+}
+
+func (o *Orca) applyDefaults() {
+	if o.Tool == "" {
+		o.Tool = DefaultOrcaTool
+	}
+	if o.Entry == "" {
+		o.Entry = DefaultOrcaEntry
+	}
+	if len(o.Display) == 0 {
+		o.Display = []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"}
+	}
+	if o.Keys == nil {
+		o.Keys = map[string][]string{}
+	}
+	for _, provider := range []string{KeyAnthropic, KeyOpenAI} {
+		if _, ok := o.Keys[provider]; !ok {
+			o.Keys[provider] = []string{"/usr/bin/security", "find-generic-password", "-s", "cc-remote-" + provider + "-api-key", "-a", provider, "-w"}
+		}
+	}
+}
+
+func (o Orca) validate() error {
+	if !filepath.IsLocal(o.Entry) || filepath.Clean(o.Entry) != o.Entry {
+		return fmt.Errorf("orca.entry %q must be a clean path inside the runtime tool's directory", o.Entry)
+	}
+	for provider, command := range o.Keys {
+		if provider != KeyAnthropic && provider != KeyOpenAI {
+			return fmt.Errorf("orca.keys.%s: name %s or %s", provider, KeyAnthropic, KeyOpenAI)
+		}
+		if len(command) == 0 || command[0] == "" {
+			return fmt.Errorf("orca.keys.%s needs the command that prints the key as its first element", provider)
+		}
+	}
+	for _, owner := range o.Trust {
+		if owner == "" || strings.Contains(owner, "/") {
+			return fmt.Errorf("orca.trust %q must name a repository owner", owner)
+		}
+	}
+	return nil
+}
+
+func (c *Config) Trusted() bool {
+	owner, _, ok := strings.Cut(strings.TrimPrefix(c.Repository, "https://github.com/"), "/")
+	return ok && strings.HasPrefix(c.Repository, "https://github.com/") && slices.Contains(c.Orca.Trust, owner)
 }
 
 func (c *Config) validate() error {
@@ -211,6 +272,9 @@ func (c *Config) validate() error {
 	}
 	if c.Tailnet != nil && !strings.HasPrefix(c.Tailnet.Tag, "tag:") {
 		return fmt.Errorf("tailnet.tag %q must name the tag workspace nodes join under, like tag:cc-remote", c.Tailnet.Tag)
+	}
+	if err := c.Orca.validate(); err != nil {
+		return err
 	}
 	labels := map[string]bool{}
 	for _, forward := range c.Forwards {

@@ -531,6 +531,15 @@ func (a Artifact) dir() string {
 	return a.Name + "-" + a.Version
 }
 
+func (inv Inventory) ToolDir(profile, name string) (string, error) {
+	for _, a := range slices.Concat(inv.Tools, inv.Profiles[profile].Tools) {
+		if a.Name == name {
+			return a.destination(false).dir, nil
+		}
+	}
+	return "", fmt.Errorf("the inventory has no %s tool under tools or profiles.%s.tools", name, profile)
+}
+
 func (inv Inventory) validatePython() error {
 	tools := slices.Concat(inv.Python.System, inv.Python.User)
 	if len(tools) > 0 && !versionPattern.MatchString(inv.Python.Version) {

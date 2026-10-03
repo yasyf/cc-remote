@@ -92,3 +92,52 @@ and the command returns its handle.
 The [remote-workspaces skill](../skills/remote-workspaces/SKILL.md) covers recipe
 selection, preparation, and workspace lifecycle. Initial cc-remote recipes use
 SSH. Orca-server transport requires a separate implementation.
+
+## Start a worker from the Orca CLI
+
+`cc-remote orca create` runs a task without the composer. The command creates
+a workspace on a fresh machine and starts the Orca runtime there as a provider
+service. An SSH forward carries the runtime's loopback port to this machine,
+whose Orca CLI pairs with it as an environment named after the workspace. The
+workspace's existing checkout becomes an Orca repo, and the worker starts in an
+Orca terminal on that checkout.
+
+```sh
+cc-remote orca create task-name --config .cc-remote/config.yaml \
+  --agent claude --model <model> --effort <effort> --prompt-file prompt.md
+```
+
+The runtime is the inventory tool named by `orca.tool`, `orca-runtime` by
+default, and its `orca.entry`, `squashfs-root/AppRun` by default, must be
+executable on the machine. The worker's API key comes from the `orca.keys`
+command for its provider; the defaults read the macOS keychain items
+`cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. The key travels
+only over SSH stdin into a one-use pipe that the worker's terminal reads and
+removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
+worker may start. `create` accepts Claude's folder trust prompt only when
+`orca.trust` lists the repository's owner.
+
+```yaml
+orca:
+  trust: [<org>]
+```
+
+| Command | Result |
+| --- | --- |
+| `cc-remote orca status task-name` | Reports the forward and whether the environment answers from the recorded runtime. |
+| `cc-remote orca reconnect task-name` | Reopens the SSH forward and verifies the recorded live runtime. |
+| `cc-remote orca send task-name --prompt-file next.md` | Sends a prompt and prints its receipt. |
+| `cc-remote orca read task-name` | Prints the worker terminal's rendered screen. |
+
+A receipt counts as submitted only when Orca reports `turn_started`. `send`
+keeps accepted receipts when no turn start was observed. Use `status` and `read`
+to inspect delivery before deciding what to send next. The frontend does not
+expose native request replay because the supported runtime can deliver the
+prompt again. These commands never stop the
+runtime, the worker, or the forward. The Orca workspace card's Sleep and Delete
+controls do not manage the provider machine; use `cc-remote suspend` and
+`cc-remote destroy`.
+
+`reconnect` restores only the transport to an existing runtime. It does not
+resume a machine, restart a runtime, or recover a worker after process loss.
+The recorded runtime and receipt identities remain unchanged.

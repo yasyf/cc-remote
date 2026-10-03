@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -175,6 +176,52 @@ func TestProviderSectionDecodesStrictly(t *testing.T) {
 	}
 }
 
+func TestParseFillsOrcaDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Orca{
+		Tool:    "orca-runtime",
+		Entry:   "squashfs-root/AppRun",
+		Display: []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"},
+		Keys: map[string][]string{
+			"anthropic": {"/usr/bin/security", "find-generic-password", "-s", "cc-remote-anthropic-api-key", "-a", "anthropic", "-w"},
+			"openai":    {"/usr/bin/security", "find-generic-password", "-s", "cc-remote-openai-api-key", "-a", "openai", "-w"},
+		},
+	}
+	if !reflect.DeepEqual(cfg.Orca, want) {
+		t.Errorf("orca = %+v, want %+v", cfg.Orca, want)
+	}
+	if cfg.Trusted() {
+		t.Error("a repository trusted itself without orca.trust")
+	}
+}
+
+func TestOrcaKeepsConfiguredKeysAndTrust(t *testing.T) {
+	cfg, err := Parse([]byte(minimal + "orca:\n  keys:\n    openai: [pass, show, openai]\n  trust: [example]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.Orca.Keys["openai"], " "); got != "pass show openai" {
+		t.Errorf("openai key command = %q", got)
+	}
+	if got := cfg.Orca.Keys["anthropic"][0]; got != "/usr/bin/security" {
+		t.Errorf("anthropic key command = %q", got)
+	}
+	if !cfg.Trusted() {
+		t.Error("example/app was not trusted under orca.trust [example]")
+	}
+	cfg.Repository = "https://github.com/other/app"
+	if cfg.Trusted() {
+		t.Error("other/app was trusted under orca.trust [example]")
+	}
+	cfg.Repository = "file:///srv/example/app"
+	if cfg.Trusted() {
+		t.Error("a file repository was trusted")
+	}
+}
+
 func TestParseRefusesWhatCannotRun(t *testing.T) {
 	tests := []struct {
 		name string
@@ -213,6 +260,11 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"provider name with a dot", func(s string) string { return strings.ReplaceAll(s, "fake", "fa.ke") }, "provider \"fa.ke\""},
 		{"profile name with a dot", func(s string) string { return strings.ReplaceAll(s, "lean", "le.an") }, "profile \"le.an\""},
 		{"tailnet without tag prefix", func(s string) string { return s + "tailnet:\n  tag: cc-remote\n" }, "tailnet.tag"},
+		{"orca entry escapes the tool", func(s string) string { return s + "orca:\n  entry: ../AppRun\n" }, "orca.entry"},
+		{"orca entry is absolute", func(s string) string { return s + "orca:\n  entry: /opt/AppRun\n" }, "orca.entry"},
+		{"orca key for an unknown provider", func(s string) string { return s + "orca:\n  keys:\n    other: [printf, k]\n" }, "orca.keys.other"},
+		{"orca key without a command", func(s string) string { return s + "orca:\n  keys:\n    openai: []\n" }, "orca.keys.openai"},
+		{"orca trust names a repository", func(s string) string { return s + "orca:\n  trust: [example/app]\n" }, "orca.trust"},
 		{"forward without env name", func(s string) string { return s + "forwards:\n  - { label: a, env: lower }\n" }, "forward"},
 		{"duplicate forward label", func(s string) string {
 			return s + "forwards:\n  - { label: a, env: A }\n  - { label: a, env: B }\n"

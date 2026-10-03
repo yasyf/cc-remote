@@ -1,6 +1,7 @@
 package state
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,98 @@ func TestDefaultFollowsXDGStateHome(t *testing.T) {
 	t.Setenv("HOME", "/home/u")
 	if got := Default(); got != Dir("/home/u/.local/state/cc-remote") {
 		t.Errorf("Default() = %q", got)
+	}
+}
+
+func TestOrcaControlUsesDistinctShortPrivateDirectories(t *testing.T) {
+	seen := map[string]bool{}
+	for range 2 {
+		control, err := NewOrcaControl()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Dir(control)
+		t.Cleanup(func() { _ = os.Remove(dir) })
+		if seen[control] {
+			t.Fatalf("control path reused: %s", control)
+		}
+		seen[control] = true
+		expanded := strings.ReplaceAll(control, "%C", strings.Repeat("a", 40))
+		if filepath.Dir(dir) != "/tmp" || len(expanded)+17 >= 104 {
+			t.Errorf("control path leaves no room for the SSH temporary socket: %s", expanded)
+		}
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			t.Errorf("control directory = %v, %v", info, err)
+		}
+	}
+}
+
+func TestEnsureOrcaControlRestoresOnlyItsPrivateParent(t *testing.T) {
+	control, err := NewOrcaControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(control)
+	t.Cleanup(func() { _ = os.Remove(dir) })
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureOrcaControl(control); err != nil {
+		t.Fatal(err)
+	}
+	socket := strings.ReplaceAll(control, "%C", strings.Repeat("a", 40))
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	before, err := os.Lstat(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureOrcaControl(control); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(socket)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("existing control socket changed: %v", err)
+	}
+}
+
+func TestEnsureOrcaControlRefusesUnsafeParents(t *testing.T) {
+	for _, kind := range []string{"symlink", "public", "file"} {
+		t.Run(kind, func(t *testing.T) {
+			control, err := NewOrcaControl()
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Dir(control)
+			t.Cleanup(func() { _ = os.Remove(dir) })
+			if err := os.Remove(dir); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "symlink":
+				err = os.Symlink(t.TempDir(), dir)
+			case "public":
+				if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				err = os.Chmod(dir, 0o755)
+			case "file":
+				err = os.WriteFile(dir, nil, 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := EnsureOrcaControl(control); err == nil {
+				t.Fatalf("accepted %s control parent", kind)
+			}
+		})
+	}
+	if err := EnsureOrcaControl(filepath.Join(t.TempDir(), "%C")); err == nil {
+		t.Fatal("accepted a control path outside the private control namespace")
 	}
 }
 
