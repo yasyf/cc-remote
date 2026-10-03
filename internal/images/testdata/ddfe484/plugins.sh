@@ -306,6 +306,7 @@ pin_marketplace() {
       claude plugin marketplace remove "$name"
     fi
     claude plugin marketplace add "$source"
+    added_marketplaces["$name"]=1
   fi
 }
 
@@ -376,7 +377,7 @@ install_plugins() {
 {{- range .Claude.Marketplaces}}
 {{- $name := .Name}}
 {{- with pins .Name}}
-  if stale_marketplace "$working"{{range .}} {{q .}}{{end}}; then
+  if [ -z "${added_marketplaces[{{q $name}}]:-}" ] && stale_marketplace "$working"{{range .}} {{q .}}{{end}}; then
     claude plugin marketplace update {{q $name}}
   fi
 {{- end}}
@@ -629,6 +630,7 @@ PY
 
 run_install() {
   local github_token plugins
+  local -A added_marketplaces=()
   rm -f "$state_dir/ready"
   if [ "$#" -gt 0 ]; then
     local payload="$1"

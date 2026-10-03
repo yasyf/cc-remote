@@ -498,7 +498,7 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				"claude plugin marketplace add anthropics/claude-plugins-official#main",
 				"claude plugin install datadog@claude-plugins-official",
 			},
-			absentCalls: []string{"git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
+			absentCalls: []string{"claude plugin marketplace update", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
 		},
 		{
 			name:         "official added without a ref",
@@ -559,6 +559,40 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 				"claude plugin update datadog@claude-plugins-official",
 			},
 			absentCalls: []string{"claude plugin marketplace remove", "claude plugin marketplace update tools-market", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
+		},
+		{
+			name:         "existing catalog refreshes for a missing plugin",
+			marketplaces: []Marketplace{toolsRef, officialBranch},
+			state: func() fakeState {
+				state := registered("main", "0.7.16")
+				state.Plugins = state.Plugins[:1]
+				return state
+			}(),
+			settings: map[string]any{"enabledPlugins": enabledPins},
+			wantCalls: []string{
+				"claude plugin marketplace update claude-plugins-official",
+				"claude plugin install datadog@claude-plugins-official",
+			},
+			absentCalls: []string{"claude plugin marketplace add", "claude plugin marketplace update tools-market"},
+		},
+		{
+			name:         "a fresh catalog does not suppress another catalog's refresh",
+			marketplaces: []Marketplace{toolsRef, officialBranch},
+			state: func() fakeState {
+				state := registered("main", "0.7.17")
+				state.Marketplaces = state.Marketplaces[:1]
+				state.Marketplaces[0]["snapshot"] = map[string]string{"hook": "0.9.0"}
+				state.Plugins = []map[string]any{installedPlugin("hook@tools-market", "0.9.0")}
+				return state
+			}(),
+			settings: map[string]any{"enabledPlugins": enabledPins},
+			wantCalls: []string{
+				"claude plugin marketplace add anthropics/claude-plugins-official#main",
+				"claude plugin marketplace update tools-market",
+				"claude plugin update hook@tools-market",
+				"claude plugin install datadog@claude-plugins-official",
+			},
+			absentCalls: []string{"claude plugin marketplace update claude-plugins-official"},
 		},
 		{
 			name:         "official from a local checkout",
