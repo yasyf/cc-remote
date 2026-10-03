@@ -24,7 +24,7 @@ packages_pack=/var/lib/cc-remote/build/packages.tar
 packages_store=/var/lib/cc-remote/packages
 closure_packages=({{range $i, $name := .Closure}}{{if $i}} {{end}}{{q $name}}{{end}})
 {{- end}}
-prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)
+prerequisites=(ca-certificates curl git jq openssl python3 unzip xz-utils)
 tmp_dir="$(mktemp -d)"
 trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"' EXIT
 
@@ -50,7 +50,7 @@ t64() {
 
 has_prerequisites() {
   local bin
-  for bin in curl git jq python3 unzip xz; do
+  for bin in curl git jq openssl python3 unzip xz; do
     if ! command -v "$bin" > /dev/null; then
       return 1
     fi

@@ -439,7 +439,7 @@ done
 }
 
 func TestProvisionPrerequisitesRunAptOnlyWhenOneIsMissing(t *testing.T) {
-	install := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq python3 unzip xz-utils\n"
+	install := "update -qq\ninstall -y -qq --no-install-recommends ca-certificates curl git jq openssl python3 unzip xz-utils\n"
 	tests := []struct {
 		name    string
 		missing string
@@ -447,6 +447,7 @@ func TestProvisionPrerequisitesRunAptOnlyWhenOneIsMissing(t *testing.T) {
 	}{
 		{name: "everything present runs no apt"},
 		{name: "a missing command installs the prerequisites", missing: "xz", apt: install},
+		{name: "a missing digest command installs the prerequisites", missing: "openssl", apt: install},
 		{name: "a missing CA bundle installs the prerequisites", missing: "ca-certificates.crt", apt: install},
 	}
 	scripts, err := Render(Inventory{Version: SchemaVersion}, "agents")
@@ -463,6 +464,7 @@ func TestProvisionPrerequisitesRunAptOnlyWhenOneIsMissing(t *testing.T) {
 				"curl":                "#!/bin/sh\n",
 				"git":                 "#!/bin/sh\n",
 				"jq":                  "#!/bin/sh\n",
+				"openssl":             "#!/bin/sh\n",
 				"python3":             "#!/bin/sh\n",
 				"unzip":               "#!/bin/sh\n",
 				"xz":                  "#!/bin/sh\n",

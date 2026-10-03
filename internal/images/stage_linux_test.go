@@ -17,7 +17,7 @@ const staleDownload = "hsqs bytes of a cancelled transfer"
 var stagedArtifacts = []TransferArtifact{PayloadArtifact, PackagesArtifact}
 
 func TestStageAdmitsOnlyTheExactBytes(t *testing.T) {
-	payload, wrong := []byte("hsqs the exact payload bytes"), []byte("hsqs the wrong payload bytes")
+	payload, wrong := []byte("hsqs\x00the exact payload bytes\n"), []byte("hsqs\x00the wrong payload bytes\n")
 	half := payload[:len(payload)/2]
 	digest := func(b []byte) string {
 		sum := sha256.Sum256(b)
@@ -25,14 +25,16 @@ func TestStageAdmitsOnlyTheExactBytes(t *testing.T) {
 	}
 	sha := digest(payload)
 	tests := []struct {
-		name    string
-		stream  []byte
-		wantErr string
+		name      string
+		stream    []byte
+		hashFails bool
+		wantErr   string
 	}{
 		{name: "the exact bytes are admitted", stream: payload},
 		{name: "a corrupt stream is refused", stream: wrong, wantErr: " has sha256 " + digest(wrong) + ", want " + sha},
 		{name: "a truncated stream is refused", stream: half, wantErr: " has sha256 " + digest(half) + ", want " + sha},
 		{name: "an empty stream is refused", stream: nil, wantErr: " has sha256 " + digest(nil) + ", want " + sha},
+		{name: "a failed digest cannot admit its matching output", stream: payload, hashFails: true, wantErr: " stream failed (cat exit 0, tee exit 0, openssl exit 7)"},
 	}
 	for _, artifact := range stagedArtifacts {
 		for _, tt := range tests {
@@ -42,6 +44,11 @@ func TestStageAdmitsOnlyTheExactBytes(t *testing.T) {
 				stage := strings.Replace(artifact.stageScript(), "store="+artifact.Store+"\n", "store="+quote(store)+"\n", 1)
 				cmd := exec.Command("bash", "-c", stage, "stage-"+artifact.Label, sha)
 				cmd.Stdin = bytes.NewReader(tt.stream)
+				if tt.hashFails {
+					fakes := t.TempDir()
+					writeFakes(t, fakes, map[string]string{"openssl": "#!/bin/sh\ncat > /dev/null\nprintf '%s  -\\n' " + sha + "\nexit 7\n"})
+					cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"))
+				}
 				out, err := cmd.CombinedOutput()
 				assertOnlyTheStaleDownloadRemains(t, store, stale)
 				admitted := filepath.Join(store, sha+artifact.Suffix+".admitted")
