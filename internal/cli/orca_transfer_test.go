@@ -446,7 +446,7 @@ func TestCollectRefusesWithoutPrintingContents(t *testing.T) {
 		return func(t *testing.T, _ *setup) { t.Setenv("REMOTE_FAIL", script) }
 	}
 	pathCase := func(report, patch string) func(t *testing.T, s *setup) {
-		return func(t *testing.T, s *setup) {
+		return func(_ *testing.T, s *setup) {
 			s.args = []string{"--report-file", strings.ReplaceAll(report, "TASKS", s.f.tasks), "--patch-file", strings.ReplaceAll(patch, "TASKS", s.f.tasks), "--output", s.f.output}
 		}
 	}

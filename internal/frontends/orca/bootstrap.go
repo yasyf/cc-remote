@@ -69,7 +69,7 @@ func (e UnknownScreenError) Error() string {
 func (e UnknownScreenError) Unwrap() error { return e.Cause }
 
 func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, trusted bool, p Poll) ([]string, error) {
-	steps := []string{}
+	steps := make([]string, 0, 1)
 	var last Screen
 	pending := -1
 	_, err := poll(ctx, p, func(ctx context.Context) (struct{}, bool, error) {

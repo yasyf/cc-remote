@@ -273,7 +273,7 @@ func TestCodexReviewWalksEveryRowResetsAndTrustsOnce(t *testing.T) {
 	assertSent(t, fake, map[string]int{sendEnter: 1, sendDown: downs, sendUp: downs, sendTrust: 1, sendEscape: 1, waitIdle: 1})
 	enter, firstDown, lastDown, firstUp, lastUp := position(fake, sendEnter, 0), position(fake, sendDown, 0), lastPosition(fake, sendDown), position(fake, sendUp, 0), lastPosition(fake, sendUp)
 	trust, escape, idle := position(fake, sendTrust, 0), position(fake, sendEscape, 0), position(fake, waitIdle, 0)
-	if !(enter < firstDown && lastDown < firstUp && lastUp < trust && trust < escape && escape < idle) {
+	if enter >= firstDown || lastDown >= firstUp || lastUp >= trust || trust >= escape || escape >= idle {
 		t.Errorf("order enter %d, downs %d-%d, ups %d-%d, trust %d, escape %d, idle %d", enter, firstDown, lastDown, firstUp, lastUp, trust, escape, idle)
 	}
 	for i := range downs {
