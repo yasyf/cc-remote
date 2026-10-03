@@ -139,6 +139,9 @@ func TestFinalizeExcludesInstallerStateAndKeepsReusableContent(t *testing.T) {
 		".claude/history.jsonl":                                identity,
 		".claude/backups/.claude.json.backup.1790998918598":    `{"userID":"` + identity + `","anonymousId":"` + identity + `"}`,
 		".claude/plugins/data/hook/state.json":                 identity,
+		".claude/state/hooks/grants.db":                        identity,
+		".claude/state/hooks/grants.db-wal":                    identity,
+		".claude/state/hooks/grants.db-shm":                    identity,
 		".claude/plugins/cache/market/hook/1.0.0/.in_use":      identity,
 		".claude/plugins/cache/market/hook/0.9.0/.orphaned_at": "1",
 		".codex/auth.json":                                     `{"OPENAI_API_KEY":"synthetic"}`,
@@ -192,7 +195,7 @@ func TestFinalizeExcludesInstallerStateAndKeepsReusableContent(t *testing.T) {
 	listen(t, filepath.Join(home, ".local/state/agent.sock"))
 	roots := []string{
 		".claude.json", ".claude/backups", ".claude/.credentials.json", ".claude/projects", ".claude/todos", ".claude/shell-snapshots",
-		".claude/statsig", ".claude/session-env", ".claude/debug", ".claude/ide", ".claude/history.jsonl", ".claude/plugins/data",
+		".claude/statsig", ".claude/session-env", ".claude/debug", ".claude/ide", ".claude/history.jsonl", ".claude/plugins/data", ".claude/state",
 		".codex/auth.json", ".codex/sessions", ".codex/log", ".codex/history.jsonl", ".daemonkit/a", ".cc-remote/ready",
 		".cc-remote/services", ".cc-remote/start.sh", ".cc-remote/supervise.py", ".cc-remote/orca", ".config/gh/hosts.yml", ".git-credentials",
 	}

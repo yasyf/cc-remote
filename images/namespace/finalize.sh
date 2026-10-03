@@ -33,6 +33,7 @@ finalize_home() {
     "$home/.claude/ide"
     "$home/.claude/history.jsonl"
     "$home/.claude/plugins/data"
+    "$home/.claude/state"
     "$home/.codex/auth.json"
     "$home/.codex/sessions"
     "$home/.codex/log"
