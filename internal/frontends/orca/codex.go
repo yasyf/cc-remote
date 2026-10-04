@@ -19,6 +19,8 @@ const (
 	KeyEscape       = "\x1b"
 	CaptainPlugin   = "captain-hook"
 	keyTrust        = "t"
+	keyHome         = "\x1b[H"
+	keyEnd          = "\x1b[F"
 	screenSource    = "screen"
 	probeSchema     = 1
 	reviewBlocked   = `"agent-hooks-review-prompt"`
@@ -392,7 +394,7 @@ func parseBrowser(tail []string, trusted bool) (hookBrowser, error) {
 	if start < 0 || end < start || strings.TrimSpace(lines[end]) != footer {
 		return hookBrowser{}, errors.New("the screen is not the recognized hooks browser")
 	}
-	browser := hookBrowser{pending: -1}
+	browser := hookBrowser{}
 	i := start
 	if !trusted {
 		match := pendingLine.FindStringSubmatch(lines[i])
@@ -453,6 +455,14 @@ func parseBrowser(tail []string, trusted bool) (hookBrowser, error) {
 	return browser, nil
 }
 
+func (b hookBrowser) atFirst() bool {
+	return !b.above && b.selected == browserEvents[0] && b.rows[0].Event == b.selected
+}
+
+func (b hookBrowser) atLast() bool {
+	return !b.below && b.selected == browserEvents[len(browserEvents)-1] && b.rows[len(b.rows)-1].Event == b.selected
+}
+
 func (h *hookRows) add(view hookBrowser, pending int) error {
 	if view.pending != pending {
 		return fmt.Errorf("the hooks browser counts %d hooks to review, not %d", view.pending, pending)
@@ -483,14 +493,6 @@ func (h *hookRows) add(view hookBrowser, pending int) error {
 	return nil
 }
 
-func (h hookRows) neighbor(event string, step int) (string, bool) {
-	index := slices.Index(h.order, event) + step
-	if index < 0 || index >= len(h.order) {
-		return "", false
-	}
-	return h.order[index], true
-}
-
 func (h hookRows) check(probe HookProbe) error {
 	var installed, active, review int
 	for _, event := range browserEvents {
@@ -515,18 +517,19 @@ func (h hookRows) check(probe HookProbe) error {
 	return nil
 }
 
-func (h hookRows) trusted(view hookBrowser, first string) error {
-	if view.selected != first || view.above {
-		return errors.New("the trusted hooks browser left the first row")
+func (h hookRows) trusted(after hookRows) error {
+	for _, event := range browserEvents {
+		want := h.counts[event]
+		row, seen := after.counts[event]
+		switch {
+		case !seen:
+			return fmt.Errorf("the trusted hooks browser lists no %s row", event)
+		case row.Installed != want.Installed || row.Active != want.Installed:
+			return fmt.Errorf("the trusted hooks browser shows %d of %d %s hooks active", row.Active, row.Installed, event)
+		}
 	}
-	for _, row := range view.rows {
-		want, seen := h.counts[row.Event]
-		if !seen {
-			return errors.New("the trusted hooks browser lists an event the review did not")
-		}
-		if row.Installed != want.Installed || row.Active != want.Installed {
-			return fmt.Errorf("the trusted hooks browser shows %d of %d %s hooks active", row.Active, row.Installed, row.Event)
-		}
+	if !slices.Equal(after.order, browserEvents) {
+		return errors.New("the trusted hooks browser lists its events out of the supported order")
 	}
 	return nil
 }
@@ -556,27 +559,30 @@ func (r Remote) browser(ctx context.Context, handle string, p Poll, trusted bool
 	return view, nil
 }
 
-func (r Remote) move(ctx context.Context, handle string, p Poll, rows *hookRows, view hookBrowser, key string, step, pending int) (hookBrowser, error) {
-	before := view.selected
+func (r Remote) opposite(ctx context.Context, handle string, p Poll, view hookBrowser, trusted bool) (hookBrowser, error) {
+	key, edge := keyEnd, hookBrowser.atLast
+	switch {
+	case view.atLast():
+		key, edge = keyHome, hookBrowser.atFirst
+	case !view.atFirst():
+		return hookBrowser{}, fmt.Errorf("the hooks browser selects %s, at neither edge of its events", view.selected)
+	}
 	if err := r.Key(ctx, handle, key); err != nil {
 		return hookBrowser{}, err
 	}
-	next, err := r.browser(ctx, handle, p, false, func(b hookBrowser) bool { return b.selected != before })
+	next, err := r.browser(ctx, handle, p, trusted, func(b hookBrowser) bool { return b.selected != view.selected })
 	if err != nil {
-		return hookBrowser{}, fmt.Errorf("the hooks browser selection never moved from %s: %w", before, err)
+		return hookBrowser{}, fmt.Errorf("the hooks browser selection never moved from %s: %w", view.selected, err)
 	}
-	if err := rows.add(next, pending); err != nil {
-		return hookBrowser{}, err
-	}
-	if want, ok := rows.neighbor(before, step); !ok || next.selected != want {
-		return hookBrowser{}, fmt.Errorf("the hooks browser selection moved from %s to %s, not one row", before, next.selected)
+	if !edge(next) {
+		return hookBrowser{}, fmt.Errorf("the hooks browser selection moved from %s to %s, not its other edge", view.selected, next.selected)
 	}
 	return next, nil
 }
 
 func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, review HookReview, p Poll) (err error) {
-	started, downs, ups := time.Now(), 0, 0
-	defer func() { observe(ctx, "hooks.review", started, err, "downs", downs, "ups", ups) }()
+	started, moves := time.Now(), 0
+	defer func() { observe(ctx, "hooks.review", started, err, "moves", moves) }()
 	if pending != len(captainHookEvents) {
 		return fmt.Errorf("the hook review prompt counts %d new hooks, not the %d accepted Captain Hook handlers", pending, len(captainHookEvents))
 	}
@@ -591,43 +597,44 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 	if err != nil {
 		return fmt.Errorf("the Review hooks action did not open the hooks browser: %w", err)
 	}
-	if view.above || view.selected != view.rows[0].Event {
+	if !view.atFirst() {
 		return errors.New("the hooks browser did not open at its first row")
 	}
-	first := view.selected
 	rows := hookRows{counts: map[string]hookRow{}}
 	if err := rows.add(view, pending); err != nil {
 		return err
 	}
-	for view.below {
-		if downs == len(browserEvents)-1 {
-			return errors.New("the hooks browser lists more rows than the supported events")
-		}
-		if view, err = r.move(ctx, handle, p, &rows, view, KeyDown, 1, pending); err != nil {
-			return err
-		}
-		downs++
+	if view, err = r.opposite(ctx, handle, p, view, false); err != nil {
+		return err
+	}
+	moves++
+	if err := rows.add(view, pending); err != nil {
+		return err
 	}
 	if err := rows.check(probe); err != nil {
 		return err
 	}
-	for range downs {
-		if view, err = r.move(ctx, handle, p, &rows, view, KeyUp, -1, pending); err != nil {
-			return err
-		}
-		ups++
-	}
-	if view.selected != first || view.above || view.rows[0].Event != first {
-		return errors.New("the hooks browser did not return to its first row")
-	}
 	if err := r.Key(ctx, handle, keyTrust); err != nil {
 		return err
 	}
-	trusted, err := r.browser(ctx, handle, p, true, func(hookBrowser) bool { return true })
-	if err != nil {
+	if view, err = r.browser(ctx, handle, p, true, func(hookBrowser) bool { return true }); err != nil {
 		return fmt.Errorf("the trust key did not produce the trusted hooks browser: %w", err)
 	}
-	if err := rows.trusted(trusted, first); err != nil {
+	other, err := r.opposite(ctx, handle, p, view, true)
+	if err != nil {
+		return err
+	}
+	moves++
+	if view.atLast() {
+		view, other = other, view
+	}
+	after := hookRows{counts: map[string]hookRow{}}
+	for _, edge := range []hookBrowser{view, other} {
+		if err := after.add(edge, 0); err != nil {
+			return err
+		}
+	}
+	if err := rows.trusted(after); err != nil {
 		return err
 	}
 	if err := r.Key(ctx, handle, KeyEscape); err != nil {
