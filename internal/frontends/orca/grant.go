@@ -190,6 +190,8 @@ def grant(mode, plugin, version, codex, project, seconds, excluded):
         timings[name] = round(time.monotonic() - since, 6)
         return time.monotonic()
 
+    if os.environ.get("CODEX_HOME", os.path.expanduser("~") + "/.codex") != os.path.expanduser("~") + "/.codex":
+        raise Refusal("home")
     if not os.path.isabs(project) or os.path.realpath(project) != project or not os.path.isdir(project):
         raise Refusal("project")
     home, root, raw, events, handlers = definitions(plugin, version, mode == "final")

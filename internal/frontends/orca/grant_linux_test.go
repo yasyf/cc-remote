@@ -2,6 +2,7 @@ package orca_test
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -28,6 +29,8 @@ here = os.path.dirname(os.path.realpath(__file__))
 with open(os.path.join(here, "scenario.json")) as source:
     scenario = json.load(source)
 home = os.environ["HOME"]
+with open(os.path.join(here, "invocations"), "a") as marker:
+    marker.write(" ".join(sys.argv[1:]) + "\n")
 if sys.argv[1:] == ["--version"]:
     print(scenario.get("version", "codex-cli 0.159.2"))
     sys.exit(0)
@@ -222,15 +225,15 @@ func (h *grantHome) run(t *testing.T, mode orca.GrantMode, seconds string) (orca
 func (h *grantHome) log(t *testing.T) grantLog {
 	t.Helper()
 	var log grantLog
-	file, err := os.Open(filepath.Join(h.bin, "requests.jsonl"))
+	path := filepath.Join(h.bin, "requests.jsonl")
+	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return log
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	scanner.Buffer(nil, 1<<20)
 	for scanner.Scan() {
 		var line struct {
@@ -250,7 +253,7 @@ func (h *grantHome) log(t *testing.T) grantLog {
 			log.writes = append(log.writes, line.Params)
 		}
 	}
-	if err := os.Remove(file.Name()); err != nil {
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	return log
@@ -464,7 +467,6 @@ func TestHookGrantRefusesWithoutAnUnsafeWrite(t *testing.T) {
 			h.scenario["layers"] = []any{map[string]any{"name": map[string]any{"type": "system", "file": "/etc/codex/config.toml"}, "version": "sha256:" + strings.Repeat("e", 64), "disabledReason": nil, "config": map[string]any{"projects": map[string]any{h.project: map[string]any{"trust_level": "untrusted"}}}}}
 		}, orca.GrantRefusal{Reason: "project-untrusted", Record: -1}, 0},
 		{"another codex", orca.GrantFill, "", func(h *grantHome) { h.scenario["version"] = "codex-cli 0.159.1" }, orca.GrantRefusal{Reason: "codex", Record: -1}, 0},
-		{"another configuration home", orca.GrantFill, "", func(h *grantHome) { h.env = append(h.env, "CODEX_HOME="+h.home+"/elsewhere") }, orca.GrantRefusal{Reason: "home", Record: -1, Step: "initialize"}, 0},
 		{"symlinked project", orca.GrantFill, "", func(h *grantHome) {
 			link := filepath.Join(h.home, "alias")
 			if err := os.Symlink(h.project, link); err != nil {
@@ -481,10 +483,16 @@ func TestHookGrantRefusesWithoutAnUnsafeWrite(t *testing.T) {
 		{"extra project hook", orca.GrantFill, "", func(h *grantHome) {
 			h.scenario["extra"] = []any{map[string]any{"key": h.project + "/.codex/hooks.json:stop:0:0", "currentHash": changed, "trustStatus": "untrusted", "enabled": true, "source": "project", "sourcePath": h.project + "/.codex/hooks.json", "isManaged": false, "pluginId": nil, "eventName": "stop", "matcher": nil, "statusMessage": nil, "timeoutSec": 600, "handlerType": "command", "command": "x", "async": false, "displayOrder": 9, "additionalContextLimit": nil}}
 		}, orca.GrantRefusal{Reason: "extra", Event: "Stop", Record: 5}, 1},
-		{"matcher drift", orca.GrantFill, "", func(h *grantHome) { h.scenario["patch"] = map[string]any{"postToolUse": map[string]any{"matcher": "*"}} }, orca.GrantRefusal{Reason: "extra", Event: "PostToolUse"}, 1},
-		{"timeout drift", orca.GrantFill, "", func(h *grantHome) { h.scenario["patch"] = map[string]any{"sessionStart": map[string]any{"timeoutSec": 30}} }, orca.GrantRefusal{Reason: "extra", Event: "SessionStart"}, 1},
+		{"matcher drift", orca.GrantFill, "", func(h *grantHome) {
+			h.scenario["patch"] = map[string]any{"postToolUse": map[string]any{"matcher": "*"}}
+		}, orca.GrantRefusal{Reason: "extra", Event: "PostToolUse"}, 1},
+		{"timeout drift", orca.GrantFill, "", func(h *grantHome) {
+			h.scenario["patch"] = map[string]any{"sessionStart": map[string]any{"timeoutSec": 30}}
+		}, orca.GrantRefusal{Reason: "extra", Event: "SessionStart"}, 1},
 		{"disabled handler", orca.GrantFill, "", func(h *grantHome) { h.scenario["patch"] = map[string]any{"stop": map[string]any{"enabled": false}} }, orca.GrantRefusal{Reason: "disabled", Event: "Stop"}, 1},
-		{"modified handler", orca.GrantFill, "", func(h *grantHome) { h.scenario["patch"] = map[string]any{"preToolUse": map[string]any{"trustStatus": "modified"}} }, orca.GrantRefusal{Reason: "modified", Event: "PreToolUse"}, 1},
+		{"modified handler", orca.GrantFill, "", func(h *grantHome) {
+			h.scenario["patch"] = map[string]any{"preToolUse": map[string]any{"trustStatus": "modified"}}
+		}, orca.GrantRefusal{Reason: "modified", Event: "PreToolUse"}, 1},
 		{"duplicate key", orca.GrantFill, "", func(h *grantHome) {
 			h.scenario["patch"] = map[string]any{"stop": map[string]any{"key": "same"}, "sessionStart": map[string]any{"key": "same"}}
 		}, orca.GrantRefusal{Reason: "duplicate", Event: "Stop"}, 1},
@@ -531,6 +539,30 @@ func TestHookGrantRefusesWithoutAnUnsafeWrite(t *testing.T) {
 						t.Errorf("a refused grant wrote hook trust: %v", edit)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestHookGrantRefusesAnotherCodexHomeBeforeAnyChild(t *testing.T) {
+	for _, selected := range []string{"/foreign/.codex", "/.codex/", "/.codex/../.codex"} {
+		t.Run(selected, func(t *testing.T) {
+			h := newGrantHome(t)
+			foreign := h.home + selected
+			h.env = append(h.env, "CODEX_HOME="+foreign)
+			_, err := h.run(t, orca.GrantFill, "20")
+			var refusal orca.GrantRefusal
+			if !errors.As(err, &refusal) || refusal != (orca.GrantRefusal{Mode: orca.GrantFill, Reason: "home", Record: -1}) {
+				t.Fatalf("grant = %v, want a home refusal before any child", err)
+			}
+			if _, err := os.Stat(filepath.Join(h.bin, "invocations")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("a Codex child ran under another configuration home: %v", err)
+			}
+			if _, err := os.Stat(h.home + "/foreign"); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the foreign configuration home was touched: %v", err)
+			}
+			if entries, err := os.ReadDir(h.home + "/.codex"); err != nil || len(entries) != 2 {
+				t.Errorf("the configuration home gained state: %v, %v", entries, err)
 			}
 		})
 	}

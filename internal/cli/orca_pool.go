@@ -49,15 +49,15 @@ const (
 )
 
 type orcaMember struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	Name          string       `json:"name"`
-	Provider      string       `json:"provider"`
-	Profile       string       `json:"profile"`
-	Key           string       `json:"key"`
-	State         memberState  `json:"state"`
-	Lane          string       `json:"lane,omitempty"`
-	Ref           string       `json:"ref,omitempty"`
-	Head          string       `json:"head,omitempty"`
+	SchemaVersion int            `json:"schemaVersion"`
+	Name          string         `json:"name"`
+	Provider      string         `json:"provider"`
+	Profile       string         `json:"profile"`
+	Key           string         `json:"key"`
+	State         memberState    `json:"state"`
+	Lane          string         `json:"lane,omitempty"`
+	Ref           string         `json:"ref,omitempty"`
+	Head          string         `json:"head,omitempty"`
 	Reason        string         `json:"reason,omitempty"`
 	Failure       *orcaFailure   `json:"failure,omitempty"`
 	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
