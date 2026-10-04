@@ -32,9 +32,10 @@ type Gate struct {
 }
 
 type Startup struct {
-	Gates []Gate
-	Ready *regexp.Regexp
-	Hooks *HookReview
+	Gates   []Gate
+	Ready   *regexp.Regexp
+	Hooks   *HookReview
+	Granted *GrantedHooks
 }
 
 type UnknownScreenError struct {
@@ -79,6 +80,7 @@ func (r Remote) bootstrap(ctx context.Context, handle string, startup Startup, t
 	steps := make([]string, 0, 1)
 	var last Screen
 	pending := -1
+	verified := false
 	_, err := poll(ctx, p, func(ctx context.Context) (struct{}, bool, error) {
 		for {
 			if err := ctx.Err(); err != nil {
@@ -89,18 +91,22 @@ func (r Remote) bootstrap(ctx context.Context, handle string, startup Startup, t
 				return struct{}{}, false, err
 			}
 			last = screen
-			if startup.Hooks != nil {
+			if startup.Hooks != nil || startup.Granted != nil {
 				count, found, err := reviewPrompt(screen.Tail)
-				if err != nil {
+				switch {
+				case err != nil:
 					return struct{}{}, false, err
-				}
-				if found {
+				case found && startup.Granted != nil:
+					return struct{}{}, false, fmt.Errorf("hooks: %w", ErrPregrantPrompt)
+				case found:
 					pending = count
 					return struct{}{}, true, completeFrame(screen)
 				}
 			}
 			gate, found := startup.gate(screen.Tail)
 			switch {
+			case found && gate.Trust && startup.Granted != nil:
+				return struct{}{}, false, fmt.Errorf("%s: %w", gate.Name, ErrPregrantPrompt)
 			case found && gate.Trust && !trusted:
 				return struct{}{}, false, ErrUntrusted
 			case found:
@@ -112,9 +118,16 @@ func (r Remote) bootstrap(ctx context.Context, handle string, startup Startup, t
 			case startup.Ready != nil && !startup.Ready.MatchString(screenText(screen.Tail)):
 				return struct{}{}, false, nil
 			}
+			if startup.Granted != nil && !verified {
+				if err := startup.Granted.Grant.Final(ctx, startup.Granted.Prior); err != nil {
+					return struct{}{}, false, fmt.Errorf("hooks: %w", err)
+				}
+				verified = true
+				steps = append(steps, "hooks.granted")
+			}
 			wait, err := r.WaitIdle(ctx, handle, idleTimeout)
 			blocked := string(bytes.TrimSpace(wait.BlockedReason))
-			if err != nil && startup.Hooks != nil && (blocked == reviewBlocked || blocked == trustBlocked) {
+			if err != nil && (startup.Hooks != nil || startup.Granted != nil) && (blocked == reviewBlocked || blocked == trustBlocked) {
 				return struct{}{}, false, nil
 			}
 			return struct{}{}, err == nil, err

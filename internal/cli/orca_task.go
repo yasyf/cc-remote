@@ -63,6 +63,7 @@ type orcaTask struct {
 	Prepared      bool           `json:"prepared,omitempty"`
 	Brief         *orcaArtifact  `json:"brief,omitempty"`
 	BaseCommit    string         `json:"baseCommit,omitempty"`
+	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
 
 	provider providers.Provider
 }
@@ -299,15 +300,18 @@ func (l *orcaLaunch) start(ctx context.Context, out io.Writer, session *workspac
 	if l.existing {
 		opening = openExisting
 	}
-	task, err := l.prime(ctx, session, runner, runtime, name, opening, finish)
+	task, err := l.prime(ctx, session, runner, runtime, name, opening, nil, finish)
 	if task == nil {
 		return err
 	}
 	return errors.Join(err, emit(out, task))
 }
 
-func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runner orca.Runner, runtime orca.Runtime, name string, opening orcaOpening, finish func(context.Context, orcaDriver, *orcaTask) error) (*orcaTask, error) {
+func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runner orca.Runner, runtime orca.Runtime, name string, opening orcaOpening, pregrant *orca.Pregrant, finish func(context.Context, orcaDriver, *orcaTask) error) (*orcaTask, error) {
 	driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
+	if l.agent.Kind != orca.AgentCodex {
+		pregrant = nil
+	}
 	var task *orcaTask
 	session.Retain = func(ctx context.Context, record *workspace.Record) (err error) {
 		switch opening {
@@ -338,7 +342,9 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		if result, err = session.Reuse(ctx, name, l.source(session.Config)); err != nil {
 			return nil, err
 		}
-		key, err = captureKey(ctx, session.Config.Orca.Keys[l.agent.KeyProvider()])
+		if err = reclaim(ctx, session, result, pregrant); err == nil {
+			key, err = captureKey(ctx, session.Config.Orca.Keys[l.agent.KeyProvider()])
+		}
 	case openCreated:
 		if key, err = captureKey(ctx, session.Config.Orca.Keys[l.agent.KeyProvider()]); err != nil {
 			return nil, err
@@ -351,6 +357,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		task, err = driver.task(result, l.agent, session.Provider)
 	}
 	if err == nil {
+		task.Pregrant = pregrant
 		err = driver.launch(ctx, session, task, runtime, key, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
@@ -958,6 +965,10 @@ func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, erro
 	if task.Agent.Kind != orca.AgentCodex {
 		return orca.StartupOf(task.Agent), nil
 	}
+	if task.Pregrant != nil {
+		grant, _, err := codexGrant(session, task.Machine, task.ProjectRoot)
+		return orca.GrantedCodexStartup(grant, *task.Pregrant), err
+	}
 	cfg := session.Config
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
 	if err != nil {
@@ -965,17 +976,55 @@ func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, erro
 	}
 	return orca.CodexStartup(orca.HookReview{
 		Captain: captainPins(inventory),
-		Exec: func(ctx context.Context, argv []string) ([]byte, error) {
-			result, err := session.Provider.Exec(ctx, task.Machine, argv, nil)
-			if err != nil {
-				return nil, err
-			}
-			if result.ExitCode != 0 {
-				return nil, fmt.Errorf("the Codex hook probe on %s exited %d", task.Machine, result.ExitCode)
-			}
-			return result.Stdout, nil
-		},
+		Exec:    machineExec(session, task.Machine, "the Codex hook probe"),
 	}), nil
+}
+
+func codexGrant(session *workspace.Session, machine, project string) (orca.HookGrant, bool, error) {
+	cfg := session.Config
+	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
+	if err != nil {
+		return orca.HookGrant{}, false, err
+	}
+	pins, version := captainPins(inventory), codexVersion(inventory, session.Profile)
+	grant := orca.HookGrant{Captain: pins, Codex: version, Project: project, Exec: machineExec(session, machine, "the Codex trust grant")}
+	return grant, len(pins) > 0 && version != "", nil
+}
+
+func reclaim(ctx context.Context, session *workspace.Session, result *workspace.Result, pregrant *orca.Pregrant) error {
+	if pregrant == nil {
+		return nil
+	}
+	if err := checkClean(ctx, session, "check the claimed checkout before its key", result.Name, result.Machine); err != nil {
+		return err
+	}
+	grant, _, err := codexGrant(session, result.Machine, result.ProjectRoot)
+	if err != nil {
+		return err
+	}
+	return grant.Claim(ctx, *pregrant)
+}
+
+func machineExec(session *workspace.Session, machine, step string) func(context.Context, []string) ([]byte, error) {
+	return func(ctx context.Context, argv []string) ([]byte, error) {
+		result, err := session.Provider.Exec(ctx, machine, argv, nil)
+		if err != nil {
+			return nil, err
+		}
+		if result.ExitCode != 0 {
+			return nil, fmt.Errorf("%s on %s exited %d", step, machine, result.ExitCode)
+		}
+		return result.Stdout, nil
+	}
+}
+
+func codexVersion(inventory images.Inventory, profile string) string {
+	for _, artifact := range slices.Concat(inventory.System, inventory.Tools, inventory.Profiles[profile].Tools) {
+		if _, ok := artifact.Bins[orca.AgentCodex]; ok || (len(artifact.Bins) == 0 && artifact.Name == orca.AgentCodex) {
+			return artifact.Version
+		}
+	}
+	return ""
 }
 
 func captainPins(inventory images.Inventory) []orca.Pin {
