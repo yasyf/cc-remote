@@ -495,6 +495,45 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 	w.free("lane-a")
 }
 
+func TestThePublicFillWithholdsAnUnansweredLookupOfAReadySpare(t *testing.T) {
+	dir := t.TempDir()
+	path, calls := spritesConfig(t, dir)
+	session, err := (&selection{config: path}).open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := openPool(session)
+	record := &workspace.Record{Name: "pool-a", Provider: "sprites", Profile: "lean", Source: workspace.Source{Ref: "main"}, Machine: "pool-a"}
+	if err := state.Save(session.Config.State().Workspace("pool-a"), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.save(&orcaMember{SchemaVersion: orcaPoolSchema, Name: "pool-a", Provider: "sprites", Profile: "lean", Key: pool.key, State: memberReady, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	nameSpares(t)
+	stdout, err := runPublicFill(t, path)
+	if !strings.Contains(err.Error(), "the warm pool fill failed with exit 1 and HTTP status unknown") || !strings.Contains(err.Error(), "its text is withheld") {
+		t.Fatalf("fill = %v, want the unanswered lookup reported as metadata", err)
+	}
+	var fill orcaFill
+	if jsonErr := json.Unmarshal([]byte(stdout), &fill); jsonErr != nil || fill.Key != pool.key || len(fill.Created) != 0 || len(fill.Refused) != 0 {
+		t.Errorf("fill output = %s, %v; want nothing created or refused", stdout, jsonErr)
+	}
+	invoked, readErr := os.ReadFile(calls)
+	if readErr != nil || len(invoked) == 0 || strings.Trim(strings.ReplaceAll(string(invoked), "api\n", ""), "\n") != "" {
+		t.Errorf("provider CLI calls = %q, %v; want only read-only api lookups", invoked, readErr)
+	}
+	if got, err := pool.load("pool-a"); err != nil || got.State != memberReady || got.Lane != "" || got.Reason != "" || got.Failure != nil {
+		t.Errorf("pool-a = %+v, %v; want it left ready and unclaimed", got, err)
+	}
+	if members, err := pool.records(); err != nil || len(members) != 1 {
+		t.Errorf("pool records = %+v, %v; want no new spare", members, err)
+	}
+	if _, err := os.Lstat(session.Config.State().Orca("pool-a")); !os.IsNotExist(err) {
+		t.Errorf("the fill left Orca task state: %v", err)
+	}
+}
+
 func TestWarmClaimRefusesUnverifiedOrIncompatibleSparesWithoutTouchingThem(t *testing.T) {
 	record := func(w *firstWorker, edit func(*workspace.Record)) {
 		w.t.Helper()
@@ -678,7 +717,7 @@ func TestWarmFillCreatesAgentFreeSparesWithoutAModelRuntimeOrKey(t *testing.T) {
 	if _, err := os.Stat(w.keys); !os.IsNotExist(err) {
 		t.Errorf("a fill read the key: %v", err)
 	}
-	if entries, err := os.ReadDir(filepath.Dir(w.session.Config.State().Orca("x"))); !os.IsNotExist(err) {
+	if entries, err := os.ReadDir(filepath.Dir(w.session.Config.State().Orca("x"))); !os.IsNotExist(err) && (err != nil || len(entries) != 1 || entries[0].Name() != "pool-a.json.lock" || !entries[0].Type().IsRegular()) {
 		t.Errorf("a fill wrote Orca task state: %v, %v", entries, err)
 	}
 	if _, err := os.Lstat(filepath.Join(w.local.Home("pool-a"), ".cc-remote", "orca")); !os.IsNotExist(err) {
@@ -882,33 +921,38 @@ func TestAFillCountsOnlySparesThatAreStillEligible(t *testing.T) {
 	}
 }
 
-func TestThePublicFillShowsOnlyErrorMetadata(t *testing.T) {
-	dir := t.TempDir()
-	cli := filepath.Join(dir, "sprite")
-	if err := os.WriteFile(cli, []byte("#!/bin/sh\necho 'fatal: sk-leakedsecret rejected by the synthetic provider' >&2\nexit 1\n"), 0o700); err != nil {
+func spritesConfig(t *testing.T, dir string) (path, calls string) {
+	t.Helper()
+	cli, calls := filepath.Join(dir, "sprite"), filepath.Join(dir, "calls")
+	t.Setenv("SPRITE_CALLS", calls)
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$SPRITE_CALLS\"\necho 'fatal: sk-leakedsecret answered by the synthetic provider' >&2\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(workspacetest.Inventory), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "config.yaml")
+	path = filepath.Join(dir, "config.yaml")
 	text := fmt.Sprintf("repository: https://github.com/example/app\nref: main\nprovider: sprites\nprofile: lean\nstate_dir: %s\nproviders:\n  sprites: { org: test, cli: %s }\nworkspace_dirs:\n  sprites: /home/sprite\nprofiles:\n  lean: {}\ninventory: ./inventory.yaml\nforwards:\n  - { label: web, env: WEB_PORT }\n", filepath.Join(dir, "state"), cli)
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return path, calls
+}
+
+func runPublicFill(t *testing.T, path string) (string, error) {
+	t.Helper()
 	var logged bytes.Buffer
 	original := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(original) })
-	nameSpares(t, "pool-a")
+	defer slog.SetDefault(original)
 	cmd := newOrcaPoolFillCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetArgs([]string{"--config", path})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	err := cmd.ExecuteContext(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit 1 and HTTP status unknown") {
-		t.Fatalf("fill = %v, want the failed create reported with its exit", err)
+	if err == nil {
+		t.Fatal("the public fill succeeded against a failing provider")
 	}
 	for stream, text := range map[string]string{"error": err.Error(), "stdout": stdout.String(), "stderr": stderr.String(), "log": logged.String()} {
 		for _, leaked := range []string{"sk-leakedsecret", "fatal", "synthetic provider"} {
@@ -916,6 +960,17 @@ func TestThePublicFillShowsOnlyErrorMetadata(t *testing.T) {
 				t.Errorf("the public fill's %s carried %q: %s", stream, leaked, text)
 			}
 		}
+	}
+	return stdout.String(), err
+}
+
+func TestThePublicFillShowsOnlyErrorMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path, _ := spritesConfig(t, dir)
+	nameSpares(t, "pool-a")
+	_, err := runPublicFill(t, path)
+	if !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit 1 and HTTP status unknown") {
+		t.Fatalf("fill = %v, want the failed create reported with its exit", err)
 	}
 	member := &orcaMember{}
 	if _, err := state.Load(state.Dir(filepath.Join(dir, "state")).Pool("pool-a"), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.HTTPStatus != nil {

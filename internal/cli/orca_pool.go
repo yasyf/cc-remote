@@ -71,6 +71,10 @@ type orcaFailure struct {
 	SHA256     string `json:"sha256"`
 }
 
+type spareFailure struct {
+	member *orcaMember
+}
+
 type orcaPool struct {
 	session *workspace.Session
 	dir     state.Dir
@@ -398,7 +402,7 @@ func (p *orcaPool) refill(ctx context.Context, fill *orcaFill) error {
 		}
 		if _, err := p.session.CreateSpare(ctx, member.Name, workspace.Source{Ref: p.session.Config.Ref}); err != nil {
 			member.State, member.Failure = memberFailed, failureOf(err)
-			return errors.Join(failedCreate(member), p.save(member))
+			return errors.Join(&spareFailure{member: member}, p.save(member))
 		}
 		member.State = memberReady
 		if err := p.save(member); err != nil {
@@ -519,12 +523,27 @@ func (p *orcaPool) spawn() (int, error) {
 	return pid, cmd.Process.Release()
 }
 
-func failedCreate(member *orcaMember) error {
-	exit := "unknown"
-	if member.Failure.Exit != nil {
-		exit = strconv.Itoa(*member.Failure.Exit)
+func (e *spareFailure) Error() string {
+	return "create warm workspace " + e.member.Name + " failed with " + e.member.Failure.describe() + " and is kept only as that metadata in orca pool status"
+}
+
+func (f *orcaFailure) describe() string {
+	exit, status := "unknown", "unknown"
+	if f.Exit != nil {
+		exit = strconv.Itoa(*f.Exit)
 	}
-	return fmt.Errorf("create warm workspace %s failed with exit %s and HTTP status unknown; its %d-byte error has SHA-256 %s and is kept only as that metadata in orca pool status", member.Name, exit, member.Failure.Bytes, member.Failure.SHA256)
+	if f.HTTPStatus != nil {
+		status = strconv.Itoa(*f.HTTPStatus)
+	}
+	return fmt.Sprintf("exit %s and HTTP status %s; its %d-byte error has SHA-256 %s", exit, status, f.Bytes, f.SHA256)
+}
+
+func withheld(err error) error {
+	var failed *spareFailure
+	if errors.As(err, &failed) {
+		return failed
+	}
+	return errors.New("the warm pool fill failed with " + failureOf(err).describe() + ", and its text is withheld")
 }
 
 func fillEnv(environ []string) []string {
@@ -585,6 +604,9 @@ command detached once it has claimed.`,
 			ctx, cancel := context.WithTimeout(cmd.Context(), fillTimeout)
 			defer cancel()
 			fill, err := openPool(session).fill(ctx)
+			if err != nil {
+				err = withheld(err)
+			}
 			if fill == nil {
 				return err
 			}
