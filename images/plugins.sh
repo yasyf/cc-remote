@@ -583,22 +583,28 @@ write_supervisor() {
   mv "$state_dir/start.sh.tmp" "$state_dir/start.sh"
 }
 
-excerpt() {
-  printf '(%s bytes): ' "$(wc -c < "$1")"
-  head -c 512 "$1" | LC_ALL=C tr -c '[:print:]' ' '
+measure() {
+  local sum
+  sum="$(sha256sum < "$1")"
+  printf '%s bytes sha256 %s' "$(wc -c < "$1")" "${sum%% *}"
 }
 
 create_service() {
-  local name="$1" out err status
+  local name="$1" out err status http=unknown
   shift
   out="$(mktemp "$tmp_dir/service.XXXXXX")"
   err="$(mktemp "$tmp_dir/service.XXXXXX")"
   if sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
     cat "$out"
     cat "$err" >&2
+    rm -f "$out" "$err"
   else
     status=$?
-    printf 'cc-remote: sprite-env services create cc-remote-%s exited %s; stderr %s; response body %s\n' "$name" "$status" "$(excerpt "$err")" "$(excerpt "$out")" >&2
+    if [ "$status" -eq 22 ] && [ "$(grep -c '^curl: (22) The requested URL returned error: [0-9][0-9][0-9]$' "$err")" -eq 1 ]; then
+      http="$(sed -n 's/^curl: (22) The requested URL returned error: \([0-9][0-9][0-9]\)$/\1/p' "$err")"
+    fi
+    printf 'cc-remote: sprite-env services create cc-remote-%s exited %s; HTTP status %s; response body %s; stderr %s; response and stderr text withheld\n' "$name" "$status" "$http" "$(measure "$out")" "$(measure "$err")" >&2
+    rm -f "$out" "$err"
     return "$status"
   fi
 }
