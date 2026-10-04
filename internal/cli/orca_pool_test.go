@@ -945,9 +945,9 @@ func runPublicFill(t *testing.T, path string) (string, error) {
 	original := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
 	defer slog.SetDefault(original)
-	cmd := newOrcaPoolFillCmd()
+	cmd := NewRootCmd()
 	var stdout, stderr bytes.Buffer
-	cmd.SetArgs([]string{"--config", path})
+	cmd.SetArgs([]string{"orca", "pool", "fill", "--config", path})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	err := cmd.ExecuteContext(t.Context())
