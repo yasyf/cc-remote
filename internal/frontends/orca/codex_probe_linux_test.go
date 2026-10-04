@@ -92,7 +92,7 @@ func (h *hookHome) document(t *testing.T, v any) []byte {
 	return raw
 }
 
-func (h *hookHome) run(t *testing.T) (string, []byte, orca.HookProbe, error) {
+func (h *hookHome) stage(t *testing.T) []byte {
 	t.Helper()
 	hooks := []byte(h.rawHooks)
 	if h.rawHooks == "" {
@@ -108,6 +108,12 @@ func (h *hookHome) run(t *testing.T) (string, []byte, orca.HookProbe, error) {
 		mode = 0o755
 	}
 	h.write(t, rel+"/bin/hook", []byte("#!/bin/sh\n"), mode)
+	return hooks
+}
+
+func (h *hookHome) run(t *testing.T) (string, []byte, orca.HookProbe, error) {
+	t.Helper()
+	hooks := h.stage(t)
 	cmd := exec.Command("python3", "-c", orca.HookProbeScript, probeCaptain, probeVersion)
 	cmd.Env = []string{"HOME=" + h.home, "PATH=" + os.Getenv("PATH")}
 	out, err := cmd.Output()

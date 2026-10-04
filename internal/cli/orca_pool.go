@@ -58,10 +58,11 @@ type orcaMember struct {
 	Lane          string       `json:"lane,omitempty"`
 	Ref           string       `json:"ref,omitempty"`
 	Head          string       `json:"head,omitempty"`
-	Reason        string       `json:"reason,omitempty"`
-	Failure       *orcaFailure `json:"failure,omitempty"`
-	CreatedAt     time.Time    `json:"createdAt"`
-	UpdatedAt     time.Time    `json:"updatedAt"`
+	Reason        string         `json:"reason,omitempty"`
+	Failure       *orcaFailure   `json:"failure,omitempty"`
+	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
+	CreatedAt     time.Time      `json:"createdAt"`
+	UpdatedAt     time.Time      `json:"updatedAt"`
 }
 
 type orcaFailure struct {
@@ -161,11 +162,11 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 	}
 	allocation := &orcaAllocation{SchemaVersion: orcaAllocationSchema, Lane: lane, Workspace: lane, Allocation: allocationCreated, Ref: source.Ref, Replenish: pool.replenish()}
 	if member == nil {
-		allocation.Task, err = l.prime(ctx, session, runner, runtime, lane, openCreated, finish)
+		allocation.Task, err = l.prime(ctx, session, runner, runtime, lane, openCreated, nil, finish)
 	} else {
 		defer release()
 		allocation.Workspace, allocation.Allocation = member.Name, allocationWarm
-		allocation.Task, err = l.prime(ctx, session, runner, runtime, member.Name, openSpare, finish)
+		allocation.Task, err = l.prime(ctx, session, runner, runtime, member.Name, openSpare, member.Pregrant, finish)
 		err = errors.Join(err, pool.settle(member, allocation.Task, err))
 	}
 	if allocation.Task == nil && member != nil {
@@ -332,6 +333,9 @@ func (p *orcaPool) locked(run func() error) error {
 }
 
 func (p *orcaPool) refusal(ctx context.Context, member *orcaMember) (string, error) {
+	if member.Pregrant != nil && !p.session.Config.Trusted() {
+		return "it holds a Codex trust pregrant that orca.trust no longer authorizes", nil
+	}
 	switch _, err := os.Lstat(p.dir.Orca(member.Name)); {
 	case err == nil:
 		return "an Orca task is already recorded for it, so it is not unused", nil
@@ -400,8 +404,16 @@ func (p *orcaPool) refill(ctx context.Context, fill *orcaFill) error {
 		if err != nil || member == nil {
 			return err
 		}
-		if _, err := p.session.CreateSpare(ctx, member.Name, workspace.Source{Ref: p.session.Config.Ref}); err != nil {
+		result, err := p.session.CreateSpare(ctx, member.Name, workspace.Source{Ref: p.session.Config.Ref})
+		if err == nil {
+			member.Pregrant, err = p.pregrant(ctx, result)
+		}
+		if err != nil {
 			member.State, member.Failure = memberFailed, failureOf(err)
+			var refusal orca.GrantRefusal
+			if errors.As(err, &refusal) {
+				member.Reason = refusal.Error()
+			}
 			return errors.Join(&spareFailure{member: member}, p.save(member))
 		}
 		member.State = memberReady
@@ -410,6 +422,20 @@ func (p *orcaPool) refill(ctx context.Context, fill *orcaFill) error {
 		}
 		fill.Created = append(fill.Created, member.Name)
 	}
+}
+
+func (p *orcaPool) pregrant(ctx context.Context, result *workspace.Result) (*orca.Pregrant, error) {
+	if !p.session.Config.Trusted() {
+		return nil, nil
+	}
+	grant, selected, err := codexGrant(p.session, result.Machine, result.ProjectRoot)
+	if err != nil || !selected {
+		return nil, err
+	}
+	if err := checkClean(ctx, p.session, "check the warm checkout before its grant", result.Name, result.Machine); err != nil {
+		return nil, err
+	}
+	return grant.Fill(ctx)
 }
 
 func (p *orcaPool) shortfall(ctx context.Context, fill *orcaFill) (*orcaMember, error) {

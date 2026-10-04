@@ -35,7 +35,7 @@ const (
 	reviewChoice    = "1. Review hooks"
 )
 
-const HookProbeScript = `import hashlib
+const hookLibrary = `import hashlib
 import json
 import os
 import sys
@@ -47,11 +47,12 @@ BOOKKEEPING = {"state", "enabled"}
 
 
 class Refusal(Exception):
-    def __init__(self, reason, event="", record=-1):
+    def __init__(self, reason, event="", record=-1, step=""):
         super().__init__(reason)
         self.reason = reason
         self.event = event
         self.record = record
+        self.step = step
 
 
 def quote(value):
@@ -104,7 +105,7 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def probe(plugin, version):
+def definitions(plugin, version, native):
     home = os.path.expanduser("~")
     if not home.startswith("/") or os.path.normpath(home) != home:
         raise Refusal("home")
@@ -128,13 +129,15 @@ def probe(plugin, version):
     if not isinstance(document, dict) or set(document) != {"hooks"} or not isinstance(document["hooks"], dict):
         raise Refusal("hooks")
     table = document["hooks"]
-    if set(table) - set(NATIVE):
+    order = NATIVE if native else CAPTAIN
+    if set(table) - set(order):
         raise Refusal("unexpected-event")
     script = quote(home + "/.orca/agent-hooks/codex-hook.sh")
-    native = {"hooks": [{"type": "command", "command": "if [ -f " + script + " ] && [ -r " + script + " ] && [ -x " + script + " ]; then /bin/sh " + script + "; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi", "timeout": 10}]}
+    shim = {"hooks": [{"type": "command", "command": "if [ -f " + script + " ] && [ -r " + script + " ] && [ -x " + script + " ]; then /bin/sh " + script + "; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi", "timeout": 10}]}
     events = {}
-    for event in NATIVE:
-        want = [native]
+    handlers = []
+    for event in order:
+        want = [shim] if native else []
         if event in CAPTAIN:
             want.append({"hooks": [{"type": "command", "command": "CAPT_HOOK_PROVIDER=codex " + quote(hook) + " run " + event}]})
         groups = table.get(event)
@@ -150,6 +153,14 @@ def probe(plugin, version):
         if remaining:
             raise Refusal("missing", event, expected.index(remaining[0]))
         events[event] = len(groups)
+        handlers.extend((event, group["hooks"][0]) for group in want)
+    return home, root, raw, events, handlers
+`
+
+const HookProbeScript = hookLibrary + `
+
+def probe(plugin, version):
+    home, root, raw, events, _ = definitions(plugin, version, True)
     return {"schema": 1, "outcome": "exact", "reason": "", "event": "", "record": -1, "home": home, "root": root, "hooksSha256": hashlib.sha256(raw).hexdigest(), "definitions": sum(events.values()), "events": events}
 
 
