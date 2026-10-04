@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
@@ -21,6 +24,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
+	"github.com/yasyf/cc-remote/internal/workspace/workspacetest"
 )
 
 const standInHold = 20 * time.Second
@@ -350,4 +354,84 @@ func TestServerResumeAdoptsOnlyTheSavedRuntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExistingComputePrepareStartsItsKeeperEarlyUnderTheHeldTask(t *testing.T) {
+	w := newFirstWorker(t, &providers.ComputeInstance{Container: "agent", Endpoint: "https://compute.test", ContainerPort: 18766, ExportedPort: 30000, IngressDomain: "us.test.nscluster.cloud"}, true)
+	lock := w.session.Config.State().OrcaGatewayLock("task-a", "task-a")
+	starts := standInForward(t, &lock)
+	native, commands := w.native()
+	calls := len(w.provider.Calls())
+	resuming := newGate()
+	w.paused = resuming
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- w.prepare(t.Context(), w.session, native, &out, "task-a", true) }()
+	w.reach(resuming, done)
+	early, err := loadTask(w.session.Config.State(), "task-a")
+	if err != nil || early.Gateway == nil || early.Gateway.Instance != "task-a" || early.Gateway.PID == 0 || early.RuntimeID != "" || early.Terminal != "" || starts.Load() != 1 {
+		t.Fatalf("task while resuming = %+v, %v after %d keeper starts; want the new task's keeper before any runtime", early, err, starts.Load())
+	}
+	contender := w.contender()
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.prepare(t.Context(), contender, runner, io.Discard, "task-a", true)
+	}, "another cc-remote command holds the Orca task for task-a")
+	close(resuming.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	loaded := w.prepared(out.Bytes())
+	if loaded.Port != early.Port || loaded.Gateway == nil || loaded.Gateway.Instance != "task-a" || loaded.Forward != nil || loaded.RuntimeID != "rt-1" {
+		t.Errorf("prepared compute task = %+v, want the early task's port and gateway", loaded)
+	}
+	if starts.Load() != 1 || !slices.Equal(native.calls, commands) {
+		t.Errorf("keeper starts = %d, orca calls =\n%q\nwant one keeper and\n%q", starts.Load(), native.calls, commands)
+	}
+	if lifecycle := w.provider.Calls()[calls:]; len(lifecycle) == 0 || lifecycle[0] != "wake task-a" || slices.ContainsFunc(lifecycle, func(call string) bool { return strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") }) {
+		t.Errorf("provider calls = %q, want the recorded instance woken and nothing created or destroyed", lifecycle)
+	}
+	w.free("task-a")
+}
+
+func recipeConfig(t *testing.T, cfg *config.Config) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(workspacetest.Inventory), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("repository: %s\nref: main\nprovider: sprites\nprofile: lean\nstate_dir: %q\nproviders:\n  sprites: {org: test, cli: /nonexistent/sprite}\nworkspace_dirs:\n  sprites: /home/sprite\nprofiles:\n  lean: {}\ninventory: ./inventory.yaml\nforwards:\n  - {label: web, env: WEB_PORT}\n", cfg.Repository, cfg.StateDir)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestServerRecipesRefuseWhileAFirstWorkerHoldsTheTask(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	path := recipeConfig(t, w.session.Config)
+	for name, value := range map[string]string{envSchemaVersion: "2", envRepoURL: w.session.Config.Repository, envRepoRef: "main", envRepoRefHead: w.head, envRepoBranch: "main"} {
+		t.Setenv(name, value)
+	}
+	native, commands := w.native()
+	booting, runner := w.booting(native, commands[5])
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- w.prepare(t.Context(), w.session, runner, &out, "task-a", true) }()
+	w.reach(booting, done)
+	for _, recipe := range []func() *cobra.Command{newCreateCmd, newResumeCmd} {
+		w.refusedWithoutEffects(func(orca.Runner) error {
+			cmd := recipe()
+			cmd.SetArgs([]string{"task-a", "--config", path, "--connection", "server"})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			return cmd.ExecuteContext(t.Context())
+		}, "another cc-remote command holds the Orca task for task-a")
+	}
+	close(booting.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	w.prepared(out.Bytes())
+	w.free("task-a")
 }

@@ -13,8 +13,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/providers/providertest"
 	"github.com/yasyf/cc-remote/internal/state"
+	"github.com/yasyf/cc-remote/internal/workspace"
+	"github.com/yasyf/cc-remote/internal/workspace/workspacetest"
 )
 
 const (
@@ -278,6 +283,73 @@ func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 			}
 			if got := timingRecords(t, &logs, "BRIEF-BYTES", secretStderr, "exited", root, home, head); !slices.Equal(got, timings) {
 				t.Errorf("timings = %q, want %q", got, timings)
+			}
+		})
+	}
+}
+
+func TestCheckRetainedAcceptsOnlyTheConfiguredCheckout(t *testing.T) {
+	const repository = "https://github.com/example/app"
+	tests := []struct {
+		name string
+		root func(t *testing.T, checkout, home string) string
+		want string
+	}{
+		{"the configured checkout", func(_ *testing.T, checkout, _ string) string { return checkout }, ""},
+		{"a directory inside the checkout", func(t *testing.T, checkout, _ string) string {
+			inside := filepath.Join(checkout, "inside")
+			if err := os.Mkdir(inside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return inside
+		}, "exited 5: the configured project root is not the top level of a git checkout"},
+		{"no checkout", func(t *testing.T, _, _ string) string { return t.TempDir() }, "exited 5: the configured project root is not the top level of a git checkout"},
+		{"another origin", func(t *testing.T, checkout, _ string) string {
+			gitOutput(t, checkout, "remote", "set-url", "origin", "https://github.com/someone/secret-fork")
+			return checkout
+		}, "exited 6: the checkout's origin is not the configured repository"},
+		{"no origin", func(t *testing.T, checkout, _ string) string {
+			gitOutput(t, checkout, "remote", "remove", "origin")
+			return checkout
+		}, "exited 6: the checkout's origin is not the configured repository"},
+		{"earlier runtime state", func(t *testing.T, checkout, home string) string {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return checkout
+		}, "exited 7: the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := workspacetest.NewLocalExec(t)
+			provider := &providertest.Fake{Handle: local.Handle}
+			if _, err := provider.Create(t.Context(), providers.Spec{Name: "task-a"}); err != nil {
+				t.Fatal(err)
+			}
+			checkout, head := gitCheckout(t)
+			gitOutput(t, checkout, "remote", "add", "origin", repository)
+			home := local.Home("task-a")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root := tt.root(t, checkout, home)
+			status := gitOutput(t, checkout, "status", "--porcelain", "--untracked-files=all")
+			session := &workspace.Session{Config: &config.Config{Repository: repository}, Provider: provider}
+			err := checkRetained(t.Context(), session, &workspace.Result{Name: "task-a", Machine: "task-a", ProjectRoot: root})
+			switch {
+			case tt.want == "" && err != nil:
+				t.Errorf("checkRetained = %v, want the configured checkout accepted", err)
+			case tt.want != "" && (err == nil || err.Error() != "check the retained checkout on task-a "+tt.want):
+				t.Errorf("checkRetained = %v, want %q", err, tt.want)
+			}
+			if err != nil && (strings.Contains(err.Error(), "secret-fork") || strings.Contains(err.Error(), "fatal:")) {
+				t.Errorf("the refusal repeats remote output: %v", err)
+			}
+			if got := gitOutput(t, checkout, "status", "--porcelain", "--untracked-files=all"); got != status || gitOutput(t, checkout, "rev-parse", "HEAD") != head {
+				t.Errorf("the check changed the checkout: status %q, want %q", got, status)
+			}
+			if _, err := os.Lstat(filepath.Join(home, ".cc-remote", "orca")); tt.want == "" && !os.IsNotExist(err) {
+				t.Errorf("the check created runtime state: %v", err)
 			}
 		})
 	}

@@ -78,6 +78,8 @@ if flock -n 9; then
 fi
 grep '"type":"` + readyType + `"' serve.json | tail -n 1`
 
+const FirstUseCheck = `test ! -e "` + runtimeDir + `" && test ! -L "` + runtimeDir + `"`
+
 func (r Runtime) command() string {
 	return strings.Join(slices.Concat(
 		quoted(r.Display),

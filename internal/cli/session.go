@@ -131,6 +131,14 @@ schema 2 provisioned-root result instead.`,
 				source.Ref = session.Config.Ref
 			}
 			if connection == connectionServer {
+				unlock, err := claimTask(session.Config.State(), name)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+				if err := absentTask(session.Config.State(), name); err != nil {
+					return err
+				}
 				session.Retain = orcaRetain(session, false)
 			}
 			result, err := session.Create(cmd.Context(), name, source)
@@ -197,6 +205,14 @@ func newResumeCmd() *cobra.Command {
 				return err
 			}
 			if connection == connectionServer {
+				unlock, err := claimTask(session.Config.State(), name)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+				if _, err := loadTask(session.Config.State(), name); err != nil {
+					return err
+				}
 				session.Retain = orcaRetain(session, true)
 			}
 			result, err := session.Resume(cmd.Context(), name)
