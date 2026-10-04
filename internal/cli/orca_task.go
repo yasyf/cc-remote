@@ -79,6 +79,7 @@ type orcaLaunch struct {
 	flags      selection
 	ref, title string
 	agent      orca.Agent
+	existing   bool
 }
 
 type orcaTunnel struct {
@@ -263,34 +264,102 @@ func (l *orcaLaunch) run(cmd *cobra.Command, runner orca.Runner, name string, fi
 	if err != nil {
 		return err
 	}
-	key, err := captureKey(cmd.Context(), session.Config.Orca.Keys[l.agent.KeyProvider()])
+	return l.start(cmd.Context(), cmd.OutOrStdout(), session, runner, runtime, name, finish)
+}
+
+func (l *orcaLaunch) start(ctx context.Context, out io.Writer, session *workspace.Session, runner orca.Runner, runtime orca.Runtime, name string, finish func(context.Context, orcaDriver, *orcaTask) error) error {
+	unlock, err := claimTask(session.Config.State(), name)
 	if err != nil {
 		return err
 	}
-	defer clear(key)
+	defer unlock()
+	if err := absentTask(session.Config.State(), name); err != nil {
+		return err
+	}
 	driver := orcaDriver{client: orca.NewClient(runner), state: session.Config.State(), log: session.Log}
 	var task *orcaTask
 	session.Retain = func(ctx context.Context, record *workspace.Record) (err error) {
+		if l.existing {
+			if err := owned(ctx, session.Provider, record, name); err != nil {
+				return err
+			}
+		}
 		task, err = driver.retain(ctx, session, record, l.agent, false)
 		return err
 	}
-	result, err := session.Create(cmd.Context(), name, workspace.Source{Ref: cmp.Or(l.ref, session.Config.Ref)})
-	if err != nil {
-		return err
+	var result *workspace.Result
+	var key []byte
+	defer func() { clear(key) }()
+	if l.existing {
+		if result, err = session.Resume(ctx, name); err != nil {
+			return err
+		}
+		if err = checkRetained(ctx, session, result); err == nil {
+			key, err = captureKey(ctx, session.Config.Orca.Keys[l.agent.KeyProvider()])
+		}
+	} else {
+		if key, err = captureKey(ctx, session.Config.Orca.Keys[l.agent.KeyProvider()]); err != nil {
+			return err
+		}
+		if result, err = session.Create(ctx, name, workspace.Source{Ref: cmp.Or(l.ref, session.Config.Ref)}); err != nil {
+			return err
+		}
 	}
-	if task == nil {
+	if err == nil && task == nil {
 		task, err = driver.task(result, l.agent, session.Provider)
 	}
 	if err == nil {
-		err = driver.launch(cmd.Context(), session, task, runtime, key, cmp.Or(l.title, result.Name))
+		err = driver.launch(ctx, session, task, runtime, key, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
-		err = finish(cmd.Context(), driver, task)
+		err = finish(ctx, driver, task)
 	}
 	if task == nil {
 		return err
 	}
-	return errors.Join(err, emit(cmd.OutOrStdout(), task))
+	return errors.Join(err, emit(out, task))
+}
+
+func claimTask(dir state.Dir, name string) (func(), error) {
+	if err := state.ValidateName(name); err != nil {
+		return nil, err
+	}
+	unlock, held, err := state.TryLock(dir.Orca(name) + ".lock")
+	switch {
+	case err != nil:
+		return nil, err
+	case !held:
+		return nil, fmt.Errorf("another cc-remote command holds the Orca task for %s, so this one started and changed nothing", name)
+	}
+	return unlock, nil
+}
+
+func absentTask(dir state.Dir, name string) error {
+	found, err := state.Load(dir.Orca(name), &orcaTask{})
+	switch {
+	case err != nil:
+		return err
+	case found:
+		return fmt.Errorf("%s already has an Orca task under %s; a first launch neither resumes nor replaces it", name, dir)
+	}
+	return nil
+}
+
+func owned(ctx context.Context, provider providers.Provider, record *workspace.Record, name string) error {
+	if record.Name != name || record.Machine == "" {
+		return fmt.Errorf("the workspace record for %s names no machine of its own, so no worker starts on it", name)
+	}
+	if err := record.Source.Validate(); err != nil {
+		return fmt.Errorf("the workspace record for %s holds no valid source: %w", name, err)
+	}
+	machine, err := provider.Get(ctx, record.Machine)
+	if err != nil {
+		return fmt.Errorf("find machine %s of workspace %s: %w", record.Machine, name, err)
+	}
+	if machine.ID != record.Machine || machine.Provider != record.Provider || machine.Labels[workspace.LabelWorkspace] != name {
+		return fmt.Errorf("%s machine %s does not carry the ownership of workspace %s, so it is neither resumed nor given a worker", record.Provider, record.Machine, name)
+	}
+	return nil
 }
 
 func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
@@ -348,7 +417,12 @@ func newOrcaPrepareCmd(runner orca.Runner) *cobra.Command {
 		Long: `prepare runs create's machine, runtime, pairing, checkout, key and worker steps once, stopping when the
 worker is idle. It copies the brief file byte for byte to a private task directory on the machine, outside
 the checkout, verifies its SHA-256 and length, and records the checkout's HEAD as baseCommit. It sends the
-worker no input; Orca's worker-start delivers the first task. stdout carries the task record, prepared: true.`,
+worker no input; Orca's worker-start delivers the first task. stdout carries the task record, prepared: true.
+
+With --existing, prepare starts the first worker of a recorded workspace instead of creating one: it resumes
+the exact recorded machine and keeps its checkout as it is. It refuses a recorded Orca task, a machine without
+the workspace's ownership, a checkout or origin that differs from the config, and earlier Orca runtime state,
+and it takes no --ref.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := launch.agent.Validate(); err != nil {
@@ -356,6 +430,9 @@ worker no input; Orca's worker-start delivers the first task. stdout carries the
 			}
 			if err := launch.agent.InlineMCP(); err != nil {
 				return err
+			}
+			if launch.existing && cmd.Flags().Changed("ref") {
+				return errors.New("--existing starts the first worker on the workspace's retained checkout, so it takes no --ref")
 			}
 			brief, err := readBrief(briefFile)
 			if err != nil {
@@ -368,6 +445,7 @@ worker no input; Orca's worker-start delivers the first task. stdout carries the
 	}
 	launch.bind(cmd, "MCP servers the worker may start, inline only: for claude one JSON object per flag; for codex one TOML inline table for mcp_servers (default none)")
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
+	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start the first worker on the recorded workspace's machine and retained checkout instead of creating one")
 	_ = cmd.MarkFlagRequired("brief-file")
 	return cmd
 }

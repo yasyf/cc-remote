@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,8 +14,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/providers/providertest"
 	"github.com/yasyf/cc-remote/internal/state"
+	"github.com/yasyf/cc-remote/internal/workspace"
+	"github.com/yasyf/cc-remote/internal/workspace/workspacetest"
 )
 
 const (
@@ -281,6 +287,120 @@ func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckRetainedAcceptsOnlyTheConfiguredCheckout(t *testing.T) {
+	const repository = "https://github.com/example/app"
+	tests := []struct {
+		name string
+		root func(t *testing.T, checkout, home string) string
+		want string
+	}{
+		{"the configured checkout", func(_ *testing.T, checkout, _ string) string { return checkout }, ""},
+		{"a directory inside the checkout", func(t *testing.T, checkout, _ string) string {
+			inside := filepath.Join(checkout, "inside")
+			if err := os.Mkdir(inside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return inside
+		}, "exited 5: the configured project root is not the top level of a git checkout"},
+		{"no checkout", func(t *testing.T, _, _ string) string { return t.TempDir() }, "exited 5: the configured project root is not the top level of a git checkout"},
+		{"another origin", func(t *testing.T, checkout, _ string) string {
+			gitOutput(t, checkout, "remote", "set-url", "origin", "https://github.com/someone/secret-fork")
+			return checkout
+		}, "exited 6: the checkout's origin is not the configured repository"},
+		{"no origin", func(t *testing.T, checkout, _ string) string {
+			gitOutput(t, checkout, "remote", "remove", "origin")
+			return checkout
+		}, "exited 6: the checkout's origin is not the configured repository"},
+		{"earlier runtime state", func(t *testing.T, checkout, home string) string {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return checkout
+		}, "exited 7: the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local := workspacetest.NewLocalExec(t)
+			provider := &providertest.Fake{Handle: local.Handle}
+			if _, err := provider.Create(t.Context(), providers.Spec{Name: "task-a"}); err != nil {
+				t.Fatal(err)
+			}
+			checkout, head := gitCheckout(t)
+			gitOutput(t, checkout, "remote", "add", "origin", repository)
+			home := local.Home("task-a")
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root := tt.root(t, checkout, home)
+			status := gitOutput(t, checkout, "status", "--porcelain", "--untracked-files=all")
+			session := &workspace.Session{Config: &config.Config{Repository: repository}, Provider: provider}
+			err := checkRetained(t.Context(), session, &workspace.Result{Name: "task-a", Machine: "task-a", ProjectRoot: root})
+			switch {
+			case tt.want == "" && err != nil:
+				t.Errorf("checkRetained = %v, want the configured checkout accepted", err)
+			case tt.want != "" && (err == nil || err.Error() != "check the retained checkout on task-a "+tt.want):
+				t.Errorf("checkRetained = %v, want %q", err, tt.want)
+			}
+			if err != nil && (strings.Contains(err.Error(), "secret-fork") || strings.Contains(err.Error(), "fatal:")) {
+				t.Errorf("the refusal repeats remote output: %v", err)
+			}
+			if got := gitOutput(t, checkout, "status", "--porcelain", "--untracked-files=all"); got != status || gitOutput(t, checkout, "rev-parse", "HEAD") != head {
+				t.Errorf("the check changed the checkout: status %q, want %q", got, status)
+			}
+			if _, err := os.Lstat(filepath.Join(home, ".cc-remote", "orca")); tt.want == "" && !os.IsNotExist(err) {
+				t.Errorf("the check created runtime state: %v", err)
+			}
+		})
+	}
+}
+
+func TestTransferAndRetainedRefusalsKeepTheirOwnMeanings(t *testing.T) {
+	const withheld = "its remote output is withheld"
+	tests := []struct {
+		code     int
+		transfer string
+		retained string
+	}{
+		{3, "the task directory resolves inside the checkout", withheld},
+		{4, "the path is not a regular file directly in the recorded physical task directory", withheld},
+		{5, withheld, "the configured project root is not the top level of a git checkout"},
+		{6, withheld, "the checkout's origin is not the configured repository"},
+		{7, withheld, "the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites"},
+		{9, withheld, withheld},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.code), func(t *testing.T) {
+			provider := &providertest.Fake{Handle: func(string, []string, []byte) providers.Result {
+				return providers.Result{Stdout: []byte(secretStderr), Stderr: []byte(secretStderr), ExitCode: tt.code}
+			}}
+			if _, err := provider.Create(t.Context(), providers.Spec{Name: "task-a"}); err != nil {
+				t.Fatal(err)
+			}
+			task := &orcaTask{Workspace: "task-a", Machine: "task-a", Gateway: &orcaGateway{Instance: "task-a"}, provider: provider}
+			_, err := task.fetch(t.Context(), "read the checkout's HEAD", "exit 0", nil)
+			if want := fmt.Sprintf("read the checkout's HEAD on task-a exited %d: %s", tt.code, tt.transfer); err == nil || err.Error() != want {
+				t.Errorf("fetch = %v, want %q", err, want)
+			}
+			session := &workspace.Session{Config: &config.Config{Repository: "https://github.com/example/app"}, Provider: provider}
+			err = checkRetained(t.Context(), session, &workspace.Result{Name: "task-a", Machine: "task-a", ProjectRoot: "/workspaces/app"})
+			if want := fmt.Sprintf("check the retained checkout on task-a exited %d: %s", tt.code, tt.retained); err == nil || err.Error() != want {
+				t.Errorf("checkRetained = %v, want %q", err, want)
+			}
+		})
+	}
+	t.Run("transport failure", func(t *testing.T) {
+		provider := &providertest.Fake{}
+		task := &orcaTask{Workspace: "task-a", Machine: "gone", Gateway: &orcaGateway{Instance: "gone"}, provider: provider}
+		if _, err := task.fetch(t.Context(), "read the checkout's HEAD", "exit 0", nil); !errors.Is(err, providers.ErrNotFound) || !strings.HasPrefix(err.Error(), "read the checkout's HEAD on task-a: ") {
+			t.Errorf("fetch = %v, want the transport error", err)
+		}
+		session := &workspace.Session{Config: &config.Config{Repository: "https://github.com/example/app"}, Provider: provider}
+		if err := checkRetained(t.Context(), session, &workspace.Result{Name: "task-a", Machine: "gone", ProjectRoot: "/workspaces/app"}); !errors.Is(err, providers.ErrNotFound) || !strings.HasPrefix(err.Error(), "check the retained checkout on task-a: ") {
+			t.Errorf("checkRetained = %v, want the transport error", err)
+		}
+	})
 }
 
 type collectFixture struct {

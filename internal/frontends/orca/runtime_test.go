@@ -80,6 +80,69 @@ func TestProbeScriptReadsTheRunningRuntimeWithoutStartingOne(t *testing.T) {
 	}
 }
 
+func TestFirstUseCheckRefusesAnyEarlierRuntimeState(t *testing.T) {
+	tests := []struct {
+		name   string
+		before func(t *testing.T, home string)
+		unused bool
+	}{
+		{"a fresh home", func(*testing.T, string) {}, true},
+		{"other cc-remote state", func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, ".cc-remote", "tailscaled.state"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"an empty runtime directory", func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"a launcher", func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, ".cc-remote", "orca", "serve.sh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"an earlier brief", func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca", "tasks", "task-a"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"a dangling link", func(t *testing.T, home string) {
+			if err := os.MkdirAll(filepath.Join(home, ".cc-remote"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(home, "gone"), filepath.Join(home, ".cc-remote", "orca")); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			tt.before(t, home)
+			check := exec.Command("sh", "-c", "set -eu\n"+orca.FirstUseCheck)
+			check.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			if err := check.Run(); (err == nil) != tt.unused {
+				t.Errorf("first-use check = %v, want unused %t", err, tt.unused)
+			}
+			if _, err := os.Lstat(filepath.Join(home, ".cc-remote", "orca")); tt.unused && !os.IsNotExist(err) {
+				t.Errorf("the check created runtime state: %v", err)
+			}
+		})
+	}
+	for _, write := range []string{"mkdir", ">", "rm ", "mv ", "chmod", "serve"} {
+		if strings.Contains(orca.FirstUseCheck, write) {
+			t.Errorf("the first-use check carries %q, which could change runtime state", write)
+		}
+	}
+}
+
 func TestRuntimeLauncher(t *testing.T) {
 	runtime := orca.Runtime{
 		Entry:   ".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun",

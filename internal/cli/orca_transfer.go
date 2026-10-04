@@ -19,8 +19,10 @@ import (
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
+	"github.com/yasyf/cc-remote/internal/workspace"
 )
 
 const (
@@ -30,6 +32,9 @@ const (
 	statusLimit        = 64 << 10
 	exitInsideCheckout = 3
 	exitNotArtifact    = 4
+	exitNotCheckout    = 5
+	exitOtherOrigin    = 6
+	exitPriorRuntime   = 7
 )
 
 var (
@@ -38,6 +43,11 @@ var (
 	transferRefusals = map[int]string{
 		exitInsideCheckout: "the task directory resolves inside the checkout",
 		exitNotArtifact:    "the path is not a regular file directly in the recorded physical task directory",
+	}
+	retainedRefusals = map[int]string{
+		exitNotCheckout:  "the configured project root is not the top level of a git checkout",
+		exitOtherOrigin:  "the checkout's origin is not the configured repository",
+		exitPriorRuntime: "the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites",
 	}
 )
 
@@ -87,13 +97,29 @@ func artifactOf(name string, data []byte) orcaArtifact {
 
 func (t *orcaTask) fetch(ctx context.Context, step, script string, stdin io.Reader) ([]byte, error) {
 	result, err := t.shell(ctx, script, stdin)
+	return answered(step, t.Workspace, transferRefusals, result, err)
+}
+
+func answered(step, name string, refusals map[int]string, result providers.Result, err error) ([]byte, error) {
 	if err != nil {
-		return nil, fmt.Errorf("%s on %s: %w", step, t.Workspace, err)
+		return nil, fmt.Errorf("%s on %s: %w", step, name, err)
 	}
 	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("%s on %s exited %d: %s", step, t.Workspace, result.ExitCode, cmp.Or(transferRefusals[result.ExitCode], "its remote output is withheld"))
+		return nil, fmt.Errorf("%s on %s exited %d: %s", step, name, result.ExitCode, cmp.Or(refusals[result.ExitCode], "its remote output is withheld"))
 	}
 	return result.Stdout, nil
+}
+
+func checkRetained(ctx context.Context, session *workspace.Session, result *workspace.Result) error {
+	script := remote.Script(
+		"root="+remote.Quote(result.ProjectRoot),
+		`top=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) && test "$top" = "$(cd "$root" && pwd -P)" || exit `+fmt.Sprint(exitNotCheckout),
+		`test "$(git -C "$root" config --get remote.origin.url)" = `+remote.Quote(session.Config.Repository)+` || exit `+fmt.Sprint(exitOtherOrigin),
+		orca.FirstUseCheck+` || exit `+fmt.Sprint(exitPriorRuntime),
+	)
+	ran, err := session.Provider.Exec(ctx, result.Machine, []string{"sh", "-c", script}, nil)
+	_, err = answered("check the retained checkout", result.Name, retainedRefusals, ran, err)
+	return err
 }
 
 func readBrief(file string) ([]byte, error) {

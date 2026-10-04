@@ -2,15 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,8 +23,11 @@ import (
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
+	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
+	"github.com/yasyf/cc-remote/internal/tailnet"
 	"github.com/yasyf/cc-remote/internal/workspace"
+	"github.com/yasyf/cc-remote/internal/workspace/workspacetest"
 )
 
 type taskOrcaRunner func(context.Context, ...string) ([]byte, error)
@@ -419,6 +426,9 @@ func TestPrepareRefusesBadInputBeforeAnyEffect(t *testing.T) {
 		{"missing brief", slices.Concat(claude, []string{"--brief-file", filepath.Join(dir, "absent.md")}), "read the brief"},
 		{"valid claude reaches the config", slices.Concat(claude, []string{"--mcp-config", `{"mcpServers":{}}`, "--brief-file", brief}), "read config"},
 		{"codex fast tier reaches the config", slices.Concat(codex, []string{"--service-tier", "fast", "--mcp-config", "{}", "--brief-file", brief}), "read config"},
+		{"existing with a ref", slices.Concat(claude, []string{"--existing", "--ref", "main", "--brief-file", brief}), "takes no --ref"},
+		{"existing with an empty ref", slices.Concat(claude, []string{"--existing", "--ref=", "--brief-file", brief}), "takes no --ref"},
+		{"existing reaches the config", slices.Concat(claude, []string{"--existing", "--brief-file", brief}), "read config"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -454,6 +464,9 @@ func TestPrepareAndCreateShareTheirLaunchFlags(t *testing.T) {
 	}
 	if prepare.Flags().Lookup("prompt-file") != nil || create.Flags().Lookup("brief-file") != nil {
 		t.Error("prepare takes a prompt or create takes a brief")
+	}
+	if existing := prepare.Flags().Lookup("existing"); existing == nil || existing.DefValue != "false" || create.Flags().Lookup("existing") != nil {
+		t.Error("--existing is not a prepare-only opt-in that defaults to false")
 	}
 	collect := newOrcaCollectCmd(nil)
 	for _, name := range []string{"report-file", "patch-file", "output"} {
@@ -495,4 +508,529 @@ func TestSendRefusesAPreparedTask(t *testing.T) {
 	if loaded, err := loadTask(dir, "task-a"); err != nil || loaded.Receipts != nil || !loaded.Prepared {
 		t.Errorf("stored task = %+v, %v", loaded, err)
 	}
+}
+
+var (
+	firstAgent   = orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}
+	serveCommand = regexp.MustCompile(` serve --port (\d+) --pairing-address (?:ws://127\.0\.0\.1:(\d+)|127\.0\.0\.1) `)
+)
+
+type gate struct {
+	reached, release chan struct{}
+	once             sync.Once
+}
+
+func newGate() *gate {
+	return &gate{reached: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *gate) hold() {
+	g.once.Do(func() {
+		close(g.reached)
+		<-g.release
+	})
+}
+
+type firstWorker struct {
+	t        *testing.T
+	local    *workspacetest.LocalExec
+	provider *providertest.Fake
+	session  *workspace.Session
+	platform workspace.Platform
+	keys     string
+	root     string
+	head     string
+	gateway  bool
+	paused   *gate
+}
+
+type effects struct {
+	provider int
+	keys     string
+	task     string
+	record   string
+	ssh      int
+}
+
+func newFirstWorker(t *testing.T, compute *providers.ComputeInstance, created bool) *firstWorker {
+	t.Helper()
+	fakeRemote(t)
+	w := &firstWorker{
+		t:        t,
+		local:    workspacetest.NewLocalExec(t),
+		gateway:  compute != nil,
+		platform: workspace.Platform{Daemon: tailnet.Daemon{Mode: tailnet.Userspace, Supervisor: tailnet.Setsid}},
+	}
+	w.provider = &providertest.Fake{Compute: compute, Handle: w.handle, Now: func() time.Time { return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC) }}
+	w.session = workspacetest.Open(t, workspacetest.Harness{Provider: w.provider, Kind: "fake", Platform: w.platform, Root: w.local.Root + "/machines"})
+	dir := t.TempDir()
+	w.keys = filepath.Join(dir, "keys.log")
+	key := filepath.Join(dir, "key")
+	if err := os.WriteFile(key, []byte("#!/bin/sh\necho read >> "+remote.Quote(w.keys)+"\necho sk-test-key\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.session.Config.Orca.Keys = map[string][]string{config.KeyAnthropic: {key}}
+	w.root = w.session.ProjectRoot()
+	t.Setenv("REMOTE_HOME", w.local.Home("task-a"))
+	if created {
+		if _, err := w.session.Create(t.Context(), "task-a", workspace.Source{Ref: "main"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.session.Suspend(t.Context(), "task-a"); err != nil {
+			t.Fatal(err)
+		}
+		w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
+	}
+	return w
+}
+
+func readyAt(bound, advertised string) string {
+	return `{"type":"orca_server_ready","schemaVersion":1,"runtimeId":"rt-1","boundEndpoint":"ws://0.0.0.0:` + bound + `","advertisedEndpoint":"ws://127.0.0.1:` + advertised + `","pairing":{"available":true,"url":"orca://pair?code=private"}}`
+}
+
+func (w *firstWorker) handle(id string, cmd []string, stdin []byte) providers.Result {
+	if w.paused != nil {
+		w.paused.hold()
+	}
+	script := cmd[len(cmd)-1]
+	if serve := serveCommand.FindStringSubmatch(script); serve != nil {
+		return providers.Result{Stdout: []byte("starting\n" + readyAt(serve[1], cmp.Or(serve[2], serve[1])) + "\n")}
+	}
+	if w.gateway && (strings.Contains(script, "mkfifo") || strings.Contains(script, fakeKeyDir) || strings.Contains(script, "rev-parse --verify HEAD") || strings.Contains(script, briefName)) {
+		return viaFakeRemote(script, stdin)
+	}
+	return w.local.Handle(id, cmd, stdin)
+}
+
+func (w *firstWorker) native() (*scriptedOrca, []string) {
+	envelope := func(runtimeID, result string) string {
+		return `{"ok":true,"result":` + result + `,"_meta":{"runtimeId":"` + runtimeID + `"}}`
+	}
+	worktree := "repo-1::" + w.root
+	scope := " --environment task-a --json"
+	commands := []string{
+		"environment add --name task-a --pairing-code orca://pair?code=private --json",
+		"status" + scope,
+		"repo add --path " + w.root + scope,
+		"worktree list --repo id:repo-1" + scope,
+		"terminal create --worktree id:" + worktree + " --title task-a --command " + firstAgent.Command(fakeKeyDir) + scope,
+		"terminal read --terminal term-1 --screen" + scope,
+		"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
+	}
+	return &scriptedOrca{t: w.t, replies: map[string]string{
+		commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"task-a"}}`),
+		commands[1]: envelope("rt-1", `{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`),
+		commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+w.root+`"}}`),
+		commands[3]: envelope("rt-1", `{"worktrees":[{"id":"`+worktree+`","repoId":"repo-1","path":"`+w.root+`"}]}`),
+		commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1"}}`),
+		commands[5]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
+		commands[6]: envelope("rt-1", `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null,"blockedReason":""}}`),
+	}}, commands
+}
+
+func (w *firstWorker) booting(native *scriptedOrca, command string) (*gate, orca.Runner) {
+	paused := newGate()
+	return paused, taskOrcaRunner(func(ctx context.Context, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") == command {
+			paused.hold()
+		}
+		return native.Run(ctx, args...)
+	})
+}
+
+func (w *firstWorker) contender() *workspace.Session {
+	w.t.Helper()
+	session, err := workspace.Open(w.session.Config, w.provider, "fake", "lean", w.platform)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	session.Log = slog.New(slog.DiscardHandler)
+	return session
+}
+
+func (w *firstWorker) prepare(ctx context.Context, session *workspace.Session, runner orca.Runner, out io.Writer, name string, existing bool) error {
+	launch := orcaLaunch{agent: firstAgent, existing: existing}
+	return launch.start(ctx, out, session, runner, orca.Runtime{Entry: "tools/orca/AppRun"}, name, func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+		return driver.publish(ctx, task, []byte("Read every line.\n"))
+	})
+}
+
+func (w *firstWorker) effects() effects {
+	keys, _ := os.ReadFile(w.keys)
+	task, _ := os.ReadFile(w.session.Config.State().Orca("task-a"))
+	record, _ := os.ReadFile(w.session.Config.State().Workspace("task-a"))
+	return effects{provider: len(w.provider.Calls()), keys: string(keys), task: string(task), record: string(record), ssh: len(sshCalls(w.t))}
+}
+
+func (w *firstWorker) reach(paused *gate, done <-chan error) {
+	w.t.Helper()
+	select {
+	case <-paused.reached:
+	case err := <-done:
+		w.t.Fatalf("the first launch returned %v before its pause", err)
+	}
+}
+
+func (w *firstWorker) refusedWithoutEffects(run func(orca.Runner) error, want string) {
+	w.t.Helper()
+	before := w.effects()
+	native := 0
+	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
+		native++
+		return nil, errors.New("a refused command reached the Orca CLI")
+	})
+	done := make(chan error, 1)
+	go func() { done <- run(runner) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(time.Minute):
+		w.t.Fatal("the contender waited for the task instead of refusing")
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
+		w.t.Errorf("contender = %v, want %q", err, want)
+	}
+	if after := w.effects(); after != before || native != 0 {
+		w.t.Errorf("the refused contender changed %+v into %+v with %d Orca CLI calls", before, after, native)
+	}
+}
+
+func (w *firstWorker) free(name string) {
+	w.t.Helper()
+	unlock, held, err := state.TryLock(w.session.Config.State().Orca(name) + ".lock")
+	if err != nil || !held {
+		w.t.Fatalf("the task lock for %s is still held after its command returned: %t, %v", name, held, err)
+	}
+	unlock()
+}
+
+func (w *firstWorker) prepared(out []byte) *orcaTask {
+	w.t.Helper()
+	loaded, err := loadTask(w.session.Config.State(), "task-a")
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	if loaded.Forward != nil {
+		w.t.Cleanup(func() { _ = os.Remove(filepath.Dir(loaded.Forward.Control)) })
+	}
+	home, err := filepath.EvalSymlinks(w.local.Home("task-a"))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	want := artifactOf(home+"/.cc-remote/orca/tasks/task-a/brief.md", []byte("Read every line.\n"))
+	if !loaded.Prepared || loaded.Brief == nil || *loaded.Brief != want || loaded.BaseCommit != w.head || loaded.Terminal != "term-1" || loaded.Receipts != nil || loaded.Agent.Model != firstAgent.Model || loaded.Agent.Effort != firstAgent.Effort {
+		w.t.Errorf("prepared task = %+v, brief %+v; want %+v at %s", loaded, loaded.Brief, want, w.head)
+	}
+	var emitted orcaTask
+	if err := json.Unmarshal(out, &emitted); err != nil || emitted.BaseCommit != loaded.BaseCommit || !emitted.Prepared || emitted.Brief == nil || *emitted.Brief != want {
+		w.t.Errorf("emitted task = %s, %v", out, err)
+	}
+	stored, err := os.ReadFile(w.session.Config.State().Orca("task-a"))
+	if err != nil || bytes.Contains(stored, []byte("sk-test-key")) || bytes.Contains(out, []byte("sk-test-key")) {
+		w.t.Errorf("the key reached the task record or its output: %s, %v", stored, err)
+	}
+	return loaded
+}
+
+func TestExistingPrepareStartsTheFirstWorkerOnTheRetainedCheckout(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	if err := os.WriteFile(filepath.Join(w.root, "README"), []byte("work in progress\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.root, "notes.txt"), []byte("untracked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := gitOutput(t, w.root, "status", "--porcelain", "--untracked-files=all")
+	record := &workspace.Record{}
+	if _, err := state.Load(w.session.Config.State().Workspace("task-a"), record); err != nil {
+		t.Fatal(err)
+	}
+	machine, err := w.provider.Get(t.Context(), record.Machine)
+	if err != nil || record.Ready || record.CreatedAt.Equal(machine.CreatedAt) {
+		t.Fatalf("record %+v and machine %+v, %v: want a dormant record whose timestamp differs from the native creation time", record, machine, err)
+	}
+	calls, scripts := len(w.provider.Calls()), len(w.local.Scripts("task-a"))
+	native, commands := w.native()
+	var out bytes.Buffer
+	if err := w.prepare(t.Context(), w.session, native, &out, "task-a", true); err != nil {
+		t.Fatal(err)
+	}
+	w.prepared(out.Bytes())
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant\n%q", native.calls, commands)
+	}
+	lifecycle := w.provider.Calls()[calls:]
+	if len(lifecycle) == 0 || lifecycle[0] != "wake task-a" {
+		t.Errorf("provider calls = %q, want the recorded machine woken first", lifecycle)
+	}
+	for _, call := range lifecycle {
+		if strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") {
+			t.Errorf("an existing workspace's first worker ran %q", call)
+		}
+	}
+	for _, script := range w.local.Scripts("task-a")[scripts:] {
+		for _, refresh := range []string{"clone --quiet", "fetch --quiet", "checkout --quiet --force"} {
+			if strings.Contains(script, refresh) {
+				t.Errorf("the retained checkout was refreshed by %q", script)
+			}
+		}
+	}
+	if got := gitOutput(t, w.root, "status", "--porcelain", "--untracked-files=all"); got != status {
+		t.Errorf("checkout status = %q, want the retained %q", got, status)
+	}
+	if got := gitOutput(t, w.root, "rev-parse", "HEAD"); got != w.head {
+		t.Errorf("HEAD moved to %s from %s", got, w.head)
+	}
+	if got := sshCalls(t); !slices.Equal(got, []string{"check", "key-dir", "key-write", "head", "brief"}) {
+		t.Errorf("ssh calls = %q", got)
+	}
+	if keys, err := os.ReadFile(w.keys); err != nil || string(keys) != "read\n" {
+		t.Errorf("key reads = %q, %v; want exactly one", keys, err)
+	}
+	w.free("task-a")
+}
+
+func TestExistingPrepareHoldsTheTaskFromAdmissionThroughOutput(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	native, commands := w.native()
+	booting, runner := w.booting(native, commands[5])
+	resuming := newGate()
+	w.paused = resuming
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- w.prepare(t.Context(), w.session, runner, &out, "task-a", true) }()
+	contend := func(name, want string) {
+		t.Helper()
+		session := w.contender()
+		w.refusedWithoutEffects(func(runner orca.Runner) error {
+			return w.prepare(t.Context(), session, runner, io.Discard, name, true)
+		}, want)
+	}
+	w.reach(resuming, done)
+	if _, err := os.Stat(w.session.Config.State().Orca("task-a")); !os.IsNotExist(err) {
+		t.Fatalf("a Sprite task was recorded while its workspace resumes: %v", err)
+	}
+	contend("task-a", "another cc-remote command holds the Orca task for task-a")
+	contend("task-b", "no workspace is recorded for task-b")
+	close(resuming.release)
+	w.reach(booting, done)
+	if _, err := loadTask(w.session.Config.State(), "task-a"); err != nil {
+		t.Fatalf("no partial task was saved before the bootstrap: %v", err)
+	}
+	contend("task-a", "another cc-remote command holds the Orca task for task-a")
+	close(booting.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	w.prepared(out.Bytes())
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant one worker's\n%q", native.calls, commands)
+	}
+	contend("task-a", "task-a already has an Orca task")
+	w.free("task-a")
+}
+
+func TestCancelledExistingPrepareKeepsItsPartialTaskAndReleasesTheTask(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	native, commands := w.native()
+	booting, runner := w.booting(native, commands[5])
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- w.prepare(ctx, w.session, runner, &out, "task-a", true) }()
+	w.reach(booting, done)
+	cancel()
+	close(booting.release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("prepare = %v, want the cancellation", err)
+	}
+	loaded, err := loadTask(w.session.Config.State(), "task-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(filepath.Dir(loaded.Forward.Control)) })
+	var emitted orcaTask
+	if err := json.Unmarshal(out.Bytes(), &emitted); err != nil || emitted.Terminal != "term-1" || emitted.Prepared || loaded.Terminal != "term-1" || loaded.Prepared || loaded.Brief != nil {
+		t.Errorf("partial task = %+v, emitted %s, %v", loaded, out.Bytes(), err)
+	}
+	for _, call := range w.provider.Calls() {
+		if strings.HasPrefix(call, "destroy ") {
+			t.Errorf("a cancelled first worker removed its machine: %q", call)
+		}
+	}
+	w.free("task-a")
+	later := w.contender()
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.prepare(t.Context(), later, runner, io.Discard, "task-a", true)
+	}, "task-a already has an Orca task")
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant one terminal and no resend\n%q", native.calls, commands)
+	}
+}
+
+func TestExistingPrepareRefusesAMalformedTaskAndReleasesItsLock(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	path := w.session.Config.State().Orca("task-a")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion": 1,`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.prepare(t.Context(), w.session, runner, io.Discard, "task-a", true)
+	}, path)
+	w.free("task-a")
+}
+
+func TestExistingPrepareAdmitsOnlyTheRecordedOwnedMachine(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(t *testing.T, w *firstWorker, record *workspace.Record)
+		as   string
+		want string
+	}{
+		{"an unrecorded name", nil, "task-b", "no workspace is recorded for task-b"},
+		{"another profile", func(_ *testing.T, _ *firstWorker, record *workspace.Record) { record.Profile = "other" }, "task-a", "workspace task-a is a fake/other workspace, not fake/lean"},
+		{"an unverified create", func(_ *testing.T, _ *firstWorker, record *workspace.Record) { record.Unverified = true }, "task-a", "never confirmed"},
+		{"a record of another name", func(_ *testing.T, _ *firstWorker, record *workspace.Record) { record.Name = "task-c" }, "task-a", "names no machine of its own"},
+		{"no recorded source", func(_ *testing.T, _ *firstWorker, record *workspace.Record) { record.Source = workspace.Source{} }, "task-a", "holds no valid source"},
+		{"a missing machine", func(t *testing.T, w *firstWorker, record *workspace.Record) {
+			if err := w.provider.Destroy(t.Context(), record.Machine); err != nil {
+				t.Fatal(err)
+			}
+		}, "task-a", "find machine task-a of workspace task-a"},
+		{"a same-name replacement", func(t *testing.T, w *firstWorker, record *workspace.Record) {
+			if err := w.provider.Destroy(t.Context(), record.Machine); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.provider.Create(t.Context(), providers.Spec{Name: record.Machine}); err != nil {
+				t.Fatal(err)
+			}
+		}, "task-a", "fake machine task-a does not carry the ownership of workspace task-a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newFirstWorker(t, nil, true)
+			if tt.edit != nil {
+				path := w.session.Config.State().Workspace("task-a")
+				record := &workspace.Record{}
+				if _, err := state.Load(path, record); err != nil {
+					t.Fatal(err)
+				}
+				tt.edit(t, w, record)
+				if err := state.Save(path, record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.refusedWithoutEffects(func(runner orca.Runner) error {
+				return w.prepare(t.Context(), w.session, runner, io.Discard, tt.as, true)
+			}, tt.want)
+			if _, err := os.Stat(w.session.Config.State().Orca(tt.as)); !os.IsNotExist(err) {
+				t.Errorf("a refused workspace got an Orca task: %v", err)
+			}
+			w.free(tt.as)
+		})
+	}
+}
+
+func TestExistingPrepareRefusesAForeignCheckoutOrRuntimeBeforeTheKey(t *testing.T) {
+	kept := []byte("#!/bin/sh\necho kept\n")
+	tests := []struct {
+		name string
+		edit func(t *testing.T, w *firstWorker)
+		want string
+	}{
+		{"earlier runtime state", func(t *testing.T, w *firstWorker) {
+			dir := filepath.Join(w.local.Home("task-a"), ".cc-remote", "orca")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "serve.sh"), kept, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, "check the retained checkout on task-a exited 7: the machine already holds cc-remote Orca runtime state"},
+		{"a dangling runtime link", func(t *testing.T, w *firstWorker) {
+			dir := filepath.Join(w.local.Home("task-a"), ".cc-remote")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(dir, "orca")); err != nil {
+				t.Fatal(err)
+			}
+		}, "check the retained checkout on task-a exited 7"},
+		{"another origin", func(t *testing.T, w *firstWorker) {
+			gitOutput(t, w.root, "remote", "set-url", "origin", "https://github.com/someone/secret-fork")
+		}, "check the retained checkout on task-a exited 6: the checkout's origin is not the configured repository"},
+		{"no checkout at the root", func(t *testing.T, w *firstWorker) {
+			if err := os.RemoveAll(filepath.Join(w.root, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}, "check the retained checkout on task-a exited 5: the configured project root is not the top level of a git checkout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newFirstWorker(t, nil, true)
+			tt.edit(t, w)
+			calls := 0
+			runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
+				calls++
+				return nil, errors.New("no Orca CLI call is expected")
+			})
+			var out bytes.Buffer
+			err := w.prepare(t.Context(), w.session, runner, &out, "task-a", true)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), "secret-fork") || strings.Contains(err.Error(), "fatal:") {
+				t.Fatalf("prepare = %v, want %q without remote output", err, tt.want)
+			}
+			if _, err := os.Stat(w.keys); !os.IsNotExist(err) || calls != 0 || out.Len() != 0 {
+				t.Errorf("the refusal read the key (%v), made %d Orca CLI calls, or printed %q", err, calls, out.Bytes())
+			}
+			for _, call := range w.provider.Calls() {
+				if strings.Contains(call, "serve.sh.tmp") {
+					t.Errorf("the refusal rewrote the runtime launcher: %q", call)
+				}
+			}
+			if got := sshCalls(t); len(got) != 0 {
+				t.Errorf("ssh calls = %q, want no key pipe", got)
+			}
+			if _, err := os.Stat(w.session.Config.State().Orca("task-a")); !os.IsNotExist(err) {
+				t.Errorf("a refused first worker left a task record: %v", err)
+			}
+			if launcher := filepath.Join(w.local.Home("task-a"), ".cc-remote", "orca", "serve.sh"); tt.name == "earlier runtime state" {
+				if got, err := os.ReadFile(launcher); err != nil || !bytes.Equal(got, kept) {
+					t.Errorf("the earlier launcher = %q, %v; want it kept", got, err)
+				}
+			}
+			w.free("task-a")
+		})
+	}
+}
+
+func TestDefaultPrepareStillCreatesAFreshWorkspaceUnderTheTaskLock(t *testing.T) {
+	w := newFirstWorker(t, nil, false)
+	native, commands := w.native()
+	var out bytes.Buffer
+	if err := w.prepare(t.Context(), w.session, native, &out, "task-a", false); err != nil {
+		t.Fatal(err)
+	}
+	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
+	w.prepared(out.Bytes())
+	creates := 0
+	for _, call := range w.provider.Calls() {
+		switch {
+		case call == "create task-a":
+			creates++
+		case strings.HasPrefix(call, "wake "):
+			t.Errorf("a default prepare resumed a machine: %q", call)
+		}
+	}
+	if creates != 1 || !slices.Equal(native.calls, commands) {
+		t.Errorf("creates = %d, orca calls =\n%q\nwant one create and\n%q", creates, native.calls, commands)
+	}
+	w.free("task-a")
+	later := w.contender()
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.prepare(t.Context(), later, runner, io.Discard, "task-a", false)
+	}, "task-a already has an Orca task")
 }

@@ -164,6 +164,48 @@ TOML table for Codex, because a path names a file on this machine. It
 refuses Fable models, which run only as an explicit local choice.
 `--service-tier` is a Codex setting on both `prepare` and `create`.
 
+### Prepare the first worker on a recorded workspace
+
+`prepare --existing` starts the first worker of a workspace that
+`cc-remote create` already made, instead of creating a machine. Pass the
+workspace's recorded provider and profile:
+
+```sh
+cc-remote orca prepare task-name --existing --config .cc-remote/config.yaml \
+  --provider sprites --profile lean \
+  --agent claude --model <model> --effort <effort> --brief-file brief.md
+```
+
+The command resumes the exact recorded machine as `cc-remote resume` does and
+keeps its checkout as it is. It never clones, fetches, switches branches,
+resets, or cleans, and it records the checkout's actual HEAD as `baseCommit`.
+It takes no `--ref`. Before it reads the API key or starts the runtime, it
+refuses when:
+
+- the workspace already has an Orca task record, complete or partial
+- the recorded machine is missing or lacks the workspace's ownership label,
+  as a same-name replacement does
+- the configured project root is not the checkout's top level, or its origin
+  is not the configured repository
+- `$HOME/.cc-remote/orca` already exists on the machine
+
+The key, worker, brief, and task record then follow the ordinary `prepare`
+steps. A failure keeps the machine, any saved task record, and any started
+worker or forward as they are.
+
+Resume reinstalls tools whose stamp no longer matches the configuration. After
+such a reinstall the workspace's tools were not all preinstalled, so a
+measurement that assumes they were does not hold.
+
+`orca create`, `orca prepare`, and `create` or `resume` with
+`--connection server` each hold the workspace's task lock,
+`<state_dir>/orca/<name>.json.lock`, from before their first effect until they
+return. A second of these commands for the same name refuses at once without
+changing anything. `orca create`, `orca prepare`, and `create --connection
+server` also refuse a name that already has an Orca task record, including one
+left behind by a destroyed workspace; `resume --connection server` instead
+requires the saved task.
+
 The worker writes its report and a full binary patch beside its brief.
 `collect` copies both into a new local directory:
 
