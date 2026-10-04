@@ -1361,3 +1361,124 @@ except urllib.error.HTTPError:
 		})
 	}
 }
+
+const fakeServiceCreate = `#!/bin/sh
+echo "$(basename "$0") $*" >> "$FAKE_LOG"
+dir="${FAKE_LOG%/*}"
+case "$2" in
+  get) [ -f "$dir/services/$3" ] || exit 1; printf '{"state":{"status":"running"}}\n' ;;
+  create)
+    if [ -f "$dir/status-$3" ]; then
+      cat "$dir/body-$3"
+      echo "curl: (22) The requested URL returned error: $(cat "$dir/status-$3")" >&2
+      exit 22
+    fi
+    sleep 0.2
+    mkdir -p "$dir/services" && : > "$dir/services/$3"
+    printf '{"name":"%s","synthetic":"created"}\n' "$3"
+    ;;
+esac
+`
+
+func TestPluginsConfigureReportsFailedServiceCreates(t *testing.T) {
+	inventory := func(names ...string) Inventory {
+		inv := Inventory{Version: SchemaVersion, Configure: Configure{Run: []string{"echo unrelated configure output"}}}
+		for _, name := range names {
+			inv.Services = append(inv.Services, Service{Name: name, Command: []string{"cookiesync", "supervise"}, Ready: ".s/" + name})
+		}
+		return inv
+	}
+	configure := func(t *testing.T, h pluginsHost) (string, string, error) {
+		t.Helper()
+		writePluginTestFile(t, filepath.Join(h.fakes, "sprite-env"), []byte(fakeServiceCreate), 0o700)
+		cmd := h.command("bash", filepath.Join(h.fakes, "plugins.sh"), "configure")
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+	creates := func(h pluginsHost, name string) []string {
+		return slices.DeleteFunc(h.calls(), func(call string) bool { return !strings.HasPrefix(call, "sprite-env services create cc-remote-"+name+" ") })
+	}
+	created := func(name string) string {
+		return `{"name":"cc-remote-` + name + `","synthetic":"created"}` + "\n"
+	}
+
+	t.Run("a successful create passes its response through unchanged", func(t *testing.T) {
+		h := newPluginsHost(t, inventory("solo"), nil, fakeState{}, nil)
+		listenReady(t, h.home, ".s/solo")
+		stdout, stderr, err := configure(t, h)
+		if err != nil {
+			t.Fatalf("configure = %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		want := "sprite-env services create cc-remote-solo --cmd HOME/.cc-remote/supervise.py --args solo --duration 1ms --no-stream"
+		if got := creates(h, "solo"); !slices.Equal(got, []string{want}) {
+			t.Errorf("creates = %q, want %q", got, want)
+		}
+		if want := "unrelated configure output\n" + created("solo"); stdout != want || stderr != "" {
+			t.Errorf("stdout = %q, stderr = %q; want stdout %q and no stderr", stdout, stderr, want)
+		}
+	})
+
+	t.Run("failed creates name their service, status and bounded synthetic body and keep curl's exit", func(t *testing.T) {
+		h := newPluginsHost(t, inventory("first", "second", "third", "fourth", "fifth"), nil, fakeState{}, nil)
+		bodies := map[string]string{
+			"first": `{"error":"synthetic response body for cc-remote-first"}`,
+			"third": `{"error":"synthetic` + "\x1b[2J\n" + strings.Repeat("x", 1000) + `"}`,
+		}
+		statuses := map[string]int{"first": http.StatusInternalServerError, "third": http.StatusBadRequest}
+		for name, body := range bodies {
+			writePluginTestFile(t, filepath.Join(h.fakes, "body-cc-remote-"+name), []byte(body), 0o600)
+			writePluginTestFile(t, filepath.Join(h.fakes, "status-cc-remote-"+name), []byte(fmt.Sprint(statuses[name])), 0o600)
+		}
+		stdout, stderr, err := configure(t, h)
+		if exitCode(err) != 22 {
+			t.Fatalf("configure = %v, want curl's exit 22\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		excerpt := func(data string) string {
+			shown := []byte(data[:min(len(data), 512)])
+			for i, b := range shown {
+				if b < 0x20 || b > 0x7e {
+					shown[i] = ' '
+				}
+			}
+			return fmt.Sprintf("(%d bytes): %s", len(data), shown)
+		}
+		var reported []string
+		for line := range strings.Lines(stderr) {
+			if strings.HasPrefix(line, "cc-remote: sprite-env services create ") {
+				reported = append(reported, line)
+			}
+		}
+		var want []string
+		for _, name := range []string{"first", "third"} {
+			curl := fmt.Sprintf("curl: (22) The requested URL returned error: %d\n", statuses[name])
+			want = append(want, fmt.Sprintf("cc-remote: sprite-env services create cc-remote-%s exited 22; stderr %s; response body %s\n", name, excerpt(curl), excerpt(bodies[name])))
+		}
+		slices.Sort(reported)
+		if !slices.Equal(reported, want) {
+			t.Errorf("failure reports =\n%q\nwant\n%q", reported, want)
+		}
+		for _, leaked := range []string{"\x1b", strings.Repeat("x", 513), filepath.Join(h.home, ".cc-remote", "supervise.py"), `"synthetic":"created"`, "unrelated configure output"} {
+			if strings.Contains(stderr, leaked) {
+				t.Errorf("stderr carries %q:\n%s", leaked, stderr)
+			}
+		}
+		for _, name := range []string{"second", "fourth"} {
+			if strings.Count(stdout, created(name)) != 1 {
+				t.Errorf("stdout lacks the one response of cc-remote-%s:\n%s", name, stdout)
+			}
+			if _, err := os.Stat(filepath.Join(h.fakes, "services", "cc-remote-"+name)); err != nil {
+				t.Errorf("configure exited before the outstanding cc-remote-%s create finished: %v", name, err)
+			}
+		}
+		if strings.Count(stdout, "unrelated configure output\n") != 1 || strings.Contains(stdout, "synthetic response body") || strings.Contains(stdout, strings.Repeat("x", 1000)) {
+			t.Errorf("stdout = %q, want the unrelated output and successful responses without a failed body", stdout)
+		}
+		for name, count := range map[string]int{"first": 1, "second": 1, "third": 1, "fourth": 1, "fifth": 0} {
+			if got := len(creates(h, name)); got != count {
+				t.Errorf("cc-remote-%s was created %d times, want %d:\n%s", name, got, count, strings.Join(h.calls(), "\n"))
+			}
+		}
+	})
+}

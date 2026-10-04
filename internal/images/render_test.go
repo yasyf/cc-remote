@@ -714,6 +714,25 @@ ENV PATH=/home/agent/.local/bin:${PATH}
 }
 
 func TestNoPayloadRendersMatchPinnedTemplates(t *testing.T) {
+	const serviceCreate = `excerpt() {
+  printf '(%s bytes): ' "$(wc -c < "$1")"
+  head -c 512 "$1" | LC_ALL=C tr -c '[:print:]' ' '
+}
+
+create_service() {
+  local name="$1" out err status
+  shift
+  out="$(mktemp "$tmp_dir/service.XXXXXX")"
+  err="$(mktemp "$tmp_dir/service.XXXXXX")"
+  if sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
+    cat "$out"
+    cat "$err" >&2
+  else
+    status=$?
+    printf 'cc-remote: sprite-env services create cc-remote-%s exited %s; stderr %s; response body %s\n' "$name" "$status" "$(excerpt "$err")" "$(excerpt "$out")" >&2
+    return "$status"
+  fi
+}`
 	before := os.DirFS("testdata/ddfe484")
 	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
 	for name, inv := range map[string]Inventory{"full": validInventory(), "bare": {Version: SchemaVersion}} {
@@ -738,13 +757,15 @@ func TestNoPayloadRendersMatchPinnedTemplates(t *testing.T) {
 				want = []byte(strings.NewReplacer(
 					"prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)", "prerequisites=(ca-certificates curl git jq openssl python3 unzip xz-utils)",
 					"for bin in curl git jq python3 unzip xz; do", "for bin in curl git jq openssl python3 unzip xz; do",
+					"\nstart_services() {\n", "\n"+serviceCreate+"\n\nstart_services() {\n",
+					`queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream`, `queue_artifact create_service "$name" "${needs[@]}"`,
 				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite and the service create report for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})

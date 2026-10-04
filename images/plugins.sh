@@ -583,6 +583,26 @@ write_supervisor() {
   mv "$state_dir/start.sh.tmp" "$state_dir/start.sh"
 }
 
+excerpt() {
+  printf '(%s bytes): ' "$(wc -c < "$1")"
+  head -c 512 "$1" | LC_ALL=C tr -c '[:print:]' ' '
+}
+
+create_service() {
+  local name="$1" out err status
+  shift
+  out="$(mktemp "$tmp_dir/service.XXXXXX")"
+  err="$(mktemp "$tmp_dir/service.XXXXXX")"
+  if sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
+    cat "$out"
+    cat "$err" >&2
+  else
+    status=$?
+    printf 'cc-remote: sprite-env services create cc-remote-%s exited %s; stderr %s; response body %s\n' "$name" "$status" "$(excerpt "$err")" "$(excerpt "$out")" >&2
+    return "$status"
+  fi
+}
+
 start_services() {
   local name
   local -a needs=()
@@ -592,7 +612,7 @@ start_services() {
     fi
     for name in "$@"; do
       if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
-        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream
+        queue_artifact create_service "$name" "${needs[@]}"
       fi
     done
     drain_artifacts
