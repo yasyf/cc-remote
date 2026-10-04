@@ -387,7 +387,9 @@ func TestExistingComputePrepareStartsItsKeeperEarlyUnderTheHeldTask(t *testing.T
 	if starts.Load() != 1 || !slices.Equal(native.calls, commands) {
 		t.Errorf("keeper starts = %d, orca calls =\n%q\nwant one keeper and\n%q", starts.Load(), native.calls, commands)
 	}
-	if lifecycle := w.provider.Calls()[calls:]; len(lifecycle) == 0 || lifecycle[0] != "wake task-a" || slices.ContainsFunc(lifecycle, func(call string) bool { return strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") }) {
+	if lifecycle := w.provider.Calls()[calls:]; len(lifecycle) == 0 || lifecycle[0] != "wake task-a" || slices.ContainsFunc(lifecycle, func(call string) bool {
+		return strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ")
+	}) {
 		t.Errorf("provider calls = %q, want the recorded instance woken and nothing created or destroyed", lifecycle)
 	}
 	w.free("task-a")
