@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -256,7 +257,9 @@ func (h HookReview) probe(ctx context.Context) (HookProbe, error) {
 	if err != nil {
 		return HookProbe{}, err
 	}
+	started := time.Now()
 	out, err := h.Exec(ctx, []string{"python3", "-c", HookProbeScript, pin.ID, pin.Version})
+	observe(ctx, "hooks.probe", started, err)
 	if err != nil {
 		return HookProbe{}, fmt.Errorf("probe the worker's Codex hooks: %w", err)
 	}
@@ -571,7 +574,9 @@ func (r Remote) move(ctx context.Context, handle string, p Poll, rows *hookRows,
 	return next, nil
 }
 
-func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, review HookReview, p Poll) error {
+func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, review HookReview, p Poll) (err error) {
+	started, downs, ups := time.Now(), 0, 0
+	defer func() { observe(ctx, "hooks.review", started, err, "downs", downs, "ups", ups) }()
 	if pending != len(captainHookEvents) {
 		return fmt.Errorf("the hook review prompt counts %d new hooks, not the %d accepted Captain Hook handlers", pending, len(captainHookEvents))
 	}
@@ -594,7 +599,6 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 	if err := rows.add(view, pending); err != nil {
 		return err
 	}
-	downs := 0
 	for view.below {
 		if downs == len(browserEvents)-1 {
 			return errors.New("the hooks browser lists more rows than the supported events")
@@ -611,6 +615,7 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 		if view, err = r.move(ctx, handle, p, &rows, view, KeyUp, -1, pending); err != nil {
 			return err
 		}
+		ups++
 	}
 	if view.selected != first || view.above || view.rows[0].Event != first {
 		return errors.New("the hooks browser did not return to its first row")

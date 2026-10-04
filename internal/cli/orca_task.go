@@ -595,6 +595,10 @@ func (d orcaDriver) save(task *orcaTask) error {
 	return state.Save(d.state.Orca(task.Workspace), task)
 }
 
+func (d orcaDriver) observe(operation string, started time.Time, err error) {
+	d.log.Info("timing", "operation", operation, "seconds", time.Since(started).Seconds(), "ok", err == nil)
+}
+
 func (d orcaDriver) retain(ctx context.Context, session *workspace.Session, record *workspace.Record, agent orca.Agent, resumed bool) (*orcaTask, error) {
 	if record.Compute == nil {
 		return nil, nil
@@ -666,7 +670,9 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 		return err
 	}
 	d.log.Info("started the worker", "terminal", task.Terminal, "agent", task.Agent.Kind, "model", task.Agent.Model)
+	started := time.Now()
 	startup, err := orcaStartup(session, task)
+	d.observe("startup.config", started, err)
 	if err != nil {
 		return err
 	}

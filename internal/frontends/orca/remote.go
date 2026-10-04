@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -185,7 +186,9 @@ func (r Remote) CreateTerminal(ctx context.Context, worktreeID, title, command s
 	return result.Terminal, nil
 }
 
-func (r Remote) Screen(ctx context.Context, handle string) (Screen, error) {
+func (r Remote) Screen(ctx context.Context, handle string) (_ Screen, err error) {
+	started := time.Now()
+	defer func() { observe(ctx, "remote.screen", started, err) }()
 	result, err := scoped[struct {
 		Terminal Screen `json:"terminal"`
 	}](ctx, r, "orca terminal read", "terminal", "read", "--terminal", handle, "--screen")
@@ -201,7 +204,9 @@ func (r Remote) Screen(ctx context.Context, handle string) (Screen, error) {
 	return result.Terminal, nil
 }
 
-func (r Remote) WaitIdle(ctx context.Context, handle string, timeout time.Duration) (TerminalWait, error) {
+func (r Remote) WaitIdle(ctx context.Context, handle string, timeout time.Duration) (_ TerminalWait, err error) {
+	started := time.Now()
+	defer func() { observe(ctx, "remote.waitIdle", started, err) }()
 	result, err := scoped[struct {
 		Wait TerminalWait `json:"wait"`
 	}](ctx, r, "orca terminal wait", "terminal", "wait", "--terminal", handle, "--for", tuiIdle, "--timeout-ms", strconv.FormatInt(timeout.Milliseconds(), 10))
@@ -221,11 +226,17 @@ func (r Remote) WaitIdle(ctx context.Context, handle string, timeout time.Durati
 }
 
 func (r Remote) Key(ctx context.Context, handle, text string) error {
-	return r.input(ctx, handle, "--text", text)
+	started := time.Now()
+	err := r.input(ctx, handle, "--text", text)
+	observe(ctx, "remote.key", started, err)
+	return err
 }
 
 func (r Remote) Enter(ctx context.Context, handle string) error {
-	return r.input(ctx, handle, "--enter")
+	started := time.Now()
+	err := r.input(ctx, handle, "--enter")
+	observe(ctx, "remote.enter", started, err)
+	return err
 }
 
 func (r Remote) input(ctx context.Context, handle string, args ...string) error {
@@ -315,3 +326,7 @@ func decode[T any](out []byte, label, runtimeID string) (T, error) {
 }
 
 func screenText(tail []string) string { return strings.Join(tail, "\n") }
+
+func observe(ctx context.Context, operation string, started time.Time, err error, attrs ...any) {
+	slog.InfoContext(ctx, "timing", append([]any{"operation", operation, "seconds", time.Since(started).Seconds(), "ok", err == nil}, attrs...)...)
+}

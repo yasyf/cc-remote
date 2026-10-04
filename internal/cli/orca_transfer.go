@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/remote"
@@ -107,7 +108,9 @@ func readBrief(file string) ([]byte, error) {
 }
 
 func (d orcaDriver) publish(ctx context.Context, task *orcaTask, brief []byte) error {
+	started := time.Now()
 	base, err := task.head(ctx)
+	d.observe("task.head", started, err)
 	if err != nil {
 		return err
 	}
@@ -115,7 +118,10 @@ func (d orcaDriver) publish(ctx context.Context, task *orcaTask, brief []byte) e
 	if err := d.save(task); err != nil {
 		return err
 	}
-	if task.Brief, err = task.sendBrief(ctx, brief); err != nil {
+	started = time.Now()
+	task.Brief, err = task.sendBrief(ctx, brief)
+	d.observe("task.sendBrief", started, err)
+	if err != nil {
 		return err
 	}
 	task.Prepared = true

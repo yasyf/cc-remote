@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
@@ -288,31 +289,50 @@ func (s stallingOrca) Run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 func TestCodexReviewWalksEveryRowResetsAndTrustsOnce(t *testing.T) {
-	screens, downs := walk(t, walkOptions{rows: acceptedRows, window: 8, pending: 5})
-	fake := codexFake(t).on(readScreen, historyLost(t, promptScreen(5, "")))
-	for _, screen := range screens {
-		fake.on(readScreen, screen)
-	}
-	fake.on(readScreen, historyLost(t, trustedScreen(acceptedRows, 8)))
-	probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
-	steps, err := runCodex(t, fake, probe.review(captainPins), bootstrapPoll)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(steps, []string{"hooks"}) || probe.calls != 1 || downs != 11 {
-		t.Fatalf("steps %v, probes %d, downs %d", steps, probe.calls, downs)
-	}
-	assertSent(t, fake, map[string]int{sendEnter: 1, sendDown: downs, sendUp: downs, sendTrust: 1, sendEscape: 1, waitIdle: 1})
-	enter, firstDown, lastDown, firstUp, lastUp := position(fake, sendEnter, 0), position(fake, sendDown, 0), lastPosition(fake, sendDown), position(fake, sendUp, 0), lastPosition(fake, sendUp)
-	trust, escape, idle := position(fake, sendTrust, 0), position(fake, sendEscape, 0), position(fake, waitIdle, 0)
-	if enter >= firstDown || lastDown >= firstUp || lastUp >= trust || trust >= escape || escape >= idle {
-		t.Errorf("order enter %d, downs %d-%d, ups %d-%d, trust %d, escape %d, idle %d", enter, firstDown, lastDown, firstUp, lastUp, trust, escape, idle)
-	}
-	for i := range downs {
-		if position(fake, readScreen, 2+i) > position(fake, sendDown, i+1) && i+1 < downs {
-			t.Errorf("down %d was sent before the previous move was observed", i+1)
+	synctest.Test(t, func(t *testing.T) {
+		logs := recordTimings(t)
+		screens, downs := walk(t, walkOptions{rows: acceptedRows, window: 8, pending: 5})
+		fake := codexFake(t).on(readScreen, historyLost(t, promptScreen(5, "")))
+		for _, screen := range screens {
+			fake.on(readScreen, screen)
 		}
-	}
+		fake.on(readScreen, historyLost(t, trustedScreen(acceptedRows, 8)))
+		probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+		review := probe.review(captainPins)
+		exec := review.Exec
+		review.Exec = func(ctx context.Context, argv []string) ([]byte, error) {
+			time.Sleep(500 * time.Millisecond)
+			return exec(ctx, argv)
+		}
+		steps, err := runCodex(t, fake, review, bootstrapPoll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(steps, []string{"hooks"}) || probe.calls != 1 || downs != 11 {
+			t.Fatalf("steps %v, probes %d, downs %d", steps, probe.calls, downs)
+		}
+		assertSent(t, fake, map[string]int{sendEnter: 1, sendDown: downs, sendUp: downs, sendTrust: 1, sendEscape: 1, waitIdle: 1})
+		enter, firstDown, lastDown, firstUp, lastUp := position(fake, sendEnter, 0), position(fake, sendDown, 0), lastPosition(fake, sendDown), position(fake, sendUp, 0), lastPosition(fake, sendUp)
+		trust, escape, idle := position(fake, sendTrust, 0), position(fake, sendEscape, 0), position(fake, waitIdle, 0)
+		if enter >= firstDown || lastDown >= firstUp || lastUp >= trust || trust >= escape || escape >= idle {
+			t.Errorf("order enter %d, downs %d-%d, ups %d-%d, trust %d, escape %d, idle %d", enter, firstDown, lastDown, firstUp, lastUp, trust, escape, idle)
+		}
+		for i := range downs {
+			if position(fake, readScreen, 2+i) > position(fake, sendDown, i+1) && i+1 < downs {
+				t.Errorf("down %d was sent before the previous move was observed", i+1)
+			}
+		}
+		read, key := "remote.screen ok=true seconds=0", "remote.key ok=true seconds=0"
+		want := slices.Concat(
+			[]string{read, "hooks.probe ok=true seconds=0.5", "remote.enter ok=true seconds=0", read},
+			slices.Repeat([]string{key, read}, 2*downs),
+			[]string{key, read, key, "remote.waitIdle ok=true seconds=0"},
+			[]string{fmt.Sprintf("hooks.review downs=%d ok=true seconds=0.5 ups=%d", downs, downs), "bootstrap ok=true seconds=0.5 steps=1"},
+		)
+		if got := timings(t, logs, probeHome, probeDigest, captainPins[0].ID, captainPins[0].Version, "PreToolUse"); !slices.Equal(got, want) {
+			t.Errorf("timings =\n%q\nwant\n%q", got, want)
+		}
+	})
 }
 
 func TestCodexReviewDeduplicatesOverlappingViews(t *testing.T) {
@@ -332,17 +352,24 @@ func TestCodexReviewDeduplicatesOverlappingViews(t *testing.T) {
 }
 
 func TestCodexAlreadyTrustedSessionSendsNoTrustInput(t *testing.T) {
-	fake := codexFake(t).on(readScreen, historyLost(t, append(slices.Clone(codexBanner), "  › Ask Codex anything")))
-	probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
-	steps, err := runCodex(t, fake, probe.review(captainPins), bootstrapPoll)
-	if err != nil || len(steps) != 0 || probe.calls != 0 || fake.called(waitIdle) != 1 {
-		t.Fatalf("steps %v, err %v, probes %d", steps, err, probe.calls)
-	}
-	for _, command := range []string{sendEnter, sendDown, sendUp, sendTrust, sendEscape} {
-		if fake.called(command) != 0 {
-			t.Errorf("an already trusted session sent %q", command)
+	synctest.Test(t, func(t *testing.T) {
+		logs := recordTimings(t)
+		fake := codexFake(t).on(readScreen, historyLost(t, append(slices.Clone(codexBanner), "  › Ask Codex anything")))
+		probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+		steps, err := runCodex(t, fake, probe.review(captainPins), bootstrapPoll)
+		if err != nil || len(steps) != 0 || probe.calls != 0 || fake.called(waitIdle) != 1 {
+			t.Fatalf("steps %v, err %v, probes %d", steps, err, probe.calls)
 		}
-	}
+		for _, command := range []string{sendEnter, sendDown, sendUp, sendTrust, sendEscape} {
+			if fake.called(command) != 0 {
+				t.Errorf("an already trusted session sent %q", command)
+			}
+		}
+		want := []string{"remote.screen ok=true seconds=0", "remote.waitIdle ok=true seconds=0", "bootstrap ok=true seconds=0 steps=0"}
+		if got := timings(t, logs); !slices.Equal(got, want) {
+			t.Errorf("timings = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestCodexReviewStartsAfterTheIdleWaitReportsThePrompt(t *testing.T) {
@@ -532,25 +559,43 @@ func TestCodexReviewRefusesBeforeAnyInput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := codexFake(t).on(readScreen, tt.screen)
-			probe := &probeRecorder{t: t, fake: fake, out: tt.probe}
-			var review orca.HookReview
-			if tt.captain == nil {
-				review = orca.HookReview{Exec: func(context.Context, []string) ([]byte, error) {
-					probe.calls++
-					return []byte(tt.probe), nil
-				}}
-			} else {
-				review = probe.review(tt.captain)
-			}
-			_, err := runCodex(t, fake, review, refusalPoll)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
-			}
-			if probe.calls != tt.probes || fake.called(sendEnter) != 0 {
-				t.Errorf("probes %d (want %d), Enter %d", probe.calls, tt.probes, fake.called(sendEnter))
-			}
-			assertNoTrust(t, fake)
+			synctest.Test(t, func(t *testing.T) {
+				logs := recordTimings(t)
+				fake := codexFake(t).on(readScreen, tt.screen)
+				probe := &probeRecorder{t: t, fake: fake, out: tt.probe}
+				var review orca.HookReview
+				if tt.captain == nil {
+					review = orca.HookReview{Exec: func(context.Context, []string) ([]byte, error) {
+						probe.calls++
+						return []byte(tt.probe), nil
+					}}
+				} else {
+					review = probe.review(tt.captain)
+				}
+				_, err := runCodex(t, fake, review, refusalPoll)
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
+				}
+				if probe.calls != tt.probes || fake.called(sendEnter) != 0 {
+					t.Errorf("probes %d (want %d), Enter %d", probe.calls, tt.probes, fake.called(sendEnter))
+				}
+				assertNoTrust(t, fake)
+				got := timings(t, logs, probeHome, probeDigest, captainPins[0].ID, captainPins[0].Version, "/home/sprite", "mismatch", "Stop")
+				probes, reviews := 0, 0
+				for _, line := range got {
+					switch {
+					case line == "hooks.probe ok=true seconds=0":
+						probes++
+					case line == "hooks.review downs=0 ok=false seconds=0 ups=0":
+						reviews++
+					case strings.HasPrefix(line, "hooks."), strings.HasPrefix(line, "remote.key"), strings.HasPrefix(line, "remote.enter"):
+						t.Errorf("a refused review recorded %q", line)
+					}
+				}
+				if probes != tt.probes || reviews > 1 || probes > reviews || len(got) == 0 || got[len(got)-1] != "bootstrap ok=false seconds=0 steps=0" {
+					t.Errorf("timings = %q, want %d probes and a refused bootstrap", got, tt.probes)
+				}
+			})
 		})
 	}
 }
@@ -623,39 +668,47 @@ func TestCodexReviewRefusesIncompleteOrChangedBrowsers(t *testing.T) {
 func TestCodexReviewStopsOnStuckOrUnverifiedMovement(t *testing.T) {
 	screens, downs := walk(t, walkOptions{rows: acceptedRows, window: 8, pending: 5})
 	tests := []struct {
-		name  string
-		edit  func(*fakeOrca, []string) []string
-		want  string
-		downs int
-		ups   int
+		name   string
+		edit   func(*fakeOrca, []string) []string
+		want   string
+		downs  int
+		ups    int
+		review string
 	}{
-		{"stuck down", func(_ *fakeOrca, s []string) []string { return []string{s[0], s[0]} }, "selection never moved from PreToolUse", 1, 0},
-		{"skipped row", func(_ *fakeOrca, s []string) []string { return append([]string{s[0]}, s[2:]...) }, "moved from PreToolUse to PostToolUse, not one row", 1, 0},
-		{"stuck reset", func(_ *fakeOrca, s []string) []string { return append(slices.Clone(s[:downs+1]), s[downs]) }, "selection never moved from Interrupt", downs, 1},
+		{"stuck down", func(_ *fakeOrca, s []string) []string { return []string{s[0], s[0]} }, "selection never moved from PreToolUse", 1, 0, "hooks.review downs=0 ok=false seconds=1 ups=0"},
+		{"skipped row", func(_ *fakeOrca, s []string) []string { return append([]string{s[0]}, s[2:]...) }, "moved from PreToolUse to PostToolUse, not one row", 1, 0, "hooks.review downs=0 ok=false seconds=0 ups=0"},
+		{"stuck reset", func(_ *fakeOrca, s []string) []string { return append(slices.Clone(s[:downs+1]), s[downs]) }, "selection never moved from Interrupt", downs, 1, fmt.Sprintf("hooks.review downs=%d ok=false seconds=1 ups=0", downs)},
 		{"reset jumps", func(_ *fakeOrca, s []string) []string {
 			return append(slices.Clone(s[:downs+1]), historyLost(t, browserScreen(acceptedRows, 3, 8, 8, 5, false)))
-		}, "moved from Interrupt to SubagentStart, not one row", downs, 1},
+		}, "moved from Interrupt to SubagentStart, not one row", downs, 1, fmt.Sprintf("hooks.review downs=%d ok=false seconds=0 ups=0", downs)},
 		{"ambiguous reset", func(f *fakeOrca, s []string) []string {
 			f.replies[sendUp] = nil
 			f.fail(sendUp, "", errors.New("connection reset"))
 			return s
-		}, "connection reset", downs, 1},
+		}, "connection reset", downs, 1, fmt.Sprintf("hooks.review downs=%d ok=false seconds=0 ups=0", downs)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fake := codexFake(t).on(readScreen, historyLost(t, promptScreen(5, "")))
-			for _, screen := range tt.edit(fake, slices.Clone(screens)) {
-				fake.on(readScreen, screen)
-			}
-			probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
-			_, err := runCodex(t, fake, probe.review(captainPins), refusalPoll)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
-			}
-			if fake.called(sendDown) != tt.downs || fake.called(sendUp) != tt.ups {
-				t.Errorf("downs %d (want %d), ups %d (want %d)", fake.called(sendDown), tt.downs, fake.called(sendUp), tt.ups)
-			}
-			assertNoTrust(t, fake)
+			synctest.Test(t, func(t *testing.T) {
+				logs := recordTimings(t)
+				fake := codexFake(t).on(readScreen, historyLost(t, promptScreen(5, "")))
+				for _, screen := range tt.edit(fake, slices.Clone(screens)) {
+					fake.on(readScreen, screen)
+				}
+				probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+				_, err := runCodex(t, fake, probe.review(captainPins), refusalPoll)
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
+				}
+				if fake.called(sendDown) != tt.downs || fake.called(sendUp) != tt.ups {
+					t.Errorf("downs %d (want %d), ups %d (want %d)", fake.called(sendDown), tt.downs, fake.called(sendUp), tt.ups)
+				}
+				assertNoTrust(t, fake)
+				reviews := slices.DeleteFunc(timings(t, logs, "connection reset", "Interrupt"), func(line string) bool { return !strings.HasPrefix(line, "hooks.review ") })
+				if !slices.Equal(reviews, []string{tt.review}) {
+					t.Errorf("review timings = %q, want %q", reviews, tt.review)
+				}
+			})
 		})
 	}
 }
@@ -822,45 +875,56 @@ func TestCodexReviewStaysWithinThePollTimeout(t *testing.T) {
 		name    string
 		command string
 		sent    map[string]int
+		stalled string
+		downs   int
+		ups     int
 	}{
-		{"probe", "", map[string]int{sendEnter: 0}},
-		{"Enter", sendEnter, map[string]int{sendEnter: 1, sendDown: 0}},
-		{"Down", sendDown, map[string]int{sendDown: 1, sendUp: 0}},
-		{"Up", sendUp, map[string]int{sendDown: downs, sendUp: 1, sendTrust: 0}},
-		{"trust", sendTrust, map[string]int{sendTrust: 1, sendEscape: 0}},
-		{"Escape", sendEscape, map[string]int{sendEscape: 1, waitIdle: 0}},
-		{"idle wait", waitIdle, map[string]int{sendTrust: 1, sendEscape: 1, waitIdle: 1}},
+		{"probe", "", map[string]int{sendEnter: 0}, "hooks.probe", 0, 0},
+		{"Enter", sendEnter, map[string]int{sendEnter: 1, sendDown: 0}, "remote.enter", 0, 0},
+		{"Down", sendDown, map[string]int{sendDown: 1, sendUp: 0}, "remote.key", 0, 0},
+		{"Up", sendUp, map[string]int{sendDown: downs, sendUp: 1, sendTrust: 0}, "remote.key", downs, 0},
+		{"trust", sendTrust, map[string]int{sendTrust: 1, sendEscape: 0}, "remote.key", downs, downs},
+		{"Escape", sendEscape, map[string]int{sendEscape: 1, waitIdle: 0}, "remote.key", downs, downs},
+		{"idle wait", waitIdle, map[string]int{sendTrust: 1, sendEscape: 1, waitIdle: 1}, "remote.waitIdle", downs, downs},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-			defer cancel()
-			wait := &stall{t: t, budget: short.Timeout}
-			fake := codexFake(t)
-			for _, screen := range reads {
-				fake.on(readScreen, screen)
-			}
-			probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
-			review := probe.review(captainPins)
-			exec := review.Exec
-			var probed time.Time
-			review.Exec = func(ctx context.Context, argv []string) ([]byte, error) {
-				probed, _ = ctx.Deadline()
-				if tt.command == "" {
-					probe.calls++
-					return nil, wait.until(ctx)
+			synctest.Test(t, func(t *testing.T) {
+				logs := recordTimings(t)
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
+				wait := &stall{t: t, budget: short.Timeout}
+				fake := codexFake(t)
+				for _, screen := range reads {
+					fake.on(readScreen, screen)
 				}
-				return exec(ctx, argv)
-			}
-			runner := stallingOrca{fake: fake, stall: wait, command: tt.command}
-			steps, err := orca.NewClient(runner).On(env, runtimeID).Bootstrap(ctx, "term-1", orca.CodexStartup(review), false, short)
-			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || slices.Contains(steps, "hooks") {
-				t.Fatalf("Bootstrap = %v, %v, want the review's own deadline", steps, err)
-			}
-			if probe.calls != 1 || !wait.deadline.Equal(probed) {
-				t.Errorf("probes %d; the stalled call ran until %v, not the review's deadline %v", probe.calls, wait.deadline, probed)
-			}
-			assertSent(t, fake, tt.sent)
+				probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+				review := probe.review(captainPins)
+				exec := review.Exec
+				var probed time.Time
+				review.Exec = func(ctx context.Context, argv []string) ([]byte, error) {
+					probed, _ = ctx.Deadline()
+					if tt.command == "" {
+						probe.calls++
+						return nil, wait.until(ctx)
+					}
+					return exec(ctx, argv)
+				}
+				runner := stallingOrca{fake: fake, stall: wait, command: tt.command}
+				steps, err := orca.NewClient(runner).On(env, runtimeID).Bootstrap(ctx, "term-1", orca.CodexStartup(review), false, short)
+				if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || slices.Contains(steps, "hooks") {
+					t.Fatalf("Bootstrap = %v, %v, want the review's own deadline", steps, err)
+				}
+				if probe.calls != 1 || !wait.deadline.Equal(probed) {
+					t.Errorf("probes %d; the stalled call ran until %v, not the review's deadline %v", probe.calls, wait.deadline, probed)
+				}
+				assertSent(t, fake, tt.sent)
+				got := timings(t, logs, "deadline", "term-1")
+				stalled, reviewed := tt.stalled+" ok=false seconds=0.5", fmt.Sprintf("hooks.review downs=%d ok=false seconds=0.5 ups=%d", tt.downs, tt.ups)
+				if !slices.Contains(got, stalled) || len(got) < 2 || !slices.Equal(got[len(got)-2:], []string{reviewed, "bootstrap ok=false seconds=0.5 steps=0"}) {
+					t.Errorf("timings = %q, want %q, %q and a failed bootstrap", got, stalled, reviewed)
+				}
+			})
 		})
 	}
 }

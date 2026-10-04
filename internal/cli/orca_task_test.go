@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -273,12 +274,13 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 		want    string
 		orca    int
 		ssh     []string
+		timings []string
 	}{
-		{name: "prepare", runtime: "rt-1", idle: true, orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}},
-		{name: "create", create: true, runtime: "rt-1", idle: true, orca: 8, ssh: []string{"check", "key-dir", "key-write"}},
-		{name: "busy worker", runtime: "rt-1", want: "was not tui-idle", orca: 7, ssh: []string{"check", "key-dir", "key-write"}},
+		{name: "prepare", runtime: "rt-1", idle: true, orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}, timings: []string{"startup.config ok=true", "task.head ok=true", "task.sendBrief ok=true"}},
+		{name: "create", create: true, runtime: "rt-1", idle: true, orca: 8, ssh: []string{"check", "key-dir", "key-write"}, timings: []string{"startup.config ok=true"}},
+		{name: "busy worker", runtime: "rt-1", want: "was not tui-idle", orca: 7, ssh: []string{"check", "key-dir", "key-write"}, timings: []string{"startup.config ok=true"}},
 		{name: "other runtime", runtime: "rt-2", want: `answered from runtime "rt-2", not rt-1`, orca: 2, ssh: []string{"check"}},
-		{name: "unverified brief", runtime: "rt-1", idle: true, corrupt: true, want: "not the brief's", orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}},
+		{name: "unverified brief", runtime: "rt-1", idle: true, corrupt: true, want: "not the brief's", orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}, timings: []string{"startup.config ok=true", "task.head ok=true", "task.sendBrief ok=false"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -320,7 +322,8 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				commands[6]: envelope("rt-1", fmt.Sprintf(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":%t,"status":"running","exitCode":null,"blockedReason":"busy"}}`, tt.idle)),
 				commands[7]: envelope("rt-1", `{"send":{"handle":"term-1","accepted":true,"prompt":{"requestId":"req-1","stages":["input_accepted","turn_started"],"provider":"claude","processIncarnation":"p1"}}}`),
 			}}
-			session := &workspace.Session{Config: &config.Config{}, Provider: provider, Log: slog.New(slog.DiscardHandler)}
+			var logs bytes.Buffer
+			session := &workspace.Session{Config: &config.Config{}, Provider: provider, Log: slog.New(slog.NewJSONHandler(&logs, nil))}
 			driver := orcaDriver{client: orca.NewClient(fake), state: state.Dir(t.TempDir()), log: session.Log}
 			task := &orcaTask{
 				SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "fake", Profile: "lean", Machine: "task-a", ProjectRoot: root,
@@ -346,6 +349,9 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 			}
 			if got := sshCalls(t); !slices.Equal(got, tt.ssh) {
 				t.Errorf("ssh calls = %q, want %q", got, tt.ssh)
+			}
+			if got := timingRecords(t, &logs, "sk-test-key", "private", "pwned", "claude", "term-1", root, head); !slices.Equal(got, tt.timings) {
+				t.Errorf("timings = %q, want %q", got, tt.timings)
 			}
 			loaded, err := loadTask(driver.state, "task-a")
 			if err != nil || loaded.RuntimeID != "rt-1" || loaded.Agent.Model != agent.Model || loaded.Agent.Effort != agent.Effort || !slices.Equal(loaded.Agent.MCP, agent.MCP) {
