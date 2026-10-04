@@ -197,11 +197,119 @@ Resume reinstalls tools whose stamp no longer matches the configuration. After
 such a reinstall the workspace's tools were not all preinstalled, so a
 measurement that assumes they were does not hold.
 
+### Prepare a worker from the warm pool
+
+`prepare --warm` keeps unused agent-only Sprites ready and starts each worker
+on one of them, so a lane skips machine creation and tool installation. The
+name is the lane the worker is for, not a machine name:
+
+```sh
+cc-remote orca prepare lane-name --warm --config .cc-remote/config.yaml \
+  --ref main --agent claude --model <model> --effort <effort> \
+  --brief-file brief.md
+```
+
+The pool needs the `sprites` provider and an agent-only profile: no `prepare`
+steps and a shallow checkout. The command refuses any other provider or
+profile before it changes anything. `--warm` and `--existing` exclude each
+other, and `--existing` keeps its retained checkout and its refusal of `--ref`.
+
+The command claims the oldest unused workspace in the pool. A candidate has to
+pass checks that read state without touching its machine:
+
+- its record under `<state_dir>/pool/` says `ready` and carries the current
+  compatibility key, a hash of the repository, provider, profile, project root,
+  checkout mode, rendered tools stamp, image, tailnet tag, and prepare steps
+- no other command holds its task lock, and no Orca task is recorded for it
+- its workspace record names a verified machine, and the provider reports that
+  machine with both `cc-remote/workspace=<name>` and `cc-remote/pool=<key>`
+
+A candidate that fails a check becomes `refused` and is never offered again. A
+changed config or inventory changes the key, so older workspaces stay unused
+instead of matching. If the provider can't answer, the command fails without
+claiming anything. It reads only the pool's own records and never lists,
+adopts, renames, stops, or deletes other Sprites.
+
+The claim is recorded with the lane and ref before anything touches the
+machine. The command then checks that the checkout is the configured
+repository's clean top level with no Orca runtime state, wakes the Sprite, and
+requires its tools to be ready at the current stamp; it never reinstalls them.
+It fetches `--ref` with `--depth 1` and checks out the fetched commit, so a
+branch that moved since the workspace was made is honored, not matched by
+name. After configure, the key, worker, and brief follow the ordinary `prepare`
+steps. Nothing installs project dependencies or runs profile commands.
+
+If no candidate passes, the command creates the lane's own workspace exactly as
+`prepare lane-name` does, and reports `created` instead of `warm`.
+
+stdout carries one object: the lane, the actual workspace, how it was
+allocated, the HEAD the task recorded as `baseCommit`, the fill it started, and
+the full task record, shortened here:
+
+```json
+{
+  "schemaVersion": 1,
+  "lane": "lane-name",
+  "workspace": "pool-<id>",
+  "allocation": "warm",
+  "ref": "main",
+  "head": "<full commit>",
+  "replenish": {"target": 1, "pid": 4242},
+  "task": {"workspace": "pool-<id>", "prepared": true, "baseCommit": "<full commit>"}
+}
+```
+
+The task record, task lock, Orca environment, terminal title, and
+`$HOME/.cc-remote/orca/tasks/<workspace>/` take the workspace's name, never the
+lane's. Pass `workspace` to `status`, `read`, and `collect`.
+
+A claimed workspace never returns to the pool. A failed preparation is
+recorded `failed` with its error's metadata only: the exit code when one was
+observed, the HTTP status (null unless proved), and the message's byte length
+and SHA-256, never its text. The command neither tries another workspace nor
+creates one. A command that dies leaves its workspace `claimed`.
+A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
+first worker, so `--warm` refuses a lane that already has an Orca task, already
+claimed a workspace, or names a pool workspace.
+
+#### Keep the pool filled
+
+`orca.pool.ready` sets how many unused workspaces to keep, `1` by default. It's
+a readiness setting, not a spending cap. Set it to `0` to stop the background
+fill; `--warm` then claims only workspaces that already exist.
+
+Once it has claimed, or found the pool empty, `prepare --warm` starts one
+`cc-remote orca pool fill` in a session of its own, with its standard streams
+on `/dev/null`. It doesn't wait for the fill, and the fill can't hold its
+stdout open. A fill that fails to start shows up as `replenish.failure`, and
+the worker is still prepared.
+
+Run the fill yourself to top up the pool, then list it:
+
+```sh
+cc-remote orca pool fill --config .cc-remote/config.yaml
+cc-remote orca pool status --config .cc-remote/config.yaml
+```
+
+`fill` exits at once when another fill of the same key is running, since that
+fill counts again before it ends, and it stops at a 20-minute deadline. It
+marks a `provisioning` workspace left by a fill that died as `abandoned`,
+refuses a `ready` one that no longer passes the claim checks, and creates
+workspaces until `orca.pool.ready` eligible ones are `ready`. Each is a plain `create` with a `pool-`
+name and the pool label, so it holds tools, plugins, and a shallow checkout of
+`config.ref`. A fill starts no Orca runtime, records no task, starts no worker,
+and reads no API key. A failed create is recorded `failed` with the same error metadata and ends the
+fill.
+`status` prints the key, the target, and every pool record with its state:
+`provisioning`, `ready`, `claimed`, `prepared`, `failed`, `abandoned`, or
+`refused`.
+
 `orca create`, `orca prepare`, and `create` or `resume` with
 `--connection server` each hold the workspace's task lock,
 `<state_dir>/orca/<name>.json.lock`, from before their first effect until they
-return. A second of these commands for the same name refuses at once without
-changing anything. `orca create`, `orca prepare`, and `create --connection
+return. `prepare --warm` holds the lane's lock and, once it claims, the claimed
+workspace's lock too. A second of these commands for the same name refuses at
+once without changing anything. `orca create`, `orca prepare`, and `create --connection
 server` also refuse a name that already has an Orca task record, including one
 left behind by a destroyed workspace; `resume --connection server` instead
 requires the saved task.

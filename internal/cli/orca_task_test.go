@@ -429,6 +429,8 @@ func TestPrepareRefusesBadInputBeforeAnyEffect(t *testing.T) {
 		{"existing with a ref", slices.Concat(claude, []string{"--existing", "--ref", "main", "--brief-file", brief}), "takes no --ref"},
 		{"existing with an empty ref", slices.Concat(claude, []string{"--existing", "--ref=", "--brief-file", brief}), "takes no --ref"},
 		{"existing reaches the config", slices.Concat(claude, []string{"--existing", "--brief-file", brief}), "read config"},
+		{"warm with existing", slices.Concat(claude, []string{"--warm", "--existing", "--brief-file", brief}), "pass only one"},
+		{"warm with a ref reaches the config", slices.Concat(claude, []string{"--warm", "--ref", "feature", "--brief-file", brief}), "read config"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -467,6 +469,9 @@ func TestPrepareAndCreateShareTheirLaunchFlags(t *testing.T) {
 	}
 	if existing := prepare.Flags().Lookup("existing"); existing == nil || existing.DefValue != "false" || create.Flags().Lookup("existing") != nil {
 		t.Error("--existing is not a prepare-only opt-in that defaults to false")
+	}
+	if warm := prepare.Flags().Lookup("warm"); warm == nil || warm.DefValue != "false" || create.Flags().Lookup("warm") != nil {
+		t.Error("--warm is not a prepare-only opt-in that defaults to false")
 	}
 	collect := newOrcaCollectCmd(nil)
 	for _, name := range []string{"report-file", "patch-file", "output"} {
@@ -603,22 +608,26 @@ func (w *firstWorker) handle(id string, cmd []string, stdin []byte) providers.Re
 }
 
 func (w *firstWorker) native() (*scriptedOrca, []string) {
+	return w.nativeAs("task-a")
+}
+
+func (w *firstWorker) nativeAs(name string) (*scriptedOrca, []string) {
 	envelope := func(runtimeID, result string) string {
 		return `{"ok":true,"result":` + result + `,"_meta":{"runtimeId":"` + runtimeID + `"}}`
 	}
 	worktree := "repo-1::" + w.root
-	scope := " --environment task-a --json"
+	scope := " --environment " + name + " --json"
 	commands := []string{
-		"environment add --name task-a --pairing-code orca://pair?code=private --json",
+		"environment add --name " + name + " --pairing-code orca://pair?code=private --json",
 		"status" + scope,
 		"repo add --path " + w.root + scope,
 		"worktree list --repo id:repo-1" + scope,
-		"terminal create --worktree id:" + worktree + " --title task-a --command " + firstAgent.Command(fakeKeyDir) + scope,
+		"terminal create --worktree id:" + worktree + " --title " + name + " --command " + firstAgent.Command(fakeKeyDir) + scope,
 		"terminal read --terminal term-1 --screen" + scope,
 		"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
 	}
 	return &scriptedOrca{t: w.t, replies: map[string]string{
-		commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"task-a"}}`),
+		commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"`+name+`"}}`),
 		commands[1]: envelope("rt-1", `{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`),
 		commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+w.root+`"}}`),
 		commands[3]: envelope("rt-1", `{"worktrees":[{"id":"`+worktree+`","repoId":"repo-1","path":"`+w.root+`"}]}`),

@@ -248,6 +248,14 @@ func (a Agent) cleared() []string {
 	return []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"}
 }
 
+func CredentialEnv() []string {
+	var names []string
+	for _, agent := range []Agent{{Kind: AgentClaude}, {Kind: AgentCodex}} {
+		names = append(append(names, agent.variable()), agent.cleared()...)
+	}
+	return names
+}
+
 func (a Agent) Argv() []string {
 	if a.Kind == AgentCodex {
 		servers := noCodexMCP

@@ -181,6 +181,7 @@ func TestParseFillsOrcaDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ready := 1
 	want := Orca{
 		Tool:    "orca-runtime",
 		Entry:   "squashfs-root/AppRun",
@@ -189,6 +190,7 @@ func TestParseFillsOrcaDefaults(t *testing.T) {
 			"anthropic": {"/usr/bin/security", "find-generic-password", "-s", "cc-remote-anthropic-api-key", "-a", "anthropic", "-w"},
 			"openai":    {"/usr/bin/security", "find-generic-password", "-s", "cc-remote-openai-api-key", "-a", "openai", "-w"},
 		},
+		Pool: Pool{Ready: &ready},
 	}
 	if !reflect.DeepEqual(cfg.Orca, want) {
 		t.Errorf("orca = %+v, want %+v", cfg.Orca, want)
@@ -219,6 +221,29 @@ func TestOrcaKeepsConfiguredKeysAndTrust(t *testing.T) {
 	cfg.Repository = "file:///srv/example/app"
 	if cfg.Trusted() {
 		t.Error("a file repository was trusted")
+	}
+}
+
+func TestOrcaPoolReadyKeepsAnExplicitCount(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{"default", "", 1},
+		{"disabled", "orca:\n  pool:\n    ready: 0\n", 0},
+		{"larger", "orca:\n  pool:\n    ready: 3\n", 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(minimal + tt.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Orca.Pool.Ready == nil || *cfg.Orca.Pool.Ready != tt.want {
+				t.Errorf("orca.pool.ready = %v, want %d", cfg.Orca.Pool.Ready, tt.want)
+			}
+		})
 	}
 }
 
@@ -265,6 +290,9 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"orca key for an unknown provider", func(s string) string { return s + "orca:\n  keys:\n    other: [printf, k]\n" }, "orca.keys.other"},
 		{"orca key without a command", func(s string) string { return s + "orca:\n  keys:\n    openai: []\n" }, "orca.keys.openai"},
 		{"orca trust names a repository", func(s string) string { return s + "orca:\n  trust: [example/app]\n" }, "orca.trust"},
+		{"negative orca pool", func(s string) string { return s + "orca:\n  pool:\n    ready: -1\n" }, "orca.pool.ready -1"},
+		{"orca pool with a spending cap", func(s string) string { return s + "orca:\n  pool:\n    ready: 1\n    budget: 10\n" }, "field budget not found"},
+		{"orca pool count as text", func(s string) string { return s + "orca:\n  pool:\n    ready: one\n" }, "cannot unmarshal"},
 		{"forward without env name", func(s string) string { return s + "forwards:\n  - { label: a, env: lower }\n" }, "forward"},
 		{"duplicate forward label", func(s string) string {
 			return s + "forwards:\n  - { label: a, env: A }\n  - { label: a, env: B }\n"

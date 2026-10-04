@@ -22,6 +22,7 @@ const (
 	DefaultKeychainService = "cc-remote-tailnet"
 	DefaultOrcaTool        = "orca-runtime"
 	DefaultOrcaEntry       = "squashfs-root/AppRun"
+	DefaultPoolReady       = 1
 	KeyAnthropic           = "anthropic"
 	KeyOpenAI              = "openai"
 	dirName                = "cc-remote"
@@ -100,6 +101,11 @@ type Orca struct {
 	Args    []string            `yaml:"args"`
 	Keys    map[string][]string `yaml:"keys"`
 	Trust   []string            `yaml:"trust"`
+	Pool    Pool                `yaml:"pool"`
+}
+
+type Pool struct {
+	Ready *int `yaml:"ready"`
 }
 
 var (
@@ -192,6 +198,10 @@ func (o *Orca) applyDefaults() {
 			o.Keys[provider] = []string{"/usr/bin/security", "find-generic-password", "-s", "cc-remote-" + provider + "-api-key", "-a", provider, "-w"}
 		}
 	}
+	if o.Pool.Ready == nil {
+		ready := DefaultPoolReady
+		o.Pool.Ready = &ready
+	}
 }
 
 func (o Orca) validate() error {
@@ -210,6 +220,9 @@ func (o Orca) validate() error {
 		if owner == "" || strings.Contains(owner, "/") {
 			return fmt.Errorf("orca.trust %q must name a repository owner", owner)
 		}
+	}
+	if *o.Pool.Ready < 0 {
+		return fmt.Errorf("orca.pool.ready %d must count the unused warm workspaces to keep ready, 0 or more", *o.Pool.Ready)
 	}
 	return nil
 }

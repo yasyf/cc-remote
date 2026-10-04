@@ -86,6 +86,18 @@ func (d Dir) OrcaLease(name, instance string) string {
 	return filepath.Join(string(d), "orca", name+"."+instance+".lease.json")
 }
 
+func (d Dir) Pool(name string) string {
+	return filepath.Join(string(d), "pool", name+".json")
+}
+
+func (d Dir) PoolFill(key string) string {
+	return filepath.Join(string(d), "pool", "fill-"+key+".lock")
+}
+
+func (d Dir) PoolState(key string) string {
+	return filepath.Join(string(d), "pool", "state-"+key+".lock")
+}
+
 type Held struct {
 	Name   string
 	unlock func()
