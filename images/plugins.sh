@@ -583,6 +583,32 @@ write_supervisor() {
   mv "$state_dir/start.sh.tmp" "$state_dir/start.sh"
 }
 
+measure() {
+  local sum
+  sum="$(sha256sum < "$1")"
+  printf '%s bytes sha256 %s' "$(wc -c < "$1")" "${sum%% *}"
+}
+
+create_service() {
+  local name="$1" out err status http=unknown
+  shift
+  out="$(mktemp "$tmp_dir/service.XXXXXX")"
+  err="$(mktemp "$tmp_dir/service.XXXXXX")"
+  if sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
+    cat "$out"
+    cat "$err" >&2
+    rm -f "$out" "$err"
+  else
+    status=$?
+    if [ "$status" -eq 22 ] && [ "$(grep -c '^curl: (22) The requested URL returned error: [0-9][0-9][0-9]$' "$err")" -eq 1 ]; then
+      http="$(sed -n 's/^curl: (22) The requested URL returned error: \([0-9][0-9][0-9]\)$/\1/p' "$err")"
+    fi
+    printf 'cc-remote: sprite-env services create cc-remote-%s exited %s; HTTP status %s; response body %s; stderr %s; response and stderr text withheld\n' "$name" "$status" "$http" "$(measure "$out")" "$(measure "$err")" >&2
+    rm -f "$out" "$err"
+    return "$status"
+  fi
+}
+
 start_services() {
   local name
   local -a needs=()
@@ -592,7 +618,7 @@ start_services() {
     fi
     for name in "$@"; do
       if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
-        queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream
+        queue_artifact create_service "$name" "${needs[@]}"
       fi
     done
     drain_artifacts

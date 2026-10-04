@@ -2,6 +2,7 @@ package images
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1358,6 +1359,230 @@ except urllib.error.HTTPError:
 					t.Errorf("service %s recipe = %q, %v; want %q", name, recipe, err, want)
 				}
 			}
+		})
+	}
+}
+
+const fakeServiceCreate = `#!/bin/sh
+echo "$(basename "$0") $*" >> "$FAKE_LOG"
+dir="${FAKE_LOG%/*}"
+case "$2" in
+  get)
+    if [ -f "$dir/buffers" ]; then
+      while read -r _ _ _ path; do
+        if [ -e "$path" ]; then
+          echo "$3 $path" >> "$dir/live-buffers"
+        fi
+      done < "$dir/buffers"
+    fi
+    [ -f "$dir/services/$3" ] || exit 1
+    printf '{"state":{"status":"running"}}\n'
+    ;;
+  create)
+    for fd in 1 2; do
+      path="$(readlink -f "/proc/$$/fd/$fd")"
+      echo "$3 $(stat -c %a "$path") $(stat -c %a "${path%/*}") $path" >> "$dir/buffers"
+    done
+    [ ! -f "$dir/stderr-$3" ] || cat "$dir/stderr-$3" >&2
+    [ ! -f "$dir/stdout-$3" ] || cat "$dir/stdout-$3"
+    if [ -f "$dir/exit-$3" ]; then
+      exit "$(cat "$dir/exit-$3")"
+    fi
+    sleep 0.2
+    mkdir -p "$dir/services" && : > "$dir/services/$3"
+    ;;
+esac
+`
+
+type serviceCreateResult struct {
+	stdout, stderr string
+	exit           int
+}
+
+func TestPluginsConfigureReportsFailedServiceCreates(t *testing.T) {
+	inventory := func(names ...string) Inventory {
+		inv := Inventory{Version: SchemaVersion, Configure: Configure{Run: []string{"echo unrelated configure output"}}}
+		for _, name := range names {
+			inv.Services = append(inv.Services, Service{Name: name, Command: []string{"cookiesync", "supervise"}, Ready: ".s/" + name})
+		}
+		return inv
+	}
+	respond := func(t *testing.T, h pluginsHost, name string, result serviceCreateResult) {
+		t.Helper()
+		writePluginTestFile(t, filepath.Join(h.fakes, "stdout-cc-remote-"+name), []byte(result.stdout), 0o600)
+		writePluginTestFile(t, filepath.Join(h.fakes, "stderr-cc-remote-"+name), []byte(result.stderr), 0o600)
+		if result.exit != 0 {
+			writePluginTestFile(t, filepath.Join(h.fakes, "exit-cc-remote-"+name), []byte(fmt.Sprint(result.exit)), 0o600)
+		}
+	}
+	configure := func(t *testing.T, h pluginsHost) (string, string, error) {
+		t.Helper()
+		writePluginTestFile(t, filepath.Join(h.fakes, "sprite-env"), []byte(fakeServiceCreate), 0o700)
+		if err := os.MkdirAll(filepath.Join(h.fakes, "tmp"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cmd := h.command("bash", filepath.Join(h.fakes, "plugins.sh"), "configure")
+		cmd.Env = append(cmd.Env, "TMPDIR="+filepath.Join(h.fakes, "tmp"))
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+	creates := func(h pluginsHost, name string) []string {
+		return slices.DeleteFunc(h.calls(), func(call string) bool {
+			return !strings.HasPrefix(call, "sprite-env services create cc-remote-"+name+" ")
+		})
+	}
+	released := func(t *testing.T, h pluginsHost, buffers int) {
+		t.Helper()
+		root, err := filepath.EvalSymlinks(filepath.Join(h.fakes, "tmp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(h.fakes, "buffers"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		for line := range strings.Lines(string(raw)) {
+			seen++
+			fields := strings.SplitN(strings.TrimSuffix(line, "\n"), " ", 4)
+			if len(fields) != 4 || fields[1] != "600" || fields[2] != "700" || filepath.Dir(filepath.Dir(fields[3])) != root {
+				t.Errorf("create output buffer %q is not a 0600 file in a 0700 directory under the script's TMPDIR %s", line, root)
+				continue
+			}
+			if _, err := os.Lstat(fields[3]); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("create output buffer %s outlived configure: %v", fields[3], err)
+			}
+		}
+		if seen != buffers {
+			t.Errorf("%d create output buffers, want %d:\n%s", seen, buffers, raw)
+		}
+		if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+			t.Errorf("configure left %v in its TMPDIR: %v", entries, err)
+		}
+	}
+	report := func(name string, result serviceCreateResult, status string) string {
+		facts := func(data string) string {
+			return fmt.Sprintf("%d bytes sha256 %x", len(data), sha256.Sum256([]byte(data)))
+		}
+		return fmt.Sprintf("cc-remote: sprite-env services create cc-remote-%s exited %d; HTTP status %s; response body %s; stderr %s; response and stderr text withheld\n", name, result.exit, status, facts(result.stdout), facts(result.stderr))
+	}
+	reports := func(stderr string) []string {
+		var lines []string
+		for line := range strings.Lines(stderr) {
+			if strings.HasPrefix(line, "cc-remote: sprite-env services create ") {
+				lines = append(lines, line)
+			}
+		}
+		slices.Sort(lines)
+		return lines
+	}
+	events := func(name string) string {
+		return `{"type":"started","service":"cc-remote-` + name + `","synthetic":true}` + "\n" + `{"type":"complete","service":"cc-remote-` + name + `","synthetic":true}` + "\n"
+	}
+	secret := serviceCreateResult{
+		stdout: `{"error":"synthetic","logs":"OPENAI_API_KEY=sk-synthetic-credential-0000","args":["synthetic-private-argument"]}`,
+		stderr: "error: synthetic Authorization: Bearer sk-synthetic-stderr-credential\ncurl: (22) The requested URL returned error: 500\n",
+		exit:   22,
+	}
+	startup := serviceCreateResult{
+		stdout: `{"type":"started","service":"cc-remote-third","synthetic":true}` + "\n" + `{"type":"log","data":"exec env SYNTHETIC_TOKEN=synthetic-recipe-secret /usr/bin/synthetic --private-flag"}` + "\n",
+		stderr: "curl: (22) The requested URL returned error: 400\n",
+		exit:   22,
+	}
+	withheld := []string{"sk-synthetic", "OPENAI_API_KEY", "synthetic-private-argument", "Authorization", "Bearer", "SYNTHETIC_TOKEN", "synthetic-recipe-secret", "--private-flag", "synthetic-private-detail", `"type":`, "The requested URL", "curl:", "error: synthetic", "supervise.py", "unrelated configure output"}
+
+	t.Run("a successful create passes its started and complete events and stderr through unchanged", func(t *testing.T) {
+		h := newPluginsHost(t, inventory("solo"), nil, fakeState{}, nil)
+		listenReady(t, h.home, ".s/solo")
+		success := serviceCreateResult{stdout: events("solo"), stderr: "synthetic success diagnostic \x00\xff\n"}
+		respond(t, h, "solo", success)
+		stdout, stderr, err := configure(t, h)
+		if err != nil {
+			t.Fatalf("configure = %v\nstdout:\n%s\nstderr:\n%q", err, stdout, stderr)
+		}
+		want := "sprite-env services create cc-remote-solo --cmd HOME/.cc-remote/supervise.py --args solo --duration 1ms --no-stream"
+		if got := creates(h, "solo"); !slices.Equal(got, []string{want}) {
+			t.Errorf("creates = %q, want %q", got, want)
+		}
+		if stdout != "unrelated configure output\n"+success.stdout || stderr != success.stderr {
+			t.Errorf("stdout = %q, stderr = %q; want stdout %q and stderr %q", stdout, stderr, "unrelated configure output\n"+success.stdout, success.stderr)
+		}
+		if live, err := os.ReadFile(filepath.Join(h.fakes, "live-buffers")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the readiness check still saw create output buffers: %q %v", live, err)
+		}
+		released(t, h, 2)
+	})
+
+	t.Run("failed creates report only service, exit, HTTP status, lengths and digests and keep curl's exit", func(t *testing.T) {
+		h := newPluginsHost(t, inventory("first", "second", "third", "fourth", "fifth"), nil, fakeState{}, nil)
+		respond(t, h, "first", secret)
+		respond(t, h, "third", startup)
+		for _, name := range []string{"second", "fourth"} {
+			respond(t, h, name, serviceCreateResult{stdout: events(name)})
+		}
+		stdout, stderr, err := configure(t, h)
+		if exitCode(err) != 22 {
+			t.Fatalf("configure = %v, want curl's exit 22\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if got, want := reports(stderr), []string{report("first", secret, "500"), report("third", startup, "400")}; !slices.Equal(got, want) {
+			t.Errorf("failure reports =\n%q\nwant\n%q", got, want)
+		}
+		for _, text := range withheld {
+			if strings.Contains(stderr, text) {
+				t.Errorf("stderr carries %q:\n%s", text, stderr)
+			}
+		}
+		for _, text := range []string{"sk-synthetic", "OPENAI_API_KEY", "Authorization", "SYNTHETIC_TOKEN", `"type":"log"`, "The requested URL"} {
+			if strings.Contains(stdout, text) {
+				t.Errorf("stdout carries failed create text %q:\n%s", text, stdout)
+			}
+		}
+		for _, name := range []string{"second", "fourth"} {
+			if strings.Count(stdout, events(name)) != 1 {
+				t.Errorf("stdout lacks the one response of cc-remote-%s:\n%s", name, stdout)
+			}
+			if _, err := os.Stat(filepath.Join(h.fakes, "services", "cc-remote-"+name)); err != nil {
+				t.Errorf("configure exited before the outstanding cc-remote-%s create finished: %v", name, err)
+			}
+		}
+		if strings.Count(stdout, "unrelated configure output\n") != 1 {
+			t.Errorf("stdout = %q, want the unrelated configure output once", stdout)
+		}
+		for name, count := range map[string]int{"first": 1, "second": 1, "third": 1, "fourth": 1, "fifth": 0} {
+			if got := len(creates(h, name)); got != count {
+				t.Errorf("cc-remote-%s was created %d times, want %d:\n%s", name, got, count, strings.Join(h.calls(), "\n"))
+			}
+		}
+		released(t, h, 8)
+	})
+
+	for _, tt := range []struct {
+		name   string
+		result serviceCreateResult
+	}{
+		{"a connection failure has no HTTP status", serviceCreateResult{stderr: "curl: (7) Failed to connect to sprite port 80 after 0 ms: synthetic-private-detail\n", exit: 7}},
+		{"a curl 22 diagnostic with trailing text is not the known contract", serviceCreateResult{stdout: secret.stdout, stderr: "curl: (22) The requested URL returned error: 500 sk-synthetic-reason\n", exit: 22}},
+		{"two curl 22 diagnostics are ambiguous", serviceCreateResult{stderr: "curl: (22) The requested URL returned error: 500\ncurl: (22) The requested URL returned error: 400\n", exit: 22}},
+		{"a curl 22 diagnostic without curl's exit is not the known contract", serviceCreateResult{stdout: startup.stdout, stderr: "curl: (22) The requested URL returned error: 500\n", exit: 1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newPluginsHost(t, inventory("solo"), nil, fakeState{}, nil)
+			respond(t, h, "solo", tt.result)
+			stdout, stderr, err := configure(t, h)
+			if exitCode(err) != tt.result.exit {
+				t.Fatalf("configure = %v, want exit %d\nstdout:\n%s\nstderr:\n%s", err, tt.result.exit, stdout, stderr)
+			}
+			if got, want := reports(stderr), []string{report("solo", tt.result, "unknown")}; !slices.Equal(got, want) {
+				t.Errorf("failure reports =\n%q\nwant\n%q", got, want)
+			}
+			for _, text := range append(slices.Clone(withheld), "Failed to connect") {
+				if strings.Contains(stderr, text) || (strings.Contains(stdout, text) && text != "unrelated configure output") {
+					t.Errorf("configure output carries %q:\nstdout:\n%s\nstderr:\n%s", text, stdout, stderr)
+				}
+			}
+			released(t, h, 2)
 		})
 	}
 }
