@@ -1398,7 +1398,9 @@ func TestPluginsConfigureReportsFailedServiceCreates(t *testing.T) {
 		return stdout.String(), stderr.String(), err
 	}
 	creates := func(h pluginsHost, name string) []string {
-		return slices.DeleteFunc(h.calls(), func(call string) bool { return !strings.HasPrefix(call, "sprite-env services create cc-remote-"+name+" ") })
+		return slices.DeleteFunc(h.calls(), func(call string) bool {
+			return !strings.HasPrefix(call, "sprite-env services create cc-remote-"+name+" ")
+		})
 	}
 	created := func(name string) string {
 		return `{"name":"cc-remote-` + name + `","synthetic":"created"}` + "\n"
@@ -1450,7 +1452,7 @@ func TestPluginsConfigureReportsFailedServiceCreates(t *testing.T) {
 				reported = append(reported, line)
 			}
 		}
-		var want []string
+		want := make([]string, 0, 2)
 		for _, name := range []string{"first", "third"} {
 			curl := fmt.Sprintf("curl: (22) The requested URL returned error: %d\n", statuses[name])
 			want = append(want, fmt.Sprintf("cc-remote: sprite-env services create cc-remote-%s exited 22; stderr %s; response body %s\n", name, excerpt(curl), excerpt(bodies[name])))
