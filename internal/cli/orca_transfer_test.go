@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,6 +94,33 @@ func sshCalls(t *testing.T) []string {
 	return calls
 }
 
+func timingRecords(t *testing.T, logs *bytes.Buffer, secrets ...string) []string {
+	t.Helper()
+	var records []string
+	for line := range strings.Lines(logs.String()) {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if record["msg"] != "timing" {
+			continue
+		}
+		operation, _ := record["operation"].(string)
+		_, measured := record["seconds"].(float64)
+		ok, judged := record["ok"].(bool)
+		if !slices.Contains([]string{"startup.config", "task.head", "task.sendBrief"}, operation) || !measured || !judged || len(record) != 6 {
+			t.Errorf("timing record %q carries more than a fixed operation, seconds and ok", line)
+		}
+		for _, secret := range secrets {
+			if strings.Contains(line, secret) {
+				t.Errorf("timing record %q carries %q", line, secret)
+			}
+		}
+		records = append(records, fmt.Sprintf("%s ok=%t", operation, ok))
+	}
+	return records
+}
+
 func gitCheckout(t *testing.T) (string, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -143,7 +171,8 @@ func TestPublishCopiesTheExactBriefOutsideTheCheckout(t *testing.T) {
 	home := fakeRemote(t)
 	root, head := gitCheckout(t)
 	brief := []byte("# Task\n\n\"double\" 'single' $(touch pwned) `touch pwned` ; & | > out \\ *\x00\ttrailing  \n\n")
-	driver := orcaDriver{state: state.Dir(t.TempDir())}
+	var logs bytes.Buffer
+	driver := orcaDriver{state: state.Dir(t.TempDir()), log: slog.New(slog.NewJSONHandler(&logs, nil))}
 	task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: &orcaTunnel{Host: "task-a"}, Terminal: "term-1"}
 	if err := driver.publish(t.Context(), task, brief); err != nil {
 		t.Fatal(err)
@@ -181,6 +210,9 @@ func TestPublishCopiesTheExactBriefOutsideTheCheckout(t *testing.T) {
 	if got := sshCalls(t); !slices.Equal(got, []string{"head", "brief"}) {
 		t.Errorf("ssh calls = %q", got)
 	}
+	if got := timingRecords(t, &logs, "pwned", "Task", root, home, head, want.SHA256); !slices.Equal(got, []string{"task.head ok=true", "task.sendBrief ok=true"}) {
+		t.Errorf("timings = %q", got)
+	}
 }
 
 func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
@@ -213,7 +245,8 @@ func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 			home := fakeRemote(t)
 			root, head := gitCheckout(t)
 			tt.prepare(t, home, root)
-			driver := orcaDriver{state: state.Dir(t.TempDir())}
+			var logs bytes.Buffer
+			driver := orcaDriver{state: state.Dir(t.TempDir()), log: slog.New(slog.NewJSONHandler(&logs, nil))}
 			task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: &orcaTunnel{Host: "task-a"}, Terminal: "term-1"}
 			if err := driver.save(task); err != nil {
 				t.Fatal(err)
@@ -238,6 +271,13 @@ func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 			}
 			if got := sshCalls(t); !slices.Equal(got, tt.ssh) {
 				t.Errorf("ssh calls = %q, want %q", got, tt.ssh)
+			}
+			timings := []string{"task.head ok=false"}
+			if tt.base {
+				timings = []string{"task.head ok=true", "task.sendBrief ok=false"}
+			}
+			if got := timingRecords(t, &logs, "BRIEF-BYTES", secretStderr, "exited", root, home, head); !slices.Equal(got, timings) {
+				t.Errorf("timings = %q, want %q", got, timings)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -34,37 +35,53 @@ func screenOf(t *testing.T, lines ...string) string {
 }
 
 func TestBootstrapWalksClaudesFirstRunScreens(t *testing.T) {
-	theme := screenOf(t, "Choose the text style that looks best with your terminal", "❯ 1. Dark mode ✔", "  2. Light mode")
-	keyNo := screenOf(t, "Detected a custom API key in your environment", "ANTHROPIC_API_KEY: sk-ant-...wxyz", "Do you want to use this API key?", "  1. Yes", "❯ 2. No (recommended)")
-	keyYes := screenOf(t, "Detected a custom API key in your environment", "Do you want to use this API key?", "❯ 1. Yes", "  2. No (recommended)")
-	security := screenOf(t, "Security notes:", "Press Enter to continue…")
-	trust := screenOf(t, "Do you trust the files in this folder?", "❯ 1. Yes, proceed", "  2. No, exit")
-	bypassNo := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "❯ 1. No, exit", "  2. Yes, I accept")
-	bypassYes := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "  1. No, exit", "❯ 2. Yes, I accept")
-	ready := screenOf(t, "Opus 5.5 (xhigh) · API Usage Billing", "> ", "⏵⏵ bypass permissions on")
-	fake := newFakeOrca(t).on(sendEnter, ok(accepted)).on(sendUp, ok(accepted)).on(sendDown, ok(accepted)).
-		on(waitIdle, ok(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null}}`))
-	for _, screen := range []string{theme, keyNo, keyNo, keyYes, security, security, trust, trust, bypassNo, bypassNo, bypassYes, ready, ready} {
-		fake.on(readScreen, screen)
-	}
-	steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(steps, ","); got != "theme,api-key,security,trust,bypass" {
-		t.Errorf("steps = %s", got)
-	}
-	for command, want := range map[string]int{sendEnter: 5, sendUp: 1, sendDown: 1, waitIdle: 1} {
-		if got := fake.called(command); got != want {
-			t.Errorf("%q called %d times, want %d", command, got, want)
+	synctest.Test(t, func(t *testing.T) {
+		logs := recordTimings(t)
+		theme := screenOf(t, "Choose the text style that looks best with your terminal", "❯ 1. Dark mode ✔", "  2. Light mode")
+		keyNo := screenOf(t, "Detected a custom API key in your environment", "ANTHROPIC_API_KEY: "+leaked, "Do you want to use this API key?", "  1. Yes", "❯ 2. No (recommended)")
+		keyYes := screenOf(t, "Detected a custom API key in your environment", "Do you want to use this API key?", "❯ 1. Yes", "  2. No (recommended)")
+		security := screenOf(t, "Security notes:", "Press Enter to continue…")
+		trust := screenOf(t, "Do you trust the files in this folder?", "❯ 1. Yes, proceed", "  2. No, exit")
+		bypassNo := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "❯ 1. No, exit", "  2. Yes, I accept")
+		bypassYes := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "  1. No, exit", "❯ 2. Yes, I accept")
+		ready := screenOf(t, "Opus 5.5 (xhigh) · API Usage Billing", "> ", "⏵⏵ bypass permissions on")
+		fake := newFakeOrca(t).on(sendEnter, ok(accepted)).on(sendUp, ok(accepted)).on(sendDown, ok(accepted)).
+			on(waitIdle, ok(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null}}`))
+		for _, screen := range []string{theme, keyNo, keyNo, keyYes, security, security, trust, trust, bypassNo, bypassNo, bypassYes, ready, ready} {
+			fake.on(readScreen, screen)
 		}
-	}
+		steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(steps, ","); got != "theme,api-key,security,trust,bypass" {
+			t.Errorf("steps = %s", got)
+		}
+		for command, want := range map[string]int{sendEnter: 5, sendUp: 1, sendDown: 1, waitIdle: 1} {
+			if got := fake.called(command); got != want {
+				t.Errorf("%q called %d times, want %d", command, got, want)
+			}
+		}
+		read, key, enter := "remote.screen ok=true seconds=0", "remote.key ok=true seconds=0", "remote.enter ok=true seconds=0"
+		want := []string{
+			read, enter, read, "bootstrap.gate gate=theme moves=0 ok=true seconds=0",
+			read, key, read, enter, read, "bootstrap.gate gate=api-key moves=1 ok=true seconds=0",
+			read, enter, read, "bootstrap.gate gate=security moves=0 ok=true seconds=0",
+			read, enter, read, "bootstrap.gate gate=trust moves=0 ok=true seconds=0",
+			read, key, read, enter, read, "bootstrap.gate gate=bypass moves=1 ok=true seconds=0",
+			read, "remote.waitIdle ok=true seconds=0", "bootstrap ok=true seconds=0 steps=5",
+		}
+		if got := timings(t, logs, leaked, "Dark mode", "term-1", "tui-idle"); !slices.Equal(got, want) {
+			t.Errorf("timings =\n%q\nwant\n%q", got, want)
+		}
+	})
 }
 
 func TestBootstrapPollsOnlyWhenTheNextScreenIsNotReady(t *testing.T) {
 	for _, loading := range []bool{false, true} {
 		t.Run(fmt.Sprint(loading), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
+				logs := recordTimings(t)
 				security := screenOf(t, "Security notes:", "Press Enter to continue…")
 				ready := screenOf(t, "Opus 5.5 (xhigh) · API Usage Billing")
 				fake := newFakeOrca(t).on(sendEnter, ok(accepted)).
@@ -91,6 +108,15 @@ func TestBootstrapPollsOnlyWhenTheNextScreenIsNotReady(t *testing.T) {
 				}
 				if fake.called(sendEnter) != 1 || fake.called(waitIdle) != 1 {
 					t.Errorf("Enter calls = %d, idle calls = %d", fake.called(sendEnter), fake.called(waitIdle))
+				}
+				read := "remote.screen ok=true seconds=0"
+				records := []string{read, "remote.enter ok=true seconds=0", read, "bootstrap.gate gate=security moves=0 ok=true seconds=0", read}
+				if loading {
+					records = append(records, read)
+				}
+				records = append(records, "remote.waitIdle ok=true seconds=0", fmt.Sprintf("bootstrap ok=true seconds=%g steps=1", want.Seconds()))
+				if got := timings(t, logs); !slices.Equal(got, records) {
+					t.Errorf("timings =\n%q\nwant\n%q", got, records)
 				}
 			})
 		})
@@ -121,19 +147,27 @@ func TestBootstrapNamesAnUnknownScreenWithoutTheKey(t *testing.T) {
 }
 
 func TestBootstrapStopsWhenTheSelectionNeverReachesTheChoice(t *testing.T) {
-	stuck := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "❯ 1. No, exit", "  2. Yes, I accept")
-	moved := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "❯ 3. Something else", "  2. Yes, I accept")
-	fake := newFakeOrca(t).on(sendDown, ok(accepted))
-	for _, screen := range []string{stuck, moved, stuck, moved, stuck} {
-		fake.on(readScreen, screen)
-	}
-	_, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
-	if err == nil || !strings.Contains(err.Error(), "bypass: 4 moves never selected") {
-		t.Errorf("Bootstrap = %v", err)
-	}
-	if fake.called(sendEnter) != 0 {
-		t.Error("Enter was sent on an unverified selection")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		logs := recordTimings(t)
+		stuck := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "❯ 1. No, exit", "  2. Yes, I accept")
+		moved := screenOf(t, "WARNING: Claude Code running in Bypass Permissions mode", "❯ 3. Something else", "  2. Yes, I accept")
+		fake := newFakeOrca(t).on(sendDown, ok(accepted))
+		for _, screen := range []string{stuck, moved, stuck, moved, stuck} {
+			fake.on(readScreen, screen)
+		}
+		_, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
+		if err == nil || !strings.Contains(err.Error(), "bypass: 4 moves never selected") {
+			t.Errorf("Bootstrap = %v", err)
+		}
+		if fake.called(sendEnter) != 0 {
+			t.Error("Enter was sent on an unverified selection")
+		}
+		read, key := "remote.screen ok=true seconds=0", "remote.key ok=true seconds=0"
+		want := []string{read, key, read, key, read, key, read, key, read, "bootstrap.gate gate=bypass moves=4 ok=false seconds=0", "bootstrap ok=false seconds=0 steps=0"}
+		if got := timings(t, logs, "Something else", "never selected"); !slices.Equal(got, want) {
+			t.Errorf("timings =\n%q\nwant\n%q", got, want)
+		}
+	})
 }
 
 func TestCodexStartupOnlyWaitsForIdle(t *testing.T) {

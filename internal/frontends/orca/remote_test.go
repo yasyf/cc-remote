@@ -1,11 +1,18 @@
 package orca_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
@@ -17,8 +24,76 @@ const (
 	scope     = " --environment " + env + " --json"
 )
 
+type slowOrca struct {
+	runner orca.Runner
+	delay  time.Duration
+}
+
+func (s slowOrca) Run(ctx context.Context, args ...string) ([]byte, error) {
+	time.Sleep(s.delay)
+	return s.runner.Run(ctx, args...)
+}
+
 func ok(result string) string {
 	return `{"id":"1","ok":true,"result":` + result + `,"_meta":{"runtimeId":"` + runtimeID + `"}}`
+}
+
+func recordTimings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+func timings(t *testing.T, logs *bytes.Buffer, secrets ...string) []string {
+	t.Helper()
+	labels := map[string][]string{
+		"operation": {"bootstrap", "bootstrap.gate", "hooks.probe", "hooks.review", "remote.screen", "remote.key", "remote.enter", "remote.waitIdle"},
+	}
+	for _, gate := range orca.ClaudeStartup.Gates {
+		labels["gate"] = append(labels["gate"], gate.Name)
+	}
+	scalars := []string{"seconds", "ok", "moves", "downs", "ups", "steps"}
+	var lines []string
+	for line := range strings.Lines(logs.String()) {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if record["msg"] != "timing" {
+			t.Fatalf("log line %q is not a timing record", line)
+		}
+		for _, secret := range secrets {
+			if strings.Contains(line, secret) {
+				t.Errorf("timing record %q carries %q", line, secret)
+			}
+		}
+		fields := []string{fmt.Sprint(record["operation"])}
+		for _, key := range slices.Sorted(maps.Keys(record)) {
+			if key == "time" || key == "level" || key == "msg" {
+				continue
+			}
+			switch value := record[key].(type) {
+			case string:
+				if !slices.Contains(labels[key], value) {
+					t.Errorf("timing record %q carries %s=%q", line, key, value)
+				}
+			case float64, bool:
+				if !slices.Contains(scalars, key) {
+					t.Errorf("timing record %q carries %s=%v", line, key, value)
+				}
+			default:
+				t.Errorf("timing record %q carries %s of type %T", line, key, value)
+			}
+			if key != "operation" {
+				fields = append(fields, fmt.Sprintf("%s=%v", key, record[key]))
+			}
+		}
+		lines = append(lines, strings.Join(fields, " "))
+	}
+	return lines
 }
 
 func TestAddEnvironment(t *testing.T) {
@@ -149,16 +224,27 @@ func TestPromptFailureDoesNotForwardNativeRetryAdvice(t *testing.T) {
 }
 
 func TestRawKeysAndEnterAreSeparateInputs(t *testing.T) {
-	fake := newFakeOrca(t).
-		on("terminal send --terminal term-1 --text "+orca.KeyDown+scope, ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":3}}`)).
-		on("terminal send --terminal term-1 --enter"+scope, ok(`{"send":{"handle":"term-1","accepted":false,"bytesWritten":0,"refusedReason":"closed"}}`))
-	native := orca.NewClient(fake).On(env, runtimeID)
-	if err := native.Key(context.Background(), "term-1", orca.KeyDown); err != nil {
-		t.Errorf("Key = %v", err)
-	}
-	if err := native.Enter(context.Background(), "term-1"); err == nil || !strings.Contains(err.Error(), "refused input: closed") {
-		t.Errorf("Enter = %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		logs := recordTimings(t)
+		fake := newFakeOrca(t).
+			on("terminal send --terminal term-1 --text "+orca.KeyDown+scope, ok(`{"send":{"handle":"term-1","accepted":true,"bytesWritten":3}}`)).
+			on("terminal send --terminal term-1 --enter"+scope, ok(`{"send":{"handle":"term-1","accepted":false,"bytesWritten":0,"refusedReason":"closed `+leaked+`"}}`)).
+			fail("terminal send --terminal term-1 --text "+leaked+scope, "", errors.New("transport failed for "+leaked))
+		native := orca.NewClient(slowOrca{runner: fake, delay: 250 * time.Millisecond}).On(env, runtimeID)
+		if err := native.Key(context.Background(), "term-1", orca.KeyDown); err != nil {
+			t.Errorf("Key = %v", err)
+		}
+		if err := native.Enter(context.Background(), "term-1"); err == nil || !strings.Contains(err.Error(), "refused input: closed") {
+			t.Errorf("Enter = %v", err)
+		}
+		if err := native.Key(context.Background(), "term-1", leaked); err == nil || !strings.Contains(err.Error(), "transport failed") {
+			t.Errorf("Key = %v", err)
+		}
+		want := []string{"remote.key ok=true seconds=0.25", "remote.enter ok=false seconds=0.25", "remote.key ok=false seconds=0.25"}
+		if got := timings(t, logs, leaked, "closed", "transport", "term-1"); !slices.Equal(got, want) {
+			t.Errorf("timings =\n%q\nwant\n%q", got, want)
+		}
+	})
 }
 
 func TestTerminalRepliesNameTheRequestedTerminal(t *testing.T) {
@@ -168,31 +254,41 @@ func TestTerminalRepliesNameTheRequestedTerminal(t *testing.T) {
 	tests := []struct {
 		name, command, out, want string
 	}{
-		{"screen for another terminal", read, `{"terminal":{"handle":"term-2","status":"running","source":"screen","limited":false,"tail":[]}}`, `orca terminal read on task-a answered for terminal "term-2", not term-1`},
-		{"screen without a terminal", read, `{"terminal":{"status":"running","source":"screen","limited":false,"tail":[]}}`, `orca terminal read on task-a answered for terminal "", not term-1`},
+		{"screen for another terminal", read, `{"terminal":{"handle":"term-2","status":"running","source":"screen","limited":false,"tail":["` + leaked + `"]}}`, `orca terminal read on task-a answered for terminal "term-2", not term-1`},
+		{"screen without a terminal", read, `{"terminal":{"status":"running","source":"screen","limited":false,"tail":["` + leaked + `"]}}`, `orca terminal read on task-a answered for terminal "", not term-1`},
 		{"key for another terminal", key, `{"send":{"handle":"term-2","accepted":true,"bytesWritten":3}}`, `orca terminal send on task-a answered for terminal "term-2", not term-1`},
 		{"blocked wait for another terminal", wait, `{"wait":{"handle":"term-2","condition":"tui-idle","satisfied":false,"status":"running","exitCode":null,"blockedReason":"agent-hooks-review-prompt"}}`, `orca terminal wait on task-a answered for terminal "term-2", not term-1`},
 		{"wait for another condition", wait, `{"wait":{"handle":"term-1","condition":"exit","satisfied":true,"status":"exited","exitCode":0}}`, `satisfied "exit", not tui-idle`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			native := orca.NewClient(newFakeOrca(t).on(tt.command, ok(tt.out))).On(env, runtimeID)
-			var err error
-			switch tt.command {
-			case read:
-				_, err = native.Screen(context.Background(), "term-1")
-			case key:
-				err = native.Key(context.Background(), "term-1", orca.KeyDown)
-			case wait:
-				var got orca.TerminalWait
-				got, err = native.WaitIdle(context.Background(), "term-1", time.Minute)
-				if got.Handle != "" || got.Satisfied || len(got.BlockedReason) != 0 {
-					t.Errorf("WaitIdle returned %+v for a contradictory reply", got)
+			synctest.Test(t, func(t *testing.T) {
+				logs := recordTimings(t)
+				native := orca.NewClient(slowOrca{runner: newFakeOrca(t).on(tt.command, ok(tt.out)), delay: time.Second}).On(env, runtimeID)
+				var err error
+				var operation string
+				switch tt.command {
+				case read:
+					operation = "remote.screen"
+					_, err = native.Screen(context.Background(), "term-1")
+				case key:
+					operation = "remote.key"
+					err = native.Key(context.Background(), "term-1", orca.KeyDown)
+				case wait:
+					operation = "remote.waitIdle"
+					var got orca.TerminalWait
+					got, err = native.WaitIdle(context.Background(), "term-1", time.Minute)
+					if got.Handle != "" || got.Satisfied || len(got.BlockedReason) != 0 {
+						t.Errorf("WaitIdle returned %+v for a contradictory reply", got)
+					}
 				}
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %v, want %q", err, tt.want)
-			}
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Errorf("error = %v, want %q", err, tt.want)
+				}
+				if got := timings(t, logs, leaked, "term-", "agent-hooks", "exit"); !slices.Equal(got, []string{operation + " ok=false seconds=1"}) {
+					t.Errorf("timings = %q, want one failed %s record", got, operation)
+				}
+			})
 		})
 	}
 }

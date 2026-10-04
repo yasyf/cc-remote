@@ -69,6 +69,13 @@ func (e UnknownScreenError) Error() string {
 func (e UnknownScreenError) Unwrap() error { return e.Cause }
 
 func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, trusted bool, p Poll) ([]string, error) {
+	started := time.Now()
+	steps, err := r.bootstrap(ctx, handle, startup, trusted, p)
+	observe(ctx, "bootstrap", started, err, "steps", len(steps))
+	return steps, err
+}
+
+func (r Remote) bootstrap(ctx context.Context, handle string, startup Startup, trusted bool, p Poll) ([]string, error) {
 	steps := make([]string, 0, 1)
 	var last Screen
 	pending := -1
@@ -127,8 +134,10 @@ func (r Remote) Bootstrap(ctx context.Context, handle string, startup Startup, t
 	return append(steps, "hooks"), nil
 }
 
-func (r Remote) answer(ctx context.Context, handle string, gate Gate, screen Screen, p Poll) error {
-	for moves := 0; gate.Choice != nil && !gate.Choice.MatchString(Selected(screen.Tail)); moves++ {
+func (r Remote) answer(ctx context.Context, handle string, gate Gate, screen Screen, p Poll) (err error) {
+	started, moves := time.Now(), 0
+	defer func() { observe(ctx, "bootstrap.gate", started, err, "gate", gate.Name, "moves", moves) }()
+	for ; gate.Choice != nil && !gate.Choice.MatchString(Selected(screen.Tail)); moves++ {
 		before := Selected(screen.Tail)
 		if moves == maxMoves {
 			return fmt.Errorf("%d moves never selected %s; the selection is %q", maxMoves, gate.Choice, Redact([]string{before})[0])
@@ -136,7 +145,6 @@ func (r Remote) answer(ctx context.Context, handle string, gate Gate, screen Scr
 		if err := r.Key(ctx, handle, gate.Move); err != nil {
 			return err
 		}
-		var err error
 		if screen, err = r.until(ctx, handle, p, func(s Screen) bool { return Selected(s.Tail) != before }); err != nil {
 			return fmt.Errorf("the selection never moved from %q: %w", Redact([]string{before})[0], err)
 		}
