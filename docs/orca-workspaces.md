@@ -291,9 +291,11 @@ cc-remote orca pool fill --config .cc-remote/config.yaml
 cc-remote orca pool status --config .cc-remote/config.yaml
 ```
 
-`fill` waits for any other fill of the same key, marks a `provisioning`
-workspace left by a fill that died as `abandoned`, and creates workspaces until
-`orca.pool.ready` of them are `ready`. Each is a plain `create` with a `pool-`
+`fill` exits at once when another fill of the same key is running, since that
+fill counts again before it ends, and it stops at a 20-minute deadline. It
+marks a `provisioning` workspace left by a fill that died as `abandoned`,
+refuses a `ready` one that no longer passes the claim checks, and creates
+workspaces until `orca.pool.ready` eligible ones are `ready`. Each is a plain `create` with a `pool-`
 name and the pool label, so it holds tools, plugins, and a shallow checkout of
 `config.ref`. A fill starts no Orca runtime, records no task, starts no worker,
 and reads no API key. A failed create is recorded `failed` with the same error metadata and ends the

@@ -119,7 +119,8 @@ func checkRetained(ctx context.Context, session *workspace.Session, result *work
 
 func checkUnused(ctx context.Context, session *workspace.Session, record *workspace.Record) error {
 	return checkCheckout(ctx, session, "check the unused checkout", record.Name, record.Machine, session.ProjectRoot(),
-		`test -z "$(git -C "$root" status --porcelain --untracked-files=all)" || exit `+fmt.Sprint(exitNotClean),
+		`status=$(git --no-optional-locks -C "$root" status --porcelain --untracked-files=all)`,
+		`test -z "$status" || exit `+fmt.Sprint(exitNotClean),
 	)
 }
 
