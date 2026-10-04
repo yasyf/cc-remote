@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ const (
 	exitNotCheckout    = 5
 	exitOtherOrigin    = 6
 	exitPriorRuntime   = 7
+	exitNotClean       = 8
 )
 
 var (
@@ -44,10 +46,11 @@ var (
 		exitInsideCheckout: "the task directory resolves inside the checkout",
 		exitNotArtifact:    "the path is not a regular file directly in the recorded physical task directory",
 	}
-	retainedRefusals = map[int]string{
+	checkoutRefusals = map[int]string{
 		exitNotCheckout:  "the configured project root is not the top level of a git checkout",
 		exitOtherOrigin:  "the checkout's origin is not the configured repository",
 		exitPriorRuntime: "the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites",
+		exitNotClean:     "the checkout has uncommitted or untracked changes, so it is not unused",
 	}
 )
 
@@ -111,14 +114,24 @@ func answered(step, name string, refusals map[int]string, result providers.Resul
 }
 
 func checkRetained(ctx context.Context, session *workspace.Session, result *workspace.Result) error {
-	script := remote.Script(
-		"root="+remote.Quote(result.ProjectRoot),
-		`top=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) && test "$top" = "$(cd "$root" && pwd -P)" || exit `+fmt.Sprint(exitNotCheckout),
-		`test "$(git -C "$root" config --get remote.origin.url)" = `+remote.Quote(session.Config.Repository)+` || exit `+fmt.Sprint(exitOtherOrigin),
-		orca.FirstUseCheck+` || exit `+fmt.Sprint(exitPriorRuntime),
+	return checkCheckout(ctx, session, "check the retained checkout", result.Name, result.Machine, result.ProjectRoot)
+}
+
+func checkUnused(ctx context.Context, session *workspace.Session, record *workspace.Record) error {
+	return checkCheckout(ctx, session, "check the unused checkout", record.Name, record.Machine, session.ProjectRoot(),
+		`test -z "$(git -C "$root" status --porcelain --untracked-files=all)" || exit `+fmt.Sprint(exitNotClean),
 	)
-	ran, err := session.Provider.Exec(ctx, result.Machine, []string{"sh", "-c", script}, nil)
-	_, err = answered("check the retained checkout", result.Name, retainedRefusals, ran, err)
+}
+
+func checkCheckout(ctx context.Context, session *workspace.Session, step, name, machine, root string, checks ...string) error {
+	script := remote.Script(slices.Concat([]string{
+		"root=" + remote.Quote(root),
+		`top=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) && test "$top" = "$(cd "$root" && pwd -P)" || exit ` + fmt.Sprint(exitNotCheckout),
+		`test "$(git -C "$root" config --get remote.origin.url)" = ` + remote.Quote(session.Config.Repository) + ` || exit ` + fmt.Sprint(exitOtherOrigin),
+		orca.FirstUseCheck + ` || exit ` + fmt.Sprint(exitPriorRuntime),
+	}, checks)...)
+	ran, err := session.Provider.Exec(ctx, machine, []string{"sh", "-c", script}, nil)
+	_, err = answered(step, name, checkoutRefusals, ran, err)
 	return err
 }
 

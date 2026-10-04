@@ -3,6 +3,8 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,8 @@ import (
 const (
 	LabelWorkspace      = "cc-remote/workspace"
 	LabelProfile        = "cc-remote/profile"
+	LabelPool           = "cc-remote/pool"
+	poolSchema          = "1"
 	tailnetTimeout      = 60 * time.Second
 	urlCommandTimeout   = 60 * time.Second
 	urlCommandWaitDelay = 2 * time.Second
@@ -311,7 +315,7 @@ func (s *Session) verifyTailnet(ctx context.Context) error {
 
 var errNotRecorded = errors.New("no workspace is recorded")
 
-func (s *Session) record(name string) (*Record, error) {
+func (s *Session) Recorded(name string) (*Record, error) {
 	record := &Record{}
 	found, err := state.Load(s.State.Workspace(name), record)
 	if err != nil {
@@ -335,7 +339,39 @@ func (s *Session) forget(name string) error {
 	return errors.Join(state.Remove(s.State.Workspace(name)), state.Remove(s.State.SSH(name)))
 }
 
-func (s *Session) Create(ctx context.Context, name string, source Source) (result *Result, err error) {
+func (s *Session) Create(ctx context.Context, name string, source Source) (*Result, error) {
+	return s.create(ctx, name, source, map[string]string{LabelWorkspace: name})
+}
+
+func (s *Session) CreateSpare(ctx context.Context, name string, source Source) (*Result, error) {
+	return s.create(ctx, name, source, map[string]string{LabelWorkspace: name, LabelPool: s.PoolKey()})
+}
+
+func (s *Session) PoolKey() string {
+	var tailnetTag string
+	if s.Config.Tailnet != nil {
+		tailnetTag = s.Config.Tailnet.Tag
+	}
+	parts := append([]string{poolSchema, s.Config.Repository, s.Kind, s.Profile, s.ProjectRoot(), string(s.profile.Checkout), s.Stamp, s.image, s.imageSpec, tailnetTag}, s.profile.Prepare...)
+	var encoded strings.Builder
+	for _, part := range parts {
+		fmt.Fprintf(&encoded, "%d:%s,", len(part), part)
+	}
+	sum := sha256.Sum256([]byte(encoded.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Session) Poolable() error {
+	switch {
+	case len(s.profile.Prepare) > 0:
+		return fmt.Errorf("profile %s runs prepare steps, so its workspaces are not agent-only and keep no warm pool", s.Profile)
+	case s.profile.Checkout != config.Shallow:
+		return fmt.Errorf("profile %s keeps a %s checkout, and a warm pool keeps only shallow ones", s.Profile, s.profile.Checkout)
+	}
+	return nil
+}
+
+func (s *Session) create(ctx context.Context, name string, source Source, labels map[string]string) (result *Result, err error) {
 	ctx = s.begin(ctx)
 	defer func() { s.summarize(ctx, name, err) }()
 	if err := state.ValidateName(name); err != nil {
@@ -352,7 +388,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (resul
 	if err := s.verifyTailnet(ctx); err != nil {
 		return nil, err
 	}
-	recorded, err := s.record(name)
+	recorded, err := s.Recorded(name)
 	if err != nil && !errors.Is(err, errNotRecorded) {
 		return nil, err
 	}
@@ -375,7 +411,7 @@ func (s *Session) Create(ctx context.Context, name string, source Source) (resul
 	var machine providers.Machine
 	created := s.timed(ctx, laneMain, "machine.create", name, func() error {
 		var err error
-		machine, err = s.Provider.Create(ctx, s.spec(name, map[string]string{LabelWorkspace: name}, s.allocated(record)))
+		machine, err = s.Provider.Create(ctx, s.spec(name, labels, s.allocated(record)))
 		return err
 	})
 	record.Machine, record.Compute = machine.ID, machine.Compute
@@ -767,10 +803,28 @@ func (s *Session) publish(ctx context.Context, machine string) error {
 	return nil
 }
 
-func (s *Session) readyTools(ctx context.Context, record *Record) error {
-	machine := record.Machine
+func (s *Session) sameImage(record *Record) error {
 	if record.Image != s.image || record.ImageSpec != s.imageSpec {
 		return fmt.Errorf("the image of profile %s changed since %s was created (image %q with declaration %.12s, now %q with %.12s); a machine cannot change its image in place, so destroy %s and create it again", s.Profile, record.Name, record.Image, record.ImageSpec, s.image, s.imageSpec, record.Name)
+	}
+	return nil
+}
+
+func (s *Session) toolsReady(ctx context.Context, record *Record) error {
+	if err := s.sameImage(record); err != nil {
+		return err
+	}
+	if err := s.Scripts.Ready(ctx, s.exec(record.Machine), s.Stamp); err != nil {
+		return fmt.Errorf("the tools on %s are not ready at stamp %.12s, and a reused workspace is never provisioned again in place: %w", record.Machine, s.Stamp, err)
+	}
+	s.Log.Info("the tools are ready at the current stamp", "machine", record.Machine, "stamp", s.Stamp[:12])
+	return nil
+}
+
+func (s *Session) readyTools(ctx context.Context, record *Record) error {
+	machine := record.Machine
+	if err := s.sameImage(record); err != nil {
+		return err
 	}
 	err := s.Scripts.Ready(ctx, s.exec(machine), s.Stamp)
 	if err == nil {
@@ -937,7 +991,7 @@ func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
 		return nil, err
 	}
 	defer held.Release()
-	record, err := s.record(name)
+	record, err := s.Recorded(name)
 	if err != nil {
 		return nil, err
 	}
@@ -955,10 +1009,62 @@ func (s *Session) Resume(ctx context.Context, name string) (*Result, error) {
 	return s.restore(ctx, held, record)
 }
 
+func (s *Session) Reuse(ctx context.Context, name string, source Source) (*Result, error) {
+	ctx = s.begin(ctx)
+	if err := source.Validate(); err != nil {
+		return nil, err
+	}
+	held, err := s.State.Hold(name)
+	if err != nil {
+		return nil, err
+	}
+	defer held.Release()
+	record, err := s.Recorded(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.verifyTailnet(ctx); err != nil {
+		return nil, err
+	}
+	if record.Unverified {
+		return nil, fmt.Errorf("the create of %s never confirmed that %s came to exist, so it is not reused", record.Name, record.Machine)
+	}
+	if s.Retain != nil {
+		if err := s.Retain(ctx, record); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.Provider.Wake(ctx, record.Machine); err != nil {
+		return nil, err
+	}
+	if err := s.toolsReady(ctx, record); err != nil {
+		return nil, err
+	}
+	record.Source = source
+	if err := s.checkout(ctx, record); err != nil {
+		return nil, err
+	}
+	if err := s.save(record); err != nil {
+		return nil, err
+	}
+	env, err := s.forwards(record)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.configure(ctx, record, env); err != nil {
+		return nil, err
+	}
+	return s.rejoin(ctx, held, record)
+}
+
 func (s *Session) restore(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
 	if err := s.reopen(ctx, record); err != nil {
 		return nil, err
 	}
+	return s.rejoin(ctx, held, record)
+}
+
+func (s *Session) rejoin(ctx context.Context, held *state.Held, record *Record) (*Result, error) {
 	if s.Enroller == nil {
 		return s.deliver(ctx, record)
 	}
@@ -1007,7 +1113,7 @@ func (s *Session) Suspend(ctx context.Context, name string) error {
 		return err
 	}
 	defer held.Release()
-	record, err := s.record(name)
+	record, err := s.Recorded(name)
 	if err != nil {
 		return err
 	}
@@ -1023,7 +1129,7 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 		return err
 	}
 	defer held.Release()
-	record, err := s.record(name)
+	record, err := s.Recorded(name)
 	if errors.Is(err, errNotRecorded) {
 		return s.forgetBinding(ctx, held, err)
 	}
@@ -1050,7 +1156,7 @@ func (s *Session) Extend(ctx context.Context, name string, by time.Duration) (*R
 		return nil, err
 	}
 	defer held.Release()
-	record, err := s.record(name)
+	record, err := s.Recorded(name)
 	if err != nil {
 		return nil, err
 	}

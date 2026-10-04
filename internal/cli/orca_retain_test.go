@@ -33,6 +33,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) == 4 && os.Args[1] == "hold-gateway" {
 		os.Exit(holdGatewayStandIn(os.Args[2], os.Args[3]))
 	}
+	fillCommand = func(string, string, string) (*exec.Cmd, error) {
+		return nil, fmt.Errorf("a test started the warm pool fill without a stand-in")
+	}
 	os.Exit(m.Run())
 }
 
