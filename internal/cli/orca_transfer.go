@@ -43,9 +43,11 @@ var (
 	transferRefusals = map[int]string{
 		exitInsideCheckout: "the task directory resolves inside the checkout",
 		exitNotArtifact:    "the path is not a regular file directly in the recorded physical task directory",
-		exitNotCheckout:    "the configured project root is not the top level of a git checkout",
-		exitOtherOrigin:    "the checkout's origin is not the configured repository",
-		exitPriorRuntime:   "the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites",
+	}
+	retainedRefusals = map[int]string{
+		exitNotCheckout:  "the configured project root is not the top level of a git checkout",
+		exitOtherOrigin:  "the checkout's origin is not the configured repository",
+		exitPriorRuntime: "the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites",
 	}
 )
 
@@ -95,15 +97,15 @@ func artifactOf(name string, data []byte) orcaArtifact {
 
 func (t *orcaTask) fetch(ctx context.Context, step, script string, stdin io.Reader) ([]byte, error) {
 	result, err := t.shell(ctx, script, stdin)
-	return answered(step, t.Workspace, result, err)
+	return answered(step, t.Workspace, transferRefusals, result, err)
 }
 
-func answered(step, name string, result providers.Result, err error) ([]byte, error) {
+func answered(step, name string, refusals map[int]string, result providers.Result, err error) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s on %s: %w", step, name, err)
 	}
 	if result.ExitCode != 0 {
-		return nil, fmt.Errorf("%s on %s exited %d: %s", step, name, result.ExitCode, cmp.Or(transferRefusals[result.ExitCode], "its remote output is withheld"))
+		return nil, fmt.Errorf("%s on %s exited %d: %s", step, name, result.ExitCode, cmp.Or(refusals[result.ExitCode], "its remote output is withheld"))
 	}
 	return result.Stdout, nil
 }
@@ -116,7 +118,7 @@ func checkRetained(ctx context.Context, session *workspace.Session, result *work
 		orca.FirstUseCheck+` || exit `+fmt.Sprint(exitPriorRuntime),
 	)
 	ran, err := session.Provider.Exec(ctx, result.Machine, []string{"sh", "-c", script}, nil)
-	_, err = answered("check the retained checkout", result.Name, ran, err)
+	_, err = answered("check the retained checkout", result.Name, retainedRefusals, ran, err)
 	return err
 }
 
