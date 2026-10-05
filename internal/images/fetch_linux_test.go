@@ -65,7 +65,7 @@ func TestFetchAdmitsOnlyTheExactBytes(t *testing.T) {
 			_, _ = w.Write(payload)
 		}, hashFails: true, wantErr: " download failed (curl exit 0, HTTP 200, tee exit 0, openssl exit 7)"},
 	}
-	for _, artifact := range stagedArtifacts {
+	for _, artifact := range append(slices.Clone(stagedArtifacts), HelperArtifact) {
 		for _, tt := range tests {
 			t.Run(artifact.Label+"/"+tt.name, func(t *testing.T) {
 				root := t.TempDir()

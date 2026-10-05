@@ -18,6 +18,7 @@ type Runner interface {
 
 type ExecRunner struct {
 	Command string
+	Env     []string
 }
 
 type Client struct {
@@ -88,6 +89,7 @@ func CLICommand(getenv func(string) string, goos string) string {
 
 func (r ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, r.Command, args...)
+	cmd.Env = r.Env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

@@ -399,12 +399,19 @@ func (p *orcaPool) fill(ctx context.Context) (*orcaFill, error) {
 }
 
 func (p *orcaPool) refill(ctx context.Context, fill *orcaFill) error {
+	helper, err := selectHelper(p.session)
+	if err != nil {
+		return err
+	}
 	for {
 		member, err := p.shortfall(ctx, fill)
 		if err != nil || member == nil {
 			return err
 		}
 		result, err := p.session.CreateSpare(ctx, member.Name, workspace.Source{Ref: p.session.Config.Ref})
+		if err == nil && helper != nil {
+			err = ensureHelper(ctx, p.session, result.Machine, helper)
+		}
 		if err == nil {
 			member.Pregrant, err = p.pregrant(ctx, result)
 		}

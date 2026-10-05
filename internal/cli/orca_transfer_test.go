@@ -44,6 +44,7 @@ done
 for script do :; done
 printf '%s\0' "$script" >> "$SSH_LOG"
 case $script in
+*"orca guest-bootstrap"*) cat > "$GUEST_DESCRIPTOR"; printf '%s\n' "$GUEST_RESULT"; exit 0 ;;
 *mkfifo*) printf '%s\n' ` + fakeKeyDir + `; exit 0 ;;
 *key.Ab12/key*) cat > /dev/null; exit 0 ;;
 *"rm -rf"*) exit 0 ;;
@@ -82,6 +83,8 @@ func sshCalls(t *testing.T) []string {
 		switch {
 		case script == "check":
 			kind = "check"
+		case strings.Contains(script, "orca guest-bootstrap"):
+			kind = "guest-bootstrap"
 		case strings.Contains(script, "mkfifo"):
 			kind = "key-dir"
 		case strings.Contains(script, "key.Ab12/key"):

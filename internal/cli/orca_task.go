@@ -66,6 +66,7 @@ type orcaTask struct {
 	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
 
 	provider providers.Provider
+	claimed  bool
 }
 
 type orcaGateway struct {
@@ -346,6 +347,9 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			return nil, err
 		}
 		if err = reclaim(ctx, session, result, pregrant); err == nil {
+			err = claimHelper(ctx, session, result.Machine)
+		}
+		if err == nil {
 			key, judge, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
 		}
 	case openCreated:
@@ -360,7 +364,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		task, err = driver.task(result, l.agent, session.Provider)
 	}
 	if err == nil {
-		task.Pregrant = pregrant
+		task.Pregrant, task.claimed = pregrant, opening == openSpare
 		err = driver.launch(ctx, session, task, runtime, key, judge, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
@@ -773,6 +777,10 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err != nil {
 		return err
 	}
+	helper, err := d.prepareHelper(ctx, session, task)
+	if err != nil {
+		return err
+	}
 	ready, pairing, err := d.start(ctx, session, task, runtime)
 	if err != nil {
 		return err
@@ -814,7 +822,12 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err != nil {
 		return err
 	}
-	task.Bootstrap, err = native.Bootstrap(ctx, task.Terminal, startup, session.Config.Trusted(), orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute})
+	poll := orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute}
+	if helper != "" {
+		task.Bootstrap, err = d.guestBootstrap(ctx, task, helper, runtime, startup, session.Config.Trusted(), poll)
+	} else {
+		task.Bootstrap, err = native.Bootstrap(ctx, task.Terminal, startup, session.Config.Trusted(), poll)
+	}
 	return errors.Join(err, d.save(task))
 }
 
