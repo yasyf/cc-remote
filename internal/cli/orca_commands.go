@@ -31,6 +31,7 @@ func newOrcaCmd(runner orca.Runner) *cobra.Command {
 		newOrcaWaitCmd(runner),
 		newOrcaVerifyCmd(runner),
 		newOrcaGoneCmd(runner),
+		newOrcaGuestBootstrapCmd(),
 	)
 	cmd.AddCommand(newOrcaTaskCmds(runner)...)
 	return cmd

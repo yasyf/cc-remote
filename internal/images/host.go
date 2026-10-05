@@ -25,6 +25,7 @@ const (
 	PackagesPack  = "/var/lib/cc-remote/build/packages.tar"
 	PackagesStore = "/var/lib/cc-remote/packages"
 	ClosurePath   = "/opt/cc-remote/closure"
+	HelperStore   = "/var/lib/cc-remote/bootstrap-helpers"
 )
 
 type TransferArtifact struct {
@@ -37,6 +38,7 @@ type TransferArtifact struct {
 var (
 	PayloadArtifact  = TransferArtifact{Label: "payload", Name: "payload", Store: PayloadStore, Suffix: ".sqfs"}
 	PackagesArtifact = TransferArtifact{Label: "packages", Name: "packages archive", Store: PackagesStore, Suffix: ".tar"}
+	HelperArtifact   = TransferArtifact{Label: "bootstrap-helper", Name: "bootstrap helper archive", Store: HelperStore, Suffix: ".tar.gz"}
 )
 
 const (

@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -38,6 +39,17 @@ func TestPoolKeyChangesWithWhatAWarmWorkspaceWasBuiltFrom(t *testing.T) {
 		{"tailnet tag", func(s *Session) { s.Config.Tailnet = &config.Tailnet{Tag: "tag:cc-remote"} }},
 		{"one prepare step", func(s *Session) { s.profile.Prepare = []string{"make deps"} }},
 		{"two prepare steps", func(s *Session) { s.profile.Prepare = []string{"make", "deps"} }},
+		{"bootstrap helper", func(s *Session) {
+			s.Config.Orca.BootstrapHelper = &config.BootstrapHelper{Source: config.Source{URLCommand: []string{"./payload-url", "bootstrap-helper"}, SHA256: strings.Repeat("d", 64), Size: 6288446}, Version: "0.20.0", Platform: config.HelperPlatform, BinarySHA256: strings.Repeat("e", 64)}
+		}},
+		{"another bootstrap helper binary", func(s *Session) {
+			s.Config.Orca.BootstrapHelper = &config.BootstrapHelper{Source: config.Source{URLCommand: []string{"./payload-url", "bootstrap-helper"}, SHA256: strings.Repeat("d", 64), Size: 6288446}, Version: "0.20.0", Platform: config.HelperPlatform, BinarySHA256: strings.Repeat("e", 64)}
+			s.Config.Orca.BootstrapHelper.BinarySHA256 = strings.Repeat("f", 64)
+		}},
+		{"another bootstrap helper release", func(s *Session) {
+			s.Config.Orca.BootstrapHelper = &config.BootstrapHelper{Source: config.Source{URLCommand: []string{"./payload-url", "bootstrap-helper"}, SHA256: strings.Repeat("d", 64), Size: 6288446}, Version: "0.20.0", Platform: config.HelperPlatform, BinarySHA256: strings.Repeat("e", 64)}
+			s.Config.Orca.BootstrapHelper.Version, s.Config.Orca.BootstrapHelper.SHA256 = "0.21.0", strings.Repeat("0", 64)
+		}},
 	}
 	seen := map[string]string{key: "the base"}
 	for _, tt := range tests {
@@ -126,5 +138,18 @@ func TestReuseNeverProvisionsToolsThatDriftedFromTheStamp(t *testing.T) {
 	}
 	if record, ok := h.record("ws-1"); !ok || record.Source.Ref != "main" {
 		t.Errorf("record = %+v, want the source kept", record)
+	}
+}
+
+func TestABootstrapHelperChangesOnlyThePoolKey(t *testing.T) {
+	h := newPayloadHarness(t)
+	before, key := h.session, h.session.PoolKey()
+	h.cfg.Orca.BootstrapHelper = &config.BootstrapHelper{Source: config.Source{URLCommand: []string{"./payload-url", "bootstrap-helper"}, SHA256: strings.Repeat("d", 64), Size: 6288446}, Version: "0.20.0", Platform: config.HelperPlatform, BinarySHA256: strings.Repeat("e", 64)}
+	after := h.open()
+	if after.PoolKey() == key {
+		t.Error("a bootstrap helper kept the pool key of a workspace without one")
+	}
+	if after.Stamp != before.Stamp || after.Scripts.Fingerprint() != before.Scripts.Fingerprint() || !bytes.Equal(after.Scripts.ProvisionScript, before.Scripts.ProvisionScript) || !bytes.Equal(after.Scripts.Plugins, before.Scripts.Plugins) {
+		t.Errorf("the helper changed the rendered tools: stamp %s -> %s, scripts %s -> %s", before.Stamp, after.Stamp, before.Scripts.Fingerprint(), after.Scripts.Fingerprint())
 	}
 }

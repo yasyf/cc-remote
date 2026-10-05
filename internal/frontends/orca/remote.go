@@ -83,6 +83,7 @@ type Remote struct {
 	client      Client
 	Environment string
 	RuntimeID   string
+	local       bool
 }
 
 type promptDeliveryError struct {
@@ -130,6 +131,10 @@ func (c Client) AddEnvironment(ctx context.Context, name, pairing string) (Envir
 
 func (c Client) On(environment, runtimeID string) Remote {
 	return Remote{client: c, Environment: environment, RuntimeID: runtimeID}
+}
+
+func (c Client) Local(runtimeID string) Remote {
+	return Remote{client: c, Environment: LocalRuntime, RuntimeID: runtimeID, local: true}
 }
 
 func (r Remote) Status(ctx context.Context) (RuntimeStatus, error) {
@@ -285,7 +290,11 @@ func (s Send) Receipt(at time.Time) Receipt {
 }
 
 func scoped[T any](ctx context.Context, r Remote, label string, args ...string) (T, error) {
-	out, runErr := r.client.runner.Run(ctx, append(args, "--environment", r.Environment, "--json")...)
+	target := []string{"--environment", r.Environment}
+	if r.local {
+		target = nil
+	}
+	out, runErr := r.client.runner.Run(ctx, slices.Concat(args, target, []string{"--json"})...)
 	result, err := decode[T](out, label+" on "+r.Environment, r.RuntimeID)
 	if err != nil && len(bytes.TrimSpace(out)) == 0 {
 		return result, errors.Join(runErr, err)

@@ -25,6 +25,7 @@ const (
 	DefaultPoolReady       = 1
 	KeyAnthropic           = "anthropic"
 	KeyOpenAI              = "openai"
+	HelperPlatform         = "linux/amd64"
 	dirName                = "cc-remote"
 	fileName               = "config.yaml"
 )
@@ -102,6 +103,15 @@ type Orca struct {
 	Keys    map[string][]string `yaml:"keys"`
 	Trust   []string            `yaml:"trust"`
 	Pool    Pool                `yaml:"pool"`
+
+	BootstrapHelper *BootstrapHelper `yaml:"bootstrap_helper"`
+}
+
+type BootstrapHelper struct {
+	Source       `yaml:",inline"`
+	Version      string `yaml:"version"`
+	Platform     string `yaml:"platform"`
+	BinarySHA256 string `yaml:"binary_sha256"`
 }
 
 type Pool struct {
@@ -111,6 +121,7 @@ type Pool struct {
 var (
 	envName    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 	digest     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	release    = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 	Identifier = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,19}$`)
 )
 
@@ -224,7 +235,24 @@ func (o Orca) validate() error {
 	if *o.Pool.Ready < 0 {
 		return fmt.Errorf("orca.pool.ready %d must count the unused warm workspaces to keep ready, 0 or more", *o.Pool.Ready)
 	}
+	if o.BootstrapHelper != nil {
+		return o.BootstrapHelper.validate()
+	}
 	return nil
+}
+
+func (h BootstrapHelper) validate() error {
+	switch {
+	case h.Path != "" || len(h.URLCommand) == 0:
+		return errors.New("orca.bootstrap_helper.url_command names the command that prints the helper archive's private HTTPS URL; a local path is not a helper source")
+	case !release.MatchString(h.Version):
+		return fmt.Errorf("orca.bootstrap_helper.version %q must be the exact released cc-remote version, such as 0.20.0", h.Version)
+	case h.Platform != HelperPlatform:
+		return fmt.Errorf("orca.bootstrap_helper.platform %q: the helper runs only on %s workspaces", h.Platform, HelperPlatform)
+	case !digest.MatchString(h.BinarySHA256):
+		return fmt.Errorf("orca.bootstrap_helper.binary_sha256 %q must be the 64 lowercase hex digits of the archive's cc-remote binary", h.BinarySHA256)
+	}
+	return h.Source.validate("orca.bootstrap_helper", "helper archive")
 }
 
 func (c *Config) Trusted() bool {

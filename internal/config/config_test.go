@@ -247,6 +247,49 @@ func TestOrcaPoolReadyKeepsAnExplicitCount(t *testing.T) {
 	}
 }
 
+func helper(fields string) string {
+	return minimal + "orca:\n  bootstrap_helper: { " + fields + " }\n"
+}
+
+const helperFields = "url_command: [./payload-url, bootstrap-helper], sha256: " + digest64 + ", size: 6288446, version: 0.20.0, platform: linux/amd64, binary_sha256: " + digest64
+
+func TestParseReadsABootstrapHelper(t *testing.T) {
+	cfg, err := Parse([]byte(helper(helperFields)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &BootstrapHelper{Source: Source{URLCommand: []string{"./payload-url", "bootstrap-helper"}, SHA256: digest64, Size: 6288446}, Version: "0.20.0", Platform: HelperPlatform, BinarySHA256: digest64}
+	if !reflect.DeepEqual(cfg.Orca.BootstrapHelper, want) {
+		t.Errorf("orca.bootstrap_helper = %+v, want %+v", cfg.Orca.BootstrapHelper, want)
+	}
+	if cfg, err := Parse([]byte(minimal)); err != nil || cfg.Orca.BootstrapHelper != nil {
+		t.Errorf("a config without a helper = %+v, %v", cfg.Orca.BootstrapHelper, err)
+	}
+}
+
+func TestParseRefusesAnUnboundBootstrapHelper(t *testing.T) {
+	tests := []struct {
+		name, fields, want string
+	}{
+		{"local path", "path: helper.tar.gz, sha256: " + digest64 + ", version: 0.20.0, platform: linux/amd64, binary_sha256: " + digest64, "a local path is not a helper source"},
+		{"no url_command", "sha256: " + digest64 + ", size: 1, version: 0.20.0, platform: linux/amd64, binary_sha256: " + digest64, "url_command names the command"},
+		{"dev version", strings.Replace(helperFields, "0.20.0", "dev", 1), `version "dev" must be the exact released`},
+		{"prefixed version", strings.Replace(helperFields, "0.20.0", "v0.20.0", 1), `version "v0.20.0"`},
+		{"other platform", strings.Replace(helperFields, "linux/amd64", "darwin/arm64", 1), `platform "darwin/arm64": the helper runs only on linux/amd64`},
+		{"short binary digest", strings.Replace(helperFields, "binary_sha256: "+digest64, "binary_sha256: "+digest64[:40], 1), "binary_sha256"},
+		{"no size", strings.Replace(helperFields, "size: 6288446, ", "", 1), "orca.bootstrap_helper.size 0 must pin the byte count"},
+		{"short archive digest", strings.Replace(helperFields, "sha256: "+digest64+", size", "sha256: "+digest64[:40]+", size", 1), "orca.bootstrap_helper.sha256"},
+		{"unknown field", helperFields + ", member: other", "member"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(helper(tt.fields))); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want it to mention %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseRefusesWhatCannotRun(t *testing.T) {
 	tests := []struct {
 		name string

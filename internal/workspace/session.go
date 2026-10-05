@@ -359,6 +359,9 @@ func (s *Session) PoolKey() string {
 		tailnetTag = s.Config.Tailnet.Tag
 	}
 	parts := append([]string{poolSchema, s.Config.Repository, s.Kind, s.Profile, s.ProjectRoot(), string(s.profile.Checkout), s.Stamp, s.image, s.imageSpec, tailnetTag, s.wordnetContract()}, s.profile.Prepare...)
+	if helper := s.Config.Orca.BootstrapHelper; helper != nil {
+		parts = append(parts, images.HelperArtifact.Label, helper.Version, helper.Platform, helper.SHA256, strconv.FormatInt(helper.Size, 10), helper.BinarySHA256)
+	}
 	var encoded strings.Builder
 	for _, part := range parts {
 		fmt.Fprintf(&encoded, "%d:%s,", len(part), part)
@@ -733,6 +736,15 @@ func (s *Session) source(ctx context.Context, machine string, from artifactSourc
 		s.Log.Info("fetched the "+from.artifact.Name, "sha256", from.source.SHA256[:12])
 		return nil
 	}, nil
+}
+
+func (s *Session) FetchHelper(ctx context.Context, machine string) error {
+	ctx = s.begin(ctx)
+	fetch, err := s.source(ctx, machine, artifactSource{images.HelperArtifact, laneMain, s.Config.Orca.BootstrapHelper.Source})
+	if err != nil {
+		return err
+	}
+	return fetch(ctx, machine, s.exec(machine))
 }
 
 func (s *Session) sourceURL(ctx context.Context, from artifactSource) (images.PayloadURL, error) {
