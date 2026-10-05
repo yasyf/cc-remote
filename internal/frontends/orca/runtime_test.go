@@ -382,7 +382,7 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset"},
 	}
 	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"}
-	var report, stale []string
+	report, stale := make([]string, 0, len(names)), make([]string, 0, len(names))
 	for _, name := range names {
 		report = append(report, `"${`+name+`-unset}"`)
 		stale = append(stale, name+"=stale")
