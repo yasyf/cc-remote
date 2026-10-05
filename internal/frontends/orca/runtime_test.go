@@ -324,7 +324,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$" + tt.variable + "\" \"${" + tt.cleared + "-unset}\" \"$1\"\n"
+			worker := "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$" + tt.variable + "\" \"${" + tt.cleared + "-unset}\" \"$CAPT_HOOK_ACTOR_JUDGE\" \"$1\"\n"
 			if err := os.WriteFile(filepath.Join(bin, tt.agent.Kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -346,7 +346,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "sk-test-key|unset|" + tt.agent.Argv()[1] + "\n"
+			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.agent.Argv()[1] + "\n"
 			if string(out) != want {
 				t.Errorf("worker saw %q, want %q", out, want)
 			}
@@ -370,4 +370,64 @@ func TestParseKeyDir(t *testing.T) {
 	if got := orca.KeyWriteScript(dir); got != "exec cat > /home/agent/.cc-remote/orca/key.Ab12Cd34/key" {
 		t.Errorf("KeyWriteScript = %q", got)
 	}
+}
+
+func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
+	tests := []struct {
+		name, kind, payload, want string
+	}{
+		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset"},
+		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset"},
+		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset"},
+		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset"},
+	}
+	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"}
+	report, stale := make([]string, 0, len(names)), make([]string, 0, len(names))
+	for _, name := range names {
+		report = append(report, `"${`+name+`-unset}"`)
+		stale = append(stale, name+"=stale")
+	}
+	worker := "#!/bin/sh\nprintf '" + strings.Repeat("%s|", len(names)-1) + "%s\\n' " + strings.Join(report, " ") + "\n"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := orca.Agent{Kind: tt.kind, Model: "m", Effort: "e"}
+			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", agent.Command(dir))
+			cmd.Env = append(append(withoutCredentials(), stale...), "PATH="+bin+":"+os.Getenv("PATH"))
+			go func() {
+				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = fifo.WriteString(tt.payload)
+				_ = fifo.Close()
+			}()
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Errorf("worker saw %q, want %q", got, tt.want)
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("the key directory survived: %v", err)
+			}
+		})
+	}
+}
+
+func withoutCredentials() []string {
+	return slices.DeleteFunc(os.Environ(), func(pair string) bool {
+		name, _, _ := strings.Cut(pair, "=")
+		return slices.Contains(orca.CredentialEnv(), name)
+	})
 }

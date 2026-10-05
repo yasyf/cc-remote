@@ -267,7 +267,7 @@ func TestComputeLaunchReachesItsRuntimeThroughTheRetainedGateway(t *testing.T) {
 	gatewayRuntime := runtime
 	gatewayRuntime.Port, gatewayRuntime.Advertise = 18766, fmt.Sprintf("ws://127.0.0.1:%d", loopback)
 	ensured = gatewayRuntime.EnsureScript()
-	if err := driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), "task-a"); err != nil {
+	if err := driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), nil, "task-a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := driver.publish(t.Context(), task, []byte("Read every line.\n")); err != nil {
