@@ -336,6 +336,9 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			return nil, err
 		}
 		if err = checkRetained(ctx, session, result); err == nil {
+			err = session.PrepareWordnet(ctx, result.Machine)
+		}
+		if err == nil {
 			key, judge, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
 		}
 	case openSpare:
