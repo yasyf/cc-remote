@@ -145,23 +145,50 @@ func TestStatusRequiresTheRecordedRuntime(t *testing.T) {
 	}
 }
 
-func TestAddRepoAndWorktreeAdoptTheExistingCheckout(t *testing.T) {
+func TestAddRepoAdoptsTheExistingCheckout(t *testing.T) {
 	root := "/home/agent/app"
-	fake := newFakeOrca(t).
-		on("repo add --path "+root+scope, ok(`{"repo":{"id":"repo-1","path":"/home/agent/app","displayName":"app"}}`)).
-		on("worktree list --repo id:repo-1"+scope, ok(`{"worktrees":[{"id":"repo-1::/home/agent/app/.worktrees/x","repoId":"repo-1","path":"/home/agent/app/.worktrees/x"},{"id":"repo-1::/home/agent/app","repoId":"repo-1","path":"/home/agent/app","branch":"main"}]}`))
-	native := orca.NewClient(fake).On(env, runtimeID)
-	repo, err := native.AddRepo(context.Background(), root)
-	if err != nil || repo.ID != "repo-1" {
+	fake := newFakeOrca(t).on("repo add --path "+root+scope, ok(`{"repo":{"id":"repo-1","path":"/home/agent/app","displayName":"app"}}`))
+	if repo, err := orca.NewClient(fake).On(env, runtimeID).AddRepo(context.Background(), root); err != nil || repo.ID != "repo-1" {
 		t.Fatalf("AddRepo = %+v, %v", repo, err)
-	}
-	worktree, err := native.Worktree(context.Background(), repo.ID, root)
-	if err != nil || worktree.ID != "repo-1::/home/agent/app" {
-		t.Errorf("Worktree = %+v, %v", worktree, err)
 	}
 	other := newFakeOrca(t).on("repo add --path "+root+scope, ok(`{"repo":{"id":"repo-2","path":"/home/agent/clone"}}`))
 	if _, err := orca.NewClient(other).On(env, runtimeID).AddRepo(context.Background(), root); err == nil || !strings.Contains(err.Error(), "not the checkout at "+root) {
 		t.Errorf("AddRepo of another path = %v", err)
+	}
+}
+
+func TestCreateTerminalStartsInTheExactPrimaryCheckout(t *testing.T) {
+	repo := orca.Repo{ID: "repo-1", Path: "/home/agent/app"}
+	command := "terminal create --worktree id:repo-1::/home/agent/app --title task-a --command run-worker" + scope
+	tests := []struct {
+		name   string
+		out    string
+		err    error
+		handle string
+		want   string
+	}{
+		{"primary checkout", ok(`{"terminal":{"handle":"term-1","worktreeId":"repo-1::/home/agent/app"}}`), nil, "term-1", ""},
+		{"another worktree", ok(`{"terminal":{"handle":"term-1","worktreeId":"repo-1::/home/agent/app/.worktrees/x"}}`), nil, "term-1", `in worktree "repo-1::/home/agent/app/.worktrees/x", not the primary checkout repo-1::/home/agent/app`},
+		{"no worktree", ok(`{"terminal":{"handle":"term-1"}}`), nil, "term-1", `in worktree "", not the primary checkout`},
+		{"another runtime", `{"id":"1","ok":true,"result":{"terminal":{"handle":"term-1","worktreeId":"repo-1::/home/agent/app"}},"_meta":{"runtimeId":"rt-2"}}`, nil, "term-1", `answered from runtime "rt-2", not rt-1`},
+		{"no handle", ok(`{"terminal":{"worktreeId":"repo-1::/home/agent/app"}}`), nil, "", "returned no terminal handle"},
+		{"failure envelope", `{"id":"1","ok":false,"error":{"code":"selector_not_found","message":"no worktree"},"_meta":{"runtimeId":"rt-1"}}`, nil, "", "selector_not_found: no worktree"},
+		{"runner failure", "", errors.New("exit status 1"), "", "exit status 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeOrca(t).fail(command, tt.out, tt.err)
+			terminal, err := orca.NewClient(fake).On(env, runtimeID).CreateTerminal(context.Background(), repo, "task-a", "run-worker")
+			if tt.want == "" && (err != nil || terminal.WorktreeID != "repo-1::/home/agent/app") || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("CreateTerminal = %+v, %v; want %q", terminal, err, tt.want)
+			}
+			if terminal.Handle != tt.handle {
+				t.Errorf("handle = %q, want %q", terminal.Handle, tt.handle)
+			}
+			if n := fake.called(command); n != 1 || len(fake.calls) != 1 {
+				t.Errorf("orca calls = %q, want the one exact primary selector create", fake.calls)
+			}
+		})
 	}
 }
 

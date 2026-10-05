@@ -158,30 +158,18 @@ func (r Remote) AddRepo(ctx context.Context, path string) (Repo, error) {
 	return result.Repo, nil
 }
 
-func (r Remote) Worktree(ctx context.Context, repoID, path string) (Worktree, error) {
-	result, err := scoped[struct {
-		Worktrees []Worktree `json:"worktrees"`
-	}](ctx, r, "orca worktree list", "worktree", "list", "--repo", "id:"+repoID)
-	if err != nil {
-		return Worktree{}, err
-	}
-	for _, worktree := range result.Worktrees {
-		if worktree.RepoID == repoID && worktree.Path == path {
-			return worktree, nil
-		}
-	}
-	return Worktree{}, fmt.Errorf("environment %s lists no worktree of repo %s at %s", r.Environment, repoID, path)
-}
-
-func (r Remote) CreateTerminal(ctx context.Context, worktreeID, title, command string) (Terminal, error) {
+func (r Remote) CreateTerminal(ctx context.Context, repo Repo, title, command string) (Terminal, error) {
+	primary := repo.ID + "::" + repo.Path
 	result, err := scoped[struct {
 		Terminal Terminal `json:"terminal"`
-	}](ctx, r, "orca terminal create", "terminal", "create", "--worktree", "id:"+worktreeID, "--title", title, "--command", command)
-	if err != nil {
-		return Terminal{}, err
-	}
-	if result.Terminal.Handle == "" {
+	}](ctx, r, "orca terminal create", "terminal", "create", "--worktree", "id:"+primary, "--title", title, "--command", command)
+	switch {
+	case err != nil:
+		return result.Terminal, err
+	case result.Terminal.Handle == "":
 		return Terminal{}, fmt.Errorf("orca terminal create on %s returned no terminal handle", r.Environment)
+	case result.Terminal.WorktreeID != primary:
+		return result.Terminal, fmt.Errorf("orca terminal create on %s started terminal %s in worktree %q, not the primary checkout %s", r.Environment, result.Terminal.Handle, result.Terminal.WorktreeID, primary)
 	}
 	return result.Terminal, nil
 }
