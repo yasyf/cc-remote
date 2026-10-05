@@ -242,7 +242,6 @@ func TestComputeLaunchReachesItsRuntimeThroughTheRetainedGateway(t *testing.T) {
 		"environment add --name task-a --pairing-code orca://pair?code=private --json",
 		"status" + scope,
 		"repo add --path " + root + scope,
-		"worktree list --repo id:repo-1" + scope,
 		"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
 		"terminal read --terminal term-1 --screen" + scope,
 		"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
@@ -251,10 +250,9 @@ func TestComputeLaunchReachesItsRuntimeThroughTheRetainedGateway(t *testing.T) {
 		commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"task-a"}}`),
 		commands[1]: envelope("rt-1", `{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`),
 		commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+root+`"}}`),
-		commands[3]: envelope("rt-1", `{"worktrees":[{"id":"`+worktree+`","repoId":"repo-1","path":"`+root+`"}]}`),
-		commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1"}}`),
-		commands[5]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
-		commands[6]: envelope("rt-1", `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null,"blockedReason":""}}`),
+		commands[3]: envelope("rt-1", `{"terminal":{"handle":"term-1","worktreeId":"`+worktree+`"}}`),
+		commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
+		commands[5]: envelope("rt-1", `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null,"blockedReason":""}}`),
 	}}
 	driver := orcaDriver{client: orca.NewClient(fake), state: session.Config.State(), log: session.Log}
 	lock := driver.state.OrcaGatewayLock("task-a", "task-a")
@@ -419,7 +417,7 @@ func TestServerRecipesRefuseWhileAFirstWorkerHoldsTheTask(t *testing.T) {
 		t.Setenv(name, value)
 	}
 	native, commands := w.native()
-	booting, runner := w.booting(native, commands[5])
+	booting, runner := w.booting(native, commands[4])
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() { done <- w.prepare(t.Context(), w.session, runner, &out, "task-a", true) }()

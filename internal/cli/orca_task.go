@@ -794,15 +794,11 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err != nil {
 		return err
 	}
-	worktree, err := native.Worktree(ctx, repo.ID, task.ProjectRoot)
-	if err != nil {
-		return err
-	}
-	task.RepoID, task.WorktreeID = repo.ID, worktree.ID
+	task.RepoID = repo.ID
 	if err := d.save(task); err != nil {
 		return err
 	}
-	if task.Terminal, err = d.worker(ctx, native, task, title, key, judge, policy); err != nil {
+	if task.Terminal, err = d.worker(ctx, native, task, repo, title, key, judge, policy); err != nil {
 		return err
 	}
 	if err := d.save(task); err != nil {
@@ -906,7 +902,7 @@ func lastReady(stdout []byte) []byte {
 	return []byte(lines[len(lines)-1])
 }
 
-func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, title string, key, judge []byte, policy orca.ShellPolicy) (string, error) {
+func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, repo orca.Repo, title string, key, judge []byte, policy orca.ShellPolicy) (string, error) {
 	out, err := task.run(ctx, orca.KeyDirScript, nil)
 	if err != nil {
 		return "", err
@@ -915,11 +911,12 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 	if err != nil {
 		return "", err
 	}
-	terminal, err := native.CreateTerminal(ctx, task.WorktreeID, title, task.Agent.Command(dir, policy))
+	terminal, err := native.CreateTerminal(ctx, repo, title, task.Agent.Command(dir, policy))
 	if err != nil {
 		dropped := task.dropKey(ctx, dir)
-		return "", errors.Join(err, dropped)
+		return terminal.Handle, errors.Join(err, dropped)
 	}
+	task.WorktreeID = terminal.WorktreeID
 	payload := append(slices.Clone(key), '\n')
 	if judge != nil {
 		payload = append(append(payload, judge...), '\n')

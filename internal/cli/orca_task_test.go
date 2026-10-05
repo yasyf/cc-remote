@@ -309,6 +309,120 @@ func (s *scriptedOrca) Run(_ context.Context, args ...string) ([]byte, error) {
 	return []byte(reply), nil
 }
 
+type createWatch struct {
+	*scriptedOrca
+	atCreate []string
+}
+
+func (c *createWatch) Run(ctx context.Context, args ...string) ([]byte, error) {
+	if len(args) > 1 && args[0] == "terminal" && args[1] == "create" {
+		c.atCreate = sshCalls(c.t)
+	}
+	return c.scriptedOrca.Run(ctx, args...)
+}
+
+func TestLaunchDeliversTheKeyOnlyToTheVerifiedPrimaryTerminal(t *testing.T) {
+	agent := orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}
+	runtime := orca.Runtime{Entry: "tools/orca/AppRun"}
+	ready := `{"type":"orca_server_ready","schemaVersion":1,"runtimeId":"rt-1","boundEndpoint":"ws://0.0.0.0:7001","advertisedEndpoint":"ws://127.0.0.1:7001","pairing":{"available":true,"url":"orca://pair?code=private"}}`
+	envelope := func(runtimeID, result string) string {
+		return `{"ok":true,"result":` + result + `,"_meta":{"runtimeId":"` + runtimeID + `"}}`
+	}
+	drop := "other: " + remote.Quote(orca.KeyDropScript(fakeKeyDir))
+	tests := []struct {
+		name    string
+		created func(worktree string) string
+		want    string
+		handle  string
+		ssh     []string
+	}{
+		{"primary checkout", func(w string) string {
+			return envelope("rt-1", `{"terminal":{"handle":"term-1","worktreeId":"`+w+`"}}`)
+		}, "", "term-1", []string{"check", "key-dir", "key-write"}},
+		{"another worktree", func(w string) string {
+			return envelope("rt-1", `{"terminal":{"handle":"term-1","worktreeId":"`+w+`/.worktrees/x"}}`)
+		}, "not the primary checkout", "term-1", []string{"check", "key-dir", drop}},
+		{"no worktree", func(string) string { return envelope("rt-1", `{"terminal":{"handle":"term-1"}}`) }, "not the primary checkout", "term-1", []string{"check", "key-dir", drop}},
+		{"another runtime", func(w string) string {
+			return envelope("rt-2", `{"terminal":{"handle":"term-1","worktreeId":"`+w+`"}}`)
+		}, `answered from runtime "rt-2", not rt-1`, "term-1", []string{"check", "key-dir", drop}},
+		{"no handle", func(w string) string { return envelope("rt-1", `{"terminal":{"worktreeId":"`+w+`"}}`) }, "returned no terminal handle", "", []string{"check", "key-dir", drop}},
+		{"create failure", func(string) string {
+			return `{"ok":false,"error":{"code":"selector_not_found","message":"no worktree"},"_meta":{"runtimeId":"rt-1"}}`
+		}, "selector_not_found: no worktree", "", []string{"check", "key-dir", drop}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeRemote(t)
+			root, _ := gitCheckout(t)
+			control, err := state.NewOrcaControl()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Remove(filepath.Dir(control)) })
+			provider := &providertest.Fake{Handle: func(string, []string, []byte) providers.Result {
+				return providers.Result{Stdout: []byte("starting\n" + ready + "\n")}
+			}}
+			if _, err := provider.Create(t.Context(), providers.Spec{Name: "task-a"}); err != nil {
+				t.Fatal(err)
+			}
+			worktree := "repo-1::" + root
+			scope := " --environment task-a --json"
+			commands := []string{
+				"environment add --name task-a --pairing-code orca://pair?code=private --json",
+				"status" + scope,
+				"repo add --path " + root + scope,
+				"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
+				"terminal read --terminal term-1 --screen" + scope,
+				"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
+			}
+			fake := &createWatch{scriptedOrca: &scriptedOrca{t: t, replies: map[string]string{
+				commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"task-a"}}`),
+				commands[1]: envelope("rt-1", `{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`),
+				commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+root+`"}}`),
+				commands[3]: tt.created(worktree),
+				commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
+				commands[5]: envelope("rt-1", `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null,"blockedReason":""}}`),
+			}}}
+			session := &workspace.Session{Config: &config.Config{}, Provider: provider, Log: slog.New(slog.DiscardHandler)}
+			driver := orcaDriver{client: orca.NewClient(fake), state: state.Dir(t.TempDir()), log: session.Log}
+			task := &orcaTask{
+				SchemaVersion: orcaTaskSchema, Workspace: "task-a", Provider: "fake", Profile: "lean", Machine: "task-a", ProjectRoot: root,
+				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
+				Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
+			}
+			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), nil, "task-a")
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("launch = %v, want %q", err, tt.want)
+			}
+			calls := commands[:4]
+			if tt.want == "" {
+				calls = commands
+			}
+			if !slices.Equal(fake.calls, calls) {
+				t.Errorf("orca calls =\n%q\nwant\n%q", fake.calls, calls)
+			}
+			if !slices.Equal(fake.atCreate, []string{"check", "key-dir"}) {
+				t.Errorf("ssh calls before terminal create = %q, want only the empty key pipe", fake.atCreate)
+			}
+			if got := sshCalls(t); !slices.Equal(got, tt.ssh) {
+				t.Errorf("ssh calls = %q, want %q", got, tt.ssh)
+			}
+			wantWorktree := ""
+			if tt.want == "" {
+				wantWorktree = worktree
+			}
+			if task.Terminal != tt.handle || task.WorktreeID != wantWorktree || task.RepoID != "repo-1" {
+				t.Errorf("task terminal %q, worktree %q, repo %q; want %q, %q, repo-1", task.Terminal, task.WorktreeID, task.RepoID, tt.handle, wantWorktree)
+			}
+			loaded, err := loadTask(driver.state, "task-a")
+			if err != nil || loaded.RepoID != "repo-1" || loaded.WorktreeID != wantWorktree {
+				t.Errorf("stored task = %+v, %v", loaded, err)
+			}
+		})
+	}
+}
+
 func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 	agent := orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", MCP: []string{`{"mcpServers":{"docs":{"command":"docs-mcp"}}}`}}
 	brief := []byte("Read every line.\n\n'quoted' \"double\" $(touch pwned) `touch pwned`\n")
@@ -328,11 +442,11 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 		ssh     []string
 		timings []string
 	}{
-		{name: "prepare", runtime: "rt-1", idle: true, orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}, timings: []string{"startup.config ok=true", "task.head ok=true", "task.sendBrief ok=true"}},
-		{name: "create", create: true, runtime: "rt-1", idle: true, orca: 8, ssh: []string{"check", "key-dir", "key-write"}, timings: []string{"startup.config ok=true"}},
-		{name: "busy worker", runtime: "rt-1", want: "was not tui-idle", orca: 7, ssh: []string{"check", "key-dir", "key-write"}, timings: []string{"startup.config ok=true"}},
+		{name: "prepare", runtime: "rt-1", idle: true, orca: 6, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}, timings: []string{"startup.config ok=true", "task.head ok=true", "task.sendBrief ok=true"}},
+		{name: "create", create: true, runtime: "rt-1", idle: true, orca: 7, ssh: []string{"check", "key-dir", "key-write"}, timings: []string{"startup.config ok=true"}},
+		{name: "busy worker", runtime: "rt-1", want: "was not tui-idle", orca: 6, ssh: []string{"check", "key-dir", "key-write"}, timings: []string{"startup.config ok=true"}},
 		{name: "other runtime", runtime: "rt-2", want: `answered from runtime "rt-2", not rt-1`, orca: 2, ssh: []string{"check"}},
-		{name: "unverified brief", runtime: "rt-1", idle: true, corrupt: true, want: "not the brief's", orca: 7, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}, timings: []string{"startup.config ok=true", "task.head ok=true", "task.sendBrief ok=false"}},
+		{name: "unverified brief", runtime: "rt-1", idle: true, corrupt: true, want: "not the brief's", orca: 6, ssh: []string{"check", "key-dir", "key-write", "head", "brief"}, timings: []string{"startup.config ok=true", "task.head ok=true", "task.sendBrief ok=false"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -358,7 +472,6 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				"environment add --name task-a --pairing-code orca://pair?code=private --json",
 				"status" + scope,
 				"repo add --path " + root + scope,
-				"worktree list --repo id:repo-1" + scope,
 				"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
 				"terminal read --terminal term-1 --screen" + scope,
 				"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
@@ -368,11 +481,10 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"task-a"}}`),
 				commands[1]: envelope(tt.runtime, `{"runtime":{"state":"ready","reachable":true,"runtimeId":"`+tt.runtime+`"}}`),
 				commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+root+`"}}`),
-				commands[3]: envelope("rt-1", `{"worktrees":[{"id":"`+worktree+`","repoId":"repo-1","path":"`+root+`"}]}`),
-				commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1"}}`),
-				commands[5]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
-				commands[6]: envelope("rt-1", fmt.Sprintf(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":%t,"status":"running","exitCode":null,"blockedReason":"busy"}}`, tt.idle)),
-				commands[7]: envelope("rt-1", `{"send":{"handle":"term-1","accepted":true,"prompt":{"requestId":"req-1","stages":["input_accepted","turn_started"],"provider":"claude","processIncarnation":"p1"}}}`),
+				commands[3]: envelope("rt-1", `{"terminal":{"handle":"term-1","worktreeId":"`+worktree+`"}}`),
+				commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
+				commands[5]: envelope("rt-1", fmt.Sprintf(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":%t,"status":"running","exitCode":null,"blockedReason":"busy"}}`, tt.idle)),
+				commands[6]: envelope("rt-1", `{"send":{"handle":"term-1","accepted":true,"prompt":{"requestId":"req-1","stages":["input_accepted","turn_started"],"provider":"claude","processIncarnation":"p1"}}}`),
 			}}
 			var logs bytes.Buffer
 			session := &workspace.Session{Config: &config.Config{}, Provider: provider, Log: slog.New(slog.NewJSONHandler(&logs, nil))}
@@ -666,7 +778,6 @@ func (w *firstWorker) nativeAs(name string) (*scriptedOrca, []string) {
 		"environment add --name " + name + " --pairing-code orca://pair?code=private --json",
 		"status" + scope,
 		"repo add --path " + w.root + scope,
-		"worktree list --repo id:repo-1" + scope,
 		"terminal create --worktree id:" + worktree + " --title " + name + " --command " + firstAgent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
 		"terminal read --terminal term-1 --screen" + scope,
 		"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
@@ -675,10 +786,9 @@ func (w *firstWorker) nativeAs(name string) (*scriptedOrca, []string) {
 		commands[0]: envelope("local", `{"environment":{"id":"env-1","name":"`+name+`"}}`),
 		commands[1]: envelope("rt-1", `{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`),
 		commands[2]: envelope("rt-1", `{"repo":{"id":"repo-1","path":"`+w.root+`"}}`),
-		commands[3]: envelope("rt-1", `{"worktrees":[{"id":"`+worktree+`","repoId":"repo-1","path":"`+w.root+`"}]}`),
-		commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1"}}`),
-		commands[5]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
-		commands[6]: envelope("rt-1", `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null,"blockedReason":""}}`),
+		commands[3]: envelope("rt-1", `{"terminal":{"handle":"term-1","worktreeId":"`+worktree+`"}}`),
+		commands[4]: envelope("rt-1", `{"terminal":{"handle":"term-1","status":"running","source":"screen","tail":["Opus 5.5 (xhigh) · API Usage Billing","> "]}}`),
+		commands[5]: envelope("rt-1", `{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null,"blockedReason":""}}`),
 	}}, commands
 }
 
@@ -847,7 +957,7 @@ func TestExistingPrepareStartsTheFirstWorkerOnTheRetainedCheckout(t *testing.T) 
 func TestExistingPrepareHoldsTheTaskFromAdmissionThroughOutput(t *testing.T) {
 	w := newFirstWorker(t, nil, true)
 	native, commands := w.native()
-	booting, runner := w.booting(native, commands[5])
+	booting, runner := w.booting(native, commands[4])
 	resuming := newGate()
 	w.paused = resuming
 	var out bytes.Buffer
@@ -887,7 +997,7 @@ func TestExistingPrepareHoldsTheTaskFromAdmissionThroughOutput(t *testing.T) {
 func TestCancelledExistingPrepareKeepsItsPartialTaskAndReleasesTheTask(t *testing.T) {
 	w := newFirstWorker(t, nil, true)
 	native, commands := w.native()
-	booting, runner := w.booting(native, commands[5])
+	booting, runner := w.booting(native, commands[4])
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var out bytes.Buffer

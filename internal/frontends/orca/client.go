@@ -57,6 +57,7 @@ type Host struct {
 
 type Terminal struct {
 	Handle          string   `json:"handle"`
+	WorktreeID      string   `json:"worktreeId"`
 	ExecutionHostID string   `json:"executionHostId"`
 	Tail            []string `json:"tail"`
 }
