@@ -766,6 +766,10 @@ func orcaRetain(session *workspace.Session, resumed bool) func(context.Context, 
 }
 
 func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime, key, judge []byte, title string) error {
+	policy, err := shellPolicy(ctx, session, task)
+	if err != nil {
+		return err
+	}
 	ready, pairing, err := d.start(ctx, session, task, runtime)
 	if err != nil {
 		return err
@@ -798,7 +802,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err := d.save(task); err != nil {
 		return err
 	}
-	if task.Terminal, err = d.worker(ctx, native, task, title, key, judge); err != nil {
+	if task.Terminal, err = d.worker(ctx, native, task, title, key, judge, policy); err != nil {
 		return err
 	}
 	if err := d.save(task); err != nil {
@@ -902,7 +906,7 @@ func lastReady(stdout []byte) []byte {
 	return []byte(lines[len(lines)-1])
 }
 
-func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, title string, key, judge []byte) (string, error) {
+func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, title string, key, judge []byte, policy orca.ShellPolicy) (string, error) {
 	out, err := task.run(ctx, orca.KeyDirScript, nil)
 	if err != nil {
 		return "", err
@@ -911,7 +915,7 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 	if err != nil {
 		return "", err
 	}
-	terminal, err := native.CreateTerminal(ctx, task.WorktreeID, title, task.Agent.Command(dir))
+	terminal, err := native.CreateTerminal(ctx, task.WorktreeID, title, task.Agent.Command(dir, policy))
 	if err != nil {
 		dropped := task.dropKey(ctx, dir)
 		return "", errors.Join(err, dropped)
@@ -981,6 +985,19 @@ func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, erro
 		Captain: captainPins(inventory),
 		Exec:    machineExec(session, task.Machine, "the Codex hook probe"),
 	}), nil
+}
+
+func shellPolicy(ctx context.Context, session *workspace.Session, task *orcaTask) (orca.ShellPolicy, error) {
+	if task.Agent.Kind != orca.AgentCodex {
+		return orca.ShellPolicy{}, nil
+	}
+	cfg := session.Config
+	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
+	if err != nil {
+		return orca.ShellPolicy{}, err
+	}
+	read := orca.ShellPolicyRead{Codex: codexVersion(inventory, session.Profile), Project: task.ProjectRoot, Exec: machineExec(session, task.Machine, "the Codex shell environment policy read")}
+	return read.Run(ctx)
 }
 
 func codexGrant(session *workspace.Session, machine, project string) (orca.HookGrant, bool, error) {

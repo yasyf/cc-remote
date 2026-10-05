@@ -207,37 +207,65 @@ func TestRuntimeEnsureScript(t *testing.T) {
 }
 
 func TestAgentArgv(t *testing.T) {
+	keyed := `shell_environment_policy.filters={ANTHROPIC_API_KEY="exclude",CLAUDE_CODE_OAUTH_TOKEN="exclude",ANTHROPIC_AUTH_TOKEN="exclude",OPENAI_API_KEY="exclude",CODEX_API_KEY="exclude"}`
+	legacy := orca.ShellPolicy{Legacy: true, Exclude: []string{"AWS_*", "GITHUB_TOKEN"}}
 	tests := []struct {
-		name  string
-		agent orca.Agent
-		want  []string
+		name   string
+		agent  orca.Agent
+		policy orca.ShellPolicy
+		want   []string
 	}{
-		{"claude with no MCP servers", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, []string{
+		{"claude with no MCP servers", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, orca.ShellPolicy{}, []string{
 			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
 		}},
-		{"claude with an MCP allowlist", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "high", MCP: []string{"/srv/a.json", "/srv/b.json"}}, []string{
+		{"claude with an MCP allowlist", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "high", MCP: []string{"/srv/a.json", "/srv/b.json"}}, orca.ShellPolicy{}, []string{
 			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
 			"--strict-mcp-config", "--mcp-config", "/srv/a.json", "/srv/b.json",
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "m", "--effort", "high",
 		}},
-		{"codex", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6-astra", Effort: "xhigh"}, []string{
+		{"claude ignores a codex shell policy", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, legacy, []string{
+			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
+			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
+		}},
+		{"codex", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6-astra", Effort: "xhigh"}, orca.ShellPolicy{}, []string{
 			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6-astra",
 			"-c", `model_reasoning_effort="xhigh"`,
 			"-c", `model_provider="cc_remote_openai"`,
 			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
 			"-c", `cli_auth_credentials_store="ephemeral"`,
+			"-c", keyed,
 			"-c", "mcp_servers={}",
 		}},
-		{"codex with an explicit service tier", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast", MCP: []string{`{docs={command="docs-mcp"}}`}}, []string{
+		{"codex with an explicit service tier", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast", MCP: []string{`{docs={command="docs-mcp"}}`}}, orca.ShellPolicy{}, []string{
 			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6.1-sol",
 			"-c", `model_reasoning_effort="xhigh"`,
 			"-c", `model_provider="cc_remote_openai"`,
 			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
 			"-c", `cli_auth_credentials_store="ephemeral"`,
+			"-c", keyed,
 			"-c", `mcp_servers={docs={command="docs-mcp"}}`,
 			"-c", `service_tier="fast"`,
+		}},
+		{"codex over a legacy exclusion array", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh"}, legacy, []string{
+			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6.1-sol",
+			"-c", `model_reasoning_effort="xhigh"`,
+			"-c", `model_provider="cc_remote_openai"`,
+			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
+			"-c", `cli_auth_credentials_store="ephemeral"`,
+			"-c", `shell_environment_policy.exclude=["AWS_*","GITHUB_TOKEN","ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY"]`,
+			"-c", "mcp_servers={}",
+		}},
+		{"codex over a legacy include list alone", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh"}, orca.ShellPolicy{Legacy: true}, []string{
+			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6.1-sol",
+			"-c", `model_reasoning_effort="xhigh"`,
+			"-c", `model_provider="cc_remote_openai"`,
+			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
+			"-c", `cli_auth_credentials_store="ephemeral"`,
+			"-c", `shell_environment_policy.exclude=["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY"]`,
+			"-c", "mcp_servers={}",
 		}},
 	}
 	for _, tt := range tests {
@@ -245,7 +273,7 @@ func TestAgentArgv(t *testing.T) {
 			if err := tt.agent.Validate(); err != nil {
 				t.Fatal(err)
 			}
-			if got := tt.agent.Argv(); !slices.Equal(got, tt.want) {
+			if got := tt.agent.Argv(tt.policy); !slices.Equal(got, tt.want) {
 				t.Errorf("Argv =\n%q\nwant\n%q", got, tt.want)
 			}
 		})
@@ -328,7 +356,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(bin, tt.agent.Kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			command := tt.agent.Command(dir)
+			command := tt.agent.Command(dir, orca.ShellPolicy{})
 			if !strings.HasPrefix(command, "exec sh -c ") {
 				t.Fatalf("worker command relies on the terminal's configured shell: %s", command)
 			}
@@ -346,7 +374,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.agent.Argv()[1] + "\n"
+			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.agent.Argv(orca.ShellPolicy{})[1] + "\n"
 			if string(out) != want {
 				t.Errorf("worker saw %q, want %q", out, want)
 			}
@@ -401,7 +429,7 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command("sh", "-c", agent.Command(dir))
+			cmd := exec.Command("sh", "-c", agent.Command(dir, orca.ShellPolicy{}))
 			cmd.Env = append(append(withoutCredentials(), stale...), "PATH="+bin+":"+os.Getenv("PATH"))
 			go func() {
 				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
@@ -420,6 +448,53 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
 				t.Errorf("the key directory survived: %v", err)
+			}
+		})
+	}
+}
+
+func TestCodexCommandKeepsTheActorKeysBesideItsToolPolicy(t *testing.T) {
+	agent := orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast"}
+	worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$OPENAI_API_KEY\" \"$ANTHROPIC_API_KEY\" \"$CAPT_HOOK_ACTOR_JUDGE\"\nprintf '%s\\n' \"$@\"\n"
+	tests := []struct {
+		name   string
+		policy orca.ShellPolicy
+	}{
+		{"keyed", orca.ShellPolicy{}},
+		{"legacy", orca.ShellPolicy{Legacy: true, Exclude: []string{"AWS_*"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(worker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", agent.Command(dir, tt.policy))
+			cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"))
+			go func() {
+				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = fifo.WriteString("sk-test-key\nsk-judge-key\n")
+				_ = fifo.Close()
+			}()
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			argv := agent.Argv(tt.policy)
+			if want := "sk-test-key|sk-judge-key|codex\n" + strings.Join(argv[1:], "\n") + "\n"; string(out) != want {
+				t.Errorf("worker saw\n%s\nwant\n%s", out, want)
+			}
+			if !slices.Equal(argv[:5], []string{"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6.1-sol"}) || !slices.Contains(argv, `model_reasoning_effort="xhigh"`) || !slices.Contains(argv, `service_tier="fast"`) {
+				t.Errorf("the tool policy displaced the requested model, effort, tier, or bypass: %q", argv)
 			}
 		})
 	}

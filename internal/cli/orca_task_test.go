@@ -359,7 +359,7 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				"status" + scope,
 				"repo add --path " + root + scope,
 				"worktree list --repo id:repo-1" + scope,
-				"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir) + scope,
+				"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
 				"terminal read --terminal term-1 --screen" + scope,
 				"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
 				"terminal send --terminal term-1 --text do the task --enter --wait-submit 15" + scope,
@@ -667,7 +667,7 @@ func (w *firstWorker) nativeAs(name string) (*scriptedOrca, []string) {
 		"status" + scope,
 		"repo add --path " + w.root + scope,
 		"worktree list --repo id:repo-1" + scope,
-		"terminal create --worktree id:" + worktree + " --title " + name + " --command " + firstAgent.Command(fakeKeyDir) + scope,
+		"terminal create --worktree id:" + worktree + " --title " + name + " --command " + firstAgent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
 		"terminal read --terminal term-1 --screen" + scope,
 		"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
 	}

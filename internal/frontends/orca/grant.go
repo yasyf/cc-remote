@@ -26,7 +26,7 @@ const (
 	grantSlack              = 15 * time.Second
 )
 
-const HookGrantScript = hookLibrary + `
+const appServerLibrary = `
 import re
 import selectors
 import shutil
@@ -108,7 +108,9 @@ class Server:
             self.child.kill()
             self.child.wait()
             return None
+`
 
+const HookGrantScript = hookLibrary + appServerLibrary + `
 
 def segment(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'

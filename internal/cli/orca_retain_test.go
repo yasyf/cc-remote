@@ -243,7 +243,7 @@ func TestComputeLaunchReachesItsRuntimeThroughTheRetainedGateway(t *testing.T) {
 		"status" + scope,
 		"repo add --path " + root + scope,
 		"worktree list --repo id:repo-1" + scope,
-		"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir) + scope,
+		"terminal create --worktree id:" + worktree + " --title task-a --command " + agent.Command(fakeKeyDir, orca.ShellPolicy{}) + scope,
 		"terminal read --terminal term-1 --screen" + scope,
 		"terminal wait --terminal term-1 --for tui-idle --timeout-ms 60000" + scope,
 	}

@@ -256,7 +256,7 @@ func CredentialEnv() []string {
 	return names
 }
 
-func (a Agent) Argv() []string {
+func (a Agent) Argv(policy ShellPolicy) []string {
 	if a.Kind == AgentCodex {
 		servers := noCodexMCP
 		if len(a.MCP) == 1 {
@@ -268,6 +268,7 @@ func (a Agent) Argv() []string {
 			"-c", `model_provider="cc_remote_openai"`,
 			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
 			"-c", `cli_auth_credentials_store="ephemeral"`,
+			"-c", policy.override(),
 			"-c", "mcp_servers=" + servers,
 		}
 		if a.Tier != "" {
@@ -297,7 +298,7 @@ func (a Agent) JudgeKeyProvider() string {
 	return a.judge().KeyProvider()
 }
 
-func (a Agent) Command(dir string) string {
+func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
 		"{ { IFS= read -r key; IFS= read -r judge || judge=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
@@ -306,7 +307,7 @@ func (a Agent) Command(dir string) string {
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
 		"unset key judge",
 		"export CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind),
-		"exec " + remote.QuoteAll(a.Argv()),
+		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")
 	return "exec sh -c " + remote.Quote(script)
 }
