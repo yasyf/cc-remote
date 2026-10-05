@@ -716,6 +716,11 @@ type effects struct {
 
 func newFirstWorker(t *testing.T, compute *providers.ComputeInstance, created bool) *firstWorker {
 	t.Helper()
+	return newFirstWorkerWith(t, compute, created, "", func(*firstWorker) {})
+}
+
+func newFirstWorkerWith(t *testing.T, compute *providers.ComputeInstance, created bool, inventory string, machine func(*firstWorker)) *firstWorker {
+	t.Helper()
 	fakeRemote(t)
 	w := &firstWorker{
 		t:        t,
@@ -724,7 +729,7 @@ func newFirstWorker(t *testing.T, compute *providers.ComputeInstance, created bo
 		platform: workspace.Platform{Daemon: tailnet.Daemon{Mode: tailnet.Userspace, Supervisor: tailnet.Setsid}},
 	}
 	w.provider = &providertest.Fake{Compute: compute, Handle: w.handle, Now: func() time.Time { return time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC) }}
-	w.session = workspacetest.Open(t, workspacetest.Harness{Provider: w.provider, Kind: "fake", Platform: w.platform, Root: w.local.Root + "/machines"})
+	w.session = workspacetest.Open(t, workspacetest.Harness{Provider: w.provider, Kind: "fake", Platform: w.platform, Root: w.local.Root + "/machines", Inventory: inventory})
 	dir := t.TempDir()
 	w.keys = filepath.Join(dir, "keys.log")
 	key := filepath.Join(dir, "key")
@@ -734,6 +739,7 @@ func newFirstWorker(t *testing.T, compute *providers.ComputeInstance, created bo
 	w.session.Config.Orca.Keys = map[string][]string{config.KeyAnthropic: {key}}
 	w.root = w.session.ProjectRoot()
 	t.Setenv("REMOTE_HOME", w.local.Home("task-a"))
+	machine(w)
 	if created {
 		if _, err := w.session.Create(t.Context(), "task-a", workspace.Source{Ref: "main"}); err != nil {
 			t.Fatal(err)
