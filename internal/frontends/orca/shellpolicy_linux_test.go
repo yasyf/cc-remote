@@ -170,7 +170,7 @@ func TestShellPolicyScriptReadsTheEffectiveRepresentation(t *testing.T) {
 			if !slices.Contains(env, "HOME") {
 				t.Errorf("the config server env lost unrelated variables: %q", env)
 			}
-			var methods []string
+			methods := make([]string, 0, len(messages))
 			for _, message := range messages {
 				methods = append(methods, message["method"].(string))
 			}
