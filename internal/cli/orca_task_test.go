@@ -113,6 +113,51 @@ func TestCaptureKey(t *testing.T) {
 	}
 }
 
+func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	script := func(name, line string) []string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '"+line+"\\n'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return []string{path}
+	}
+	anthropic, openai := script("anthropic", "sk-anthropic-sentinel"), script("openai", "sk-openai-sentinel")
+	tests := []struct {
+		name       string
+		kind       string
+		keys       map[string][]string
+		key, judge string
+	}{
+		{"claude with an OpenAI judge", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai}, "sk-anthropic-sentinel", "sk-openai-sentinel"},
+		{"claude alone", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic}, "sk-anthropic-sentinel", ""},
+		{"codex with a Claude judge", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyAnthropic: anthropic}, "sk-openai-sentinel", "sk-anthropic-sentinel"},
+		{"codex alone", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai}, "sk-openai-sentinel", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, judge, err := captureKeys(t.Context(), tt.keys, orca.Agent{Kind: tt.kind})
+			if err != nil || string(key) != tt.key || string(judge) != tt.judge {
+				t.Errorf("captureKeys = %q, %q, %v; want %q, %q", key, judge, err, tt.key, tt.judge)
+			}
+		})
+	}
+	failing := filepath.Join(dir, "failing")
+	if err := os.WriteFile(failing, []byte("#!/bin/sh\necho sk-leaked-sentinel; exit 3\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []orca.Agent{{Kind: orca.AgentClaude}, {Kind: orca.AgentCodex}} {
+		keys := map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), agent.JudgeKeyProvider(): {failing}}
+		key, judge, err := captureKeys(t.Context(), keys, agent)
+		if err == nil || !strings.HasPrefix(err.Error(), "judge key command") || key != nil || judge != nil {
+			t.Errorf("%s captureKeys with a failing judge = %q, %q, %v", agent.Kind, key, judge, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "sentinel") {
+			t.Errorf("the error leaks a key: %v", err)
+		}
+	}
+}
+
 func TestOrcaTaskRoundTripsWithoutSecrets(t *testing.T) {
 	dir := state.Dir(filepath.Join(t.TempDir(), strings.Repeat("nested", 20)))
 	if _, err := loadTask(dir, "task-a"); err == nil || !strings.Contains(err.Error(), "orca create") {
@@ -337,7 +382,7 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
 				Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
 			}
-			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), "task-a")
+			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), nil, "task-a")
 			if err == nil && tt.create {
 				_, err = driver.prompt(t.Context(), task, "do the task")
 			}

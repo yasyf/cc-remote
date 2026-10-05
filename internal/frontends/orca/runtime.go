@@ -286,12 +286,26 @@ func (a Agent) Argv() []string {
 	)
 }
 
+func (a Agent) judge() Agent {
+	if a.Kind == AgentCodex {
+		return Agent{Kind: AgentClaude}
+	}
+	return Agent{Kind: AgentCodex}
+}
+
+func (a Agent) JudgeKeyProvider() string {
+	return a.judge().KeyProvider()
+}
+
 func (a Agent) Command(dir string) string {
+	judge := a.judge()
 	script := strings.Join([]string{
-		"{ IFS= read -r key < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(a.cleared(), " "),
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared()), " "),
 		"export " + a.variable() + `="$key"`,
-		"unset key",
+		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
+		"unset key judge",
+		"export CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind),
 		"exec " + remote.QuoteAll(a.Argv()),
 	}, " && ")
 	return "exec sh -c " + remote.Quote(script)
