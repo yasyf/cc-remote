@@ -1,6 +1,7 @@
 package orca_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,17 +217,17 @@ func TestAgentArgv(t *testing.T) {
 		want   []string
 	}{
 		{"claude with no MCP servers", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, orca.ShellPolicy{}, []string{
-			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
+			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"skipDangerousModePermissionPrompt":true}`,
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
 		}},
 		{"claude with an MCP allowlist", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "high", MCP: []string{"/srv/a.json", "/srv/b.json"}}, orca.ShellPolicy{}, []string{
-			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
+			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"skipDangerousModePermissionPrompt":true}`,
 			"--strict-mcp-config", "--mcp-config", "/srv/a.json", "/srv/b.json",
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "m", "--effort", "high",
 		}},
 		{"claude ignores a codex shell policy", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, legacy, []string{
-			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
+			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"skipDangerousModePermissionPrompt":true}`,
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
 		}},
@@ -497,6 +498,91 @@ func TestCodexCommandKeepsTheActorKeysBesideItsToolPolicy(t *testing.T) {
 				t.Errorf("the tool policy displaced the requested model, effort, tier, or bypass: %q", argv)
 			}
 		})
+	}
+}
+
+func TestClaudeSettingsOnlySkipTheBypassWarning(t *testing.T) {
+	tests := []struct {
+		name   string
+		agent  orca.Agent
+		policy orca.ShellPolicy
+	}{
+		{"claude", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, orca.ShellPolicy{}},
+		{"claude with MCP servers", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "high", MCP: []string{`{"mcpServers":{"docs":{"command":"docs-mcp"}}}`}}, orca.ShellPolicy{}},
+		{"codex keyed", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh"}, orca.ShellPolicy{}},
+		{"codex legacy", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast"}, orca.ShellPolicy{Legacy: true, Exclude: []string{"AWS_*"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argv := tt.agent.Argv(tt.policy)
+			flags := 0
+			for _, arg := range argv {
+				if arg == "--settings" {
+					flags++
+				}
+			}
+			if tt.agent.Kind == orca.AgentCodex {
+				if flags != 0 || slices.ContainsFunc(argv, func(arg string) bool { return strings.Contains(arg, "skipDangerousModePermissionPrompt") }) {
+					t.Errorf("codex argv gained Claude settings: %q", argv)
+				}
+				return
+			}
+			i := slices.Index(argv, "--settings")
+			if flags != 1 || i+1 >= len(argv) {
+				t.Fatalf("argv carries %d --settings flags: %q", flags, argv)
+			}
+			var settings map[string]any
+			if err := json.Unmarshal([]byte(argv[i+1]), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if len(settings) != 1 || settings["skipDangerousModePermissionPrompt"] != true {
+				t.Errorf("settings = %v, want only skipDangerousModePermissionPrompt true", settings)
+			}
+			mode := slices.Index(argv, "--permission-mode")
+			if mode < 0 || argv[mode+1] != "bypassPermissions" || !slices.Contains(argv, "--allow-dangerously-skip-permissions") {
+				t.Errorf("the settings changed the selected permission mode: %q", argv)
+			}
+			model, effort := slices.Index(argv, "--model"), slices.Index(argv, "--effort")
+			if model < 0 || argv[model+1] != tt.agent.Model || effort < 0 || argv[effort+1] != tt.agent.Effort {
+				t.Errorf("the settings displaced the requested model or effort: %q", argv)
+			}
+		})
+	}
+}
+
+func TestClaudeCommandCarriesItsSettingsThroughTheShell(t *testing.T) {
+	agent := orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", MCP: []string{`{"mcpServers":{"docs":{"command":"docs-mcp","args":["it's"]}}}`}}
+	worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$ANTHROPIC_API_KEY\" \"$OPENAI_API_KEY\" \"$CAPT_HOOK_ACTOR_JUDGE\"\nprintf '%s\\n' \"$@\"\n"
+	bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(worker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", agent.Command(dir, orca.ShellPolicy{}))
+	cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"))
+	go func() {
+		fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		_, _ = fifo.WriteString("sk-test-key\nsk-judge-key\n")
+		_ = fifo.Close()
+	}()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := agent.Argv(orca.ShellPolicy{})
+	if want := "sk-test-key|sk-judge-key|claude\n" + strings.Join(argv[1:], "\n") + "\n"; string(out) != want {
+		t.Errorf("worker saw\n%s\nwant\n%s", out, want)
+	}
+	if !strings.Contains(string(out), "\n--settings\n{\"skipDangerousModePermissionPrompt\":true}\n") {
+		t.Errorf("the settings object did not reach the worker as one argument: %s", out)
 	}
 }
 

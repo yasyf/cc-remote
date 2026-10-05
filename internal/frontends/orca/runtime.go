@@ -29,6 +29,7 @@ const (
 	readyTries     = 240
 	spriteEnv      = "/.sprite/bin/sprite-env"
 	noClaudeMCP    = `{"mcpServers":{}}`
+	claudeSettings = `{"skipDangerousModePermissionPrompt":true}`
 	noCodexMCP     = "{}"
 )
 
@@ -281,7 +282,7 @@ func (a Agent) Argv(policy ShellPolicy) []string {
 		servers = []string{noClaudeMCP}
 	}
 	return slices.Concat(
-		[]string{"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions"},
+		[]string{"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", claudeSettings},
 		[]string{"--strict-mcp-config", "--mcp-config"}, servers,
 		[]string{"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", a.Model, "--effort", a.Effort},
 	)
