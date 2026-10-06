@@ -19,6 +19,7 @@ type Harness struct {
 	Provider    providers.Provider
 	Spec        func(name string, labels map[string]string) providers.Spec
 	TracksState bool
+	Suspends    bool
 }
 
 func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
@@ -180,14 +181,21 @@ func execKeepsStatusesAndBytes(t *testing.T, h Harness) {
 
 func wakeAndSuspend(t *testing.T, h Harness) {
 	alpha := create(t, h, "alpha", nil)
-	for _, step := range []struct {
+	steps := []struct {
 		name string
 		run  func(context.Context, string) error
 		want providers.State
 	}{
 		{"Suspend", h.Provider.Suspend, providers.StateSuspended},
 		{"Wake", h.Provider.Wake, providers.StateRunning},
-	} {
+	}
+	if !h.Suspends {
+		if err := h.Provider.Suspend(t.Context(), alpha.ID); !errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("Suspend(%s) = %v, want errors.ErrUnsupported", alpha.ID, err)
+		}
+		steps = steps[1:]
+	}
+	for _, step := range steps {
 		if err := step.run(t.Context(), alpha.ID); err != nil {
 			t.Fatalf("%s(%s) = %v", step.name, alpha.ID, err)
 		}

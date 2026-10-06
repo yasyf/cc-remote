@@ -232,8 +232,12 @@ func newSuspendCmd() *cobra.Command {
 	var connection string
 	cmd := &cobra.Command{
 		Use:   "suspend [name]",
-		Short: "Stop a workspace's compute; storage and its tailnet node stay",
-		Args:  cobra.MaximumNArgs(1),
+		Short: "Stop a namespace workspace's compute; storage and its tailnet node stay",
+		Long: `suspend stops a namespace workspace's instance; its storage and tailnet node stay until resume
+starts it again. Sprites has no stop verb, so suspend fails on a sprites workspace and changes nothing:
+a sprite sleeps on its own only once no session, request, or connection holds it, and an open
+cc-remote orca forward holds it active. Run cc-remote destroy to free a sprite.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := orcaTarget(cmd, args, connection)
 			if err != nil {

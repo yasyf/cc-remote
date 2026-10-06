@@ -353,6 +353,25 @@ func TestDestroyKeepsTheReceiptUntilTheSpriteIsGone(t *testing.T) {
 	}
 }
 
+func TestSuspendFailsAndLeavesTheSpriteAsItIs(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	before := len(fake.verbs())
+	err := p.Suspend(t.Context(), "alpha")
+	want := "suspending sprite alpha: unsupported operation: Sprites has no stop verb, so cc-remote cannot stop a sprite; it sleeps on its own only once no session, request, or connection holds it, and an open cc-remote orca forward holds it active; run cc-remote destroy to free it"
+	if !errors.Is(err, errors.ErrUnsupported) || err.Error() != want {
+		t.Errorf("Suspend = %v, want %q", err, want)
+	}
+	if verbs := fake.verbs()[before:]; !slices.Equal(verbs, []string{"api"}) {
+		t.Errorf("Suspend ran sprite %q, want only the api read", verbs)
+	}
+	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.State != providers.StateRunning {
+		t.Errorf("after the failed suspend, Get = %+v, %v; want the sprite running", machine, err)
+	}
+}
+
 func TestCreateLosingARaceIsAmbiguous(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true
