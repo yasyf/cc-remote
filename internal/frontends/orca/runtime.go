@@ -84,7 +84,7 @@ const FirstUseCheck = `test ! -e "` + runtimeDir + `" && test ! -L "` + runtimeD
 func (r Runtime) command() string {
 	return strings.Join(slices.Concat(
 		quoted(r.Display),
-		[]string{`"$HOME/"` + remote.Quote(r.Entry), "serve", "--port", strconv.Itoa(r.Port), "--pairing-address", remote.Quote(cmp.Or(r.Advertise, Loopback)), "--user-data-dir", `"` + runtimeDir + `/user-data"`, "--json"},
+		[]string{`"$HOME/"` + remote.Quote(r.Entry), "serve", "--port", strconv.Itoa(r.Port), "--pairing-address", remote.Quote(cmp.Or(r.Advertise, Loopback)), `--user-data-dir="` + runtimeDir + `/user-data"`, "--json"},
 		quoted(r.Args),
 	), " ")
 }

@@ -77,6 +77,7 @@ func newGuestHome(t *testing.T) *guestHome {
 	}
 	h.on("status --json", ok(`{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`))
 	t.Setenv("ORCA_PAIRING_CODE", "orca://pair?code=private")
+	t.Setenv("ORCA_REMOTE_PAIRING", "1")
 	t.Setenv("ORCA_ENVIRONMENT", "task-a")
 	t.Setenv("ORCA_USER_DATA_PATH", "/elsewhere")
 	return h
@@ -121,6 +122,12 @@ func (h *guestHome) calls(t *testing.T) []guestCall {
 
 func guestFor(agent string, startup orca.Startup) orca.Guest {
 	return orca.NewGuest(runtime.GOOS+"/"+runtime.GOARCH, "rt-1", "term-1", guestCLIPath, orca.Agent{Kind: agent}, startup, true, bootstrapPoll)
+}
+
+func unreachable(state string) func(*orca.Guest, *guestHome) {
+	return func(_ *orca.Guest, h *guestHome) {
+		h.scenario["status --json"] = []string{`{"id":"local-status","ok":true,"result":{"target":{"kind":"local"},"runtime":{` + state + `,"reachable":false,"runtimeId":null}},"_meta":{"runtimeId":"none"}}`}
+	}
 }
 
 func noLocalExec(t *testing.T) func(context.Context, []string) ([]byte, error) {
@@ -186,6 +193,10 @@ func TestGuestRunRefusesBeforeAnyOrcaCall(t *testing.T) {
 		{"another runtime", func(_ *orca.Guest, h *guestHome) {
 			h.scenario["status --json"] = []string{`{"id":"1","ok":true,"result":{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}},"_meta":{"runtimeId":"rt-2"}}`}
 		}, `answered from runtime "rt-2", not rt-1`, []string{"status --json"}},
+		{"no runtime metadata", unreachable(`"state":"not_running"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
+		{"incomplete runtime metadata", unreachable(`"state":"stale_bootstrap"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
+		{"a starting runtime it cannot reach", unreachable(`"state":"starting","connectionState":"disconnected"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
+		{"a dead runtime's metadata", unreachable(`"state":"stale_bootstrap","connectionState":"disconnected"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
 		{"another terminal", func(_ *orca.Guest, h *guestHome) {
 			h.on(localRead, ok(`{"terminal":{"handle":"term-2","status":"running","source":"screen","tail":["> "]}}`))
 		}, `answered for terminal "term-2", not term-1`, []string{"status --json", localRead}},
