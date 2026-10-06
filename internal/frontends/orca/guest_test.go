@@ -18,7 +18,8 @@ func TestLocalTargetDropsOnlyTheEnvironment(t *testing.T) {
 	ready := `{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`
 	fake := newFakeOrca(t).
 		on("status --json", ok(ready)).
-		on("status --json", `{"id":"1","ok":true,"result":`+ready+`,"_meta":{"runtimeId":"rt-2"}}`)
+		on("status --json", `{"id":"1","ok":true,"result":`+ready+`,"_meta":{"runtimeId":"rt-2"}}`).
+		on("status --json", `{"id":"local-status","ok":true,"result":{"target":{"kind":"local"},"runtime":{"state":"not_running","reachable":false,"runtimeId":null}},"_meta":{"runtimeId":"none"}}`)
 	native := orca.NewClient(fake).Local(runtimeID)
 	if _, err := native.Status(context.Background()); err != nil {
 		t.Fatalf("local Status = %v", err)
@@ -26,7 +27,10 @@ func TestLocalTargetDropsOnlyTheEnvironment(t *testing.T) {
 	if _, err := native.Status(context.Background()); err == nil || !strings.Contains(err.Error(), `answered from runtime "rt-2", not rt-1`) {
 		t.Errorf("local Status from another runtime = %v", err)
 	}
-	if !slices.Equal(fake.calls, []string{"status --json", "status --json"}) {
+	if _, err := native.Status(context.Background()); err == nil || !strings.Contains(err.Error(), `answered from runtime "none", not rt-1`) {
+		t.Errorf("local Status with no runtime = %v", err)
+	}
+	if !slices.Equal(fake.calls, []string{"status --json", "status --json", "status --json"}) {
 		t.Errorf("calls = %q", fake.calls)
 	}
 }

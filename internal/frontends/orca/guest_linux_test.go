@@ -31,9 +31,9 @@ if os.path.exists(state_path):
     with open(state_path) as source:
         state = json.load(source)
 command = " ".join(sys.argv[1:])
-routing = sorted(name for name in ("ORCA_PAIRING_CODE", "ORCA_REMOTE_PAIRING", "ORCA_ENVIRONMENT") if name in os.environ)
+scrubbed = sorted(name for name in ("ORCA_PAIRING_CODE", "ORCA_REMOTE_PAIRING", "ORCA_ENVIRONMENT", "ORCA_USER_DATA_PATH") if name in os.environ)
 with open(os.path.join(here, "calls.jsonl"), "a") as log:
-    log.write(json.dumps({"command": command, "userData": os.environ.get("ORCA_USER_DATA_PATH"), "routing": routing}) + "\n")
+    log.write(json.dumps({"command": command, "scrubbed": scrubbed}) + "\n")
 replies = scenario.get(command, [])
 if not replies:
     print(json.dumps({"ok": False, "error": {"code": "unexpected", "message": command}, "_meta": {"runtimeId": None}}))
@@ -55,8 +55,7 @@ type guestHome struct {
 
 type guestCall struct {
 	Command  string   `json:"command"`
-	UserData string   `json:"userData"`
-	Routing  []string `json:"routing"`
+	Scrubbed []string `json:"scrubbed"`
 }
 
 func newGuestHome(t *testing.T) *guestHome {
@@ -66,9 +65,6 @@ func newGuestHome(t *testing.T) *guestHome {
 		t.Fatal(err)
 	}
 	h := &guestHome{home: home, bin: filepath.Join(home, filepath.Dir(guestCLIPath)), scenario: map[string][]string{}}
-	if err := os.MkdirAll(filepath.Join(home, ".cc-remote/orca/user-data"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(h.bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +73,7 @@ func newGuestHome(t *testing.T) *guestHome {
 	}
 	h.on("status --json", ok(`{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}}`))
 	t.Setenv("ORCA_PAIRING_CODE", "orca://pair?code=private")
+	t.Setenv("ORCA_REMOTE_PAIRING", "1")
 	t.Setenv("ORCA_ENVIRONMENT", "task-a")
 	t.Setenv("ORCA_USER_DATA_PATH", "/elsewhere")
 	return h
@@ -123,6 +120,12 @@ func guestFor(agent string, startup orca.Startup) orca.Guest {
 	return orca.NewGuest(runtime.GOOS+"/"+runtime.GOARCH, "rt-1", "term-1", guestCLIPath, orca.Agent{Kind: agent}, startup, true, bootstrapPoll)
 }
 
+func unreachable(state string) func(*orca.Guest, *guestHome) {
+	return func(_ *orca.Guest, h *guestHome) {
+		h.scenario["status --json"] = []string{`{"id":"local-status","ok":true,"result":{"target":{"kind":"local"},"runtime":{` + state + `,"reachable":false,"runtimeId":null}},"_meta":{"runtimeId":"none"}}`}
+	}
+}
+
 func noLocalExec(t *testing.T) func(context.Context, []string) ([]byte, error) {
 	return func(context.Context, []string) ([]byte, error) {
 		t.Error("a hook check ran for a worker that has none")
@@ -147,8 +150,8 @@ func TestGuestRunDrivesTheOwnedLocalRuntime(t *testing.T) {
 	commands := make([]string, 0, len(calls))
 	for _, call := range calls {
 		commands = append(commands, call.Command)
-		if call.UserData != filepath.Join(h.home, ".cc-remote/orca/user-data") || len(call.Routing) != 0 {
-			t.Errorf("%s ran with user data %q and routing %q", call.Command, call.UserData, call.Routing)
+		if len(call.Scrubbed) != 0 {
+			t.Errorf("%s ran with %q set", call.Command, call.Scrubbed)
 		}
 	}
 	if !slices.Equal(commands, []string{"status --json", localRead, localWait}) {
@@ -178,14 +181,13 @@ func TestGuestRunRefusesBeforeAnyOrcaCall(t *testing.T) {
 		{"an unbounded poll", func(g *orca.Guest, _ *guestHome) { g.Timeout = 0 }, "polls every", nil},
 		{"a CLI outside the home", func(g *orca.Guest, _ *guestHome) { g.CLI = "../" + guestCLIPath }, "not a clean path under the guest home", nil},
 		{"a missing CLI", func(g *orca.Guest, _ *guestHome) { g.CLI = "tools/other/orca-ide" }, "is not an executable regular file", nil},
-		{"missing user data", func(_ *orca.Guest, h *guestHome) {
-			if err := os.RemoveAll(filepath.Join(h.home, ".cc-remote")); err != nil {
-				t.Fatal(err)
-			}
-		}, "the guest Orca user data", nil},
 		{"another runtime", func(_ *orca.Guest, h *guestHome) {
 			h.scenario["status --json"] = []string{`{"id":"1","ok":true,"result":{"runtime":{"state":"ready","reachable":true,"runtimeId":"rt-1"}},"_meta":{"runtimeId":"rt-2"}}`}
 		}, `answered from runtime "rt-2", not rt-1`, []string{"status --json"}},
+		{"no runtime metadata", unreachable(`"state":"not_running"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
+		{"incomplete runtime metadata", unreachable(`"state":"stale_bootstrap"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
+		{"a starting runtime it cannot reach", unreachable(`"state":"starting","connectionState":"disconnected"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
+		{"a dead runtime's metadata", unreachable(`"state":"stale_bootstrap","connectionState":"disconnected"`), `answered from runtime "none", not rt-1`, []string{"status --json"}},
 		{"another terminal", func(_ *orca.Guest, h *guestHome) {
 			h.on(localRead, ok(`{"terminal":{"handle":"term-2","status":"running","source":"screen","tail":["> "]}}`))
 		}, `answered for terminal "term-2", not term-1`, []string{"status --json", localRead}},
