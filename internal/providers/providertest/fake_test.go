@@ -25,6 +25,7 @@ func TestFakeSatisfiesTheContract(t *testing.T) {
 				return providers.Spec{Name: name, Profile: "agents", Labels: labels}
 			},
 			TracksState: true,
+			Suspends:    true,
 		}
 	})
 }
@@ -47,6 +48,7 @@ func TestFakeWithComputeAccessSatisfiesTheContract(t *testing.T) {
 				return providers.Spec{Name: name, Profile: "agents", Labels: labels}
 			},
 			TracksState: true,
+			Suspends:    true,
 		}
 	})
 }
