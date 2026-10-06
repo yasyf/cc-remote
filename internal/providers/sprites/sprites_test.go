@@ -386,6 +386,54 @@ func TestCreateThatAllocatesThenFailsIsNotAConflict(t *testing.T) {
 	}
 }
 
+func TestCreateNamesTheStepThatFailed(t *testing.T) {
+	tests := []struct {
+		name      string
+		spec      providers.Spec
+		edit      func(*fakeSprites)
+		step      CreateStep
+		status    int
+		exit      int
+		ambiguous bool
+		verbs     []string
+	}{
+		{"an invalid name", spec("Alpha", nil), func(*fakeSprites) {}, StepValidate, 0, 0, false, nil},
+		{"an unsupported spec", providers.Spec{Name: "alpha", Profile: "agents", Region: "ord"}, func(*fakeSprites) {}, StepValidate, 0, 0, false, nil},
+		{"a name already taken", spec("alpha", nil), func(f *fakeSprites) { f.sprites["alpha"] = &fakeSprite{status: "cold"} }, StepPreflight, 0, 0, false, []string{"api"}},
+		{"a lookup the API refuses", spec("alpha", nil), func(f *fakeSprites) { f.status = 503 }, StepPreflight, 503, 0, false, []string{"api"}},
+		{"a create the CLI rejects", spec("alpha", nil), func(f *fakeSprites) { f.createRejects = "error: creating sprite alpha: rejected" }, StepCommand, 0, 1, false, []string{"api", "create", "api"}},
+		{"a create that allocates then fails", spec("alpha", nil), func(f *fakeSprites) { f.createFails = "error: waiting for the sprite console timed out" }, StepCommand, 0, 1, true, []string{"api", "create", "api"}},
+		{"a create that loses a race", spec("alpha", nil), func(f *fakeSprites) { f.takenAtCreate = true }, StepCommand, 0, 1, true, []string{"api", "create", "api"}},
+		{"a readback the API refuses", spec("alpha", nil), func(f *fakeSprites) { f.readbackStatus = 500 }, StepReadback, 500, 0, true, []string{"api", "create", "api"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			tt.edit(fake)
+			_, err := p.Create(t.Context(), tt.spec)
+			var failed *CreateError
+			if !errors.As(err, &failed) || failed.Step != tt.step {
+				t.Fatalf("Create = %v, want a failure at %s", err, tt.step)
+			}
+			status, exit := 0, 0
+			var answered *StatusError
+			if errors.As(err, &answered) {
+				status = answered.Status
+			}
+			var command *providers.CommandError
+			if errors.As(err, &command) {
+				exit = command.Result.ExitCode
+			}
+			if status != tt.status || exit != tt.exit || errors.Is(err, providers.ErrAmbiguous) != tt.ambiguous {
+				t.Errorf("Create = %v with status %d and exit %d, want status %d, exit %d, and ambiguous %t", err, status, exit, tt.status, tt.exit, tt.ambiguous)
+			}
+			if verbs := fake.verbs(); !slices.Equal(verbs, tt.verbs) {
+				t.Errorf("CLI verbs = %q, want %q with no retry or destroy", verbs, tt.verbs)
+			}
+		})
+	}
+}
+
 func TestProxyCommandStopsWithSSH(t *testing.T) {
 	for exit, end := range map[string]func(*exec.Cmd, io.Closer) error{
 		"closes the connection": func(_ *exec.Cmd, stdin io.Closer) error { return stdin.Close() },

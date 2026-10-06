@@ -23,16 +23,25 @@ import (
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
+	"github.com/yasyf/cc-remote/internal/providers/sprites"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 	"github.com/yasyf/cc-remote/internal/workspace/workspacetest"
 )
+
+const spriteFails = "echo 'fatal: sk-leakedsecret answered by the synthetic provider' >&2\nexit 1\n"
 
 type observing struct {
 	*providertest.Fake
 	paused *gate
 	on     string
 	err    error
+}
+
+type rejecting struct {
+	*providertest.Fake
+	name    string
+	creates atomic.Int32
 }
 
 func (o *observing) Get(ctx context.Context, id string) (providers.Machine, error) {
@@ -43,6 +52,15 @@ func (o *observing) Get(ctx context.Context, id string) (providers.Machine, erro
 		return providers.Machine{}, o.err
 	}
 	return o.Fake.Get(ctx, id)
+}
+
+func (r *rejecting) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	if spec.Name != r.name {
+		return r.Fake.Create(ctx, spec)
+	}
+	r.creates.Add(1)
+	rejected := &providers.CommandError{Command: "sprite create -o test --skip-console " + spec.Name, Result: providers.Result{ExitCode: 1, Stderr: []byte("fatal: sk-leakedsecret rejected https://api.sprites.dev/v1/sprites?token=sk-leakedsecret")}}
+	return providers.Machine{ID: spec.Name, Provider: "fake", State: providers.StateUnknown}, &sprites.CreateError{Step: sprites.StepCommand, Err: fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, rejected)}
 }
 
 func newWarmPool(t *testing.T, names ...string) *firstWorker {
@@ -497,7 +515,7 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 
 func TestThePublicFillWithholdsAnUnansweredLookupOfAReadySpare(t *testing.T) {
 	dir := t.TempDir()
-	path, calls := spritesConfig(t, dir)
+	path, calls := spritesConfig(t, dir, spriteFails)
 	session, err := (&selection{config: path}).open()
 	if err != nil {
 		t.Fatal(err)
@@ -921,11 +939,11 @@ func TestAFillCountsOnlySparesThatAreStillEligible(t *testing.T) {
 	}
 }
 
-func spritesConfig(t *testing.T, dir string) (path, calls string) {
+func spritesConfig(t *testing.T, dir, script string) (path, calls string) {
 	t.Helper()
 	cli, calls := filepath.Join(dir, "sprite"), filepath.Join(dir, "calls")
 	t.Setenv("SPRITE_CALLS", calls)
-	if err := os.WriteFile(cli, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$SPRITE_CALLS\"\necho 'fatal: sk-leakedsecret answered by the synthetic provider' >&2\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(cli, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$SPRITE_CALLS\"\n"+script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(workspacetest.Inventory), 0o600); err != nil {
@@ -964,17 +982,112 @@ func runPublicFill(t *testing.T, path string) (string, error) {
 	return stdout.String(), err
 }
 
-func TestThePublicFillShowsOnlyErrorMetadata(t *testing.T) {
-	dir := t.TempDir()
-	path, _ := spritesConfig(t, dir)
-	nameSpares(t, "pool-a")
-	_, err := runPublicFill(t, path)
-	if !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit 1 and HTTP status unknown") {
-		t.Fatalf("fill = %v, want the failed create reported with its exit", err)
+func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
+	const absent = `printf '{"error":"sprite not found"}\n404'` + "\n"
+	tests := []struct {
+		name    string
+		script  string
+		want    string
+		failure string
+		calls   string
+	}{
+		{
+			"a lookup the CLI cannot make", spriteFails,
+			"exit 1 and HTTP status unknown at create.preflight", `{"step":"create.preflight","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\n",
+		},
+		{
+			"a lookup the API refuses", `printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n503'` + "\n",
+			"exit unknown and HTTP status 503 at create.preflight", `{"step":"create.preflight","exit":null,"httpStatus":503,"bytes":0,"sha256":""}`, "api\n",
+		},
+		{
+			"a create the CLI rejects", `if [ "$1" = create ]; then echo 'fatal: sk-leakedsecret answered by the synthetic provider' >&2; exit 1; fi` + "\n" + absent,
+			"exit 1 and HTTP status unknown at create.command", `{"step":"create.command","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
+		},
+		{
+			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
+			"exit unknown and HTTP status 500 at create.readback", `{"step":"create.readback","exit":null,"httpStatus":500,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
+		},
 	}
-	member := &orcaMember{}
-	if _, err := state.Load(state.Dir(filepath.Join(dir, "state")).Pool("pool-a"), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.HTTPStatus != nil {
-		t.Errorf("pool-a = %+v, %v; want it failed with exit 1 and no proved HTTP status", member, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, calls := spritesConfig(t, dir, tt.script)
+			nameSpares(t, "pool-a")
+			_, err := runPublicFill(t, path)
+			if !strings.Contains(err.Error(), "create warm workspace pool-a failed with "+tt.want+";") {
+				t.Fatalf("fill = %v, want the failed create reported as %q", err, tt.want)
+			}
+			states := state.Dir(filepath.Join(dir, "state"))
+			member := &orcaMember{}
+			if _, err := state.Load(states.Pool("pool-a"), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+				t.Fatalf("pool-a = %+v, %v; want it failed with error metadata", member, err)
+			}
+			member.Failure.Bytes, member.Failure.SHA256 = 0, ""
+			if failure, err := json.Marshal(member.Failure); err != nil || string(failure) != tt.failure {
+				t.Errorf("failure = %s, %v; want %s", failure, err, tt.failure)
+			}
+			record := &workspace.Record{}
+			if _, err := state.Load(states.Workspace("pool-a"), record); err != nil || !record.Unverified || record.Machine != "pool-a" {
+				t.Errorf("workspace pool-a = %+v, %v; want its record kept unverified", record, err)
+			}
+			for _, stored := range []string{states.Pool("pool-a"), states.Workspace("pool-a")} {
+				raw, err := os.ReadFile(stored)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, leaked := range []string{"sk-leakedsecret", "fatal", "synthetic provider", "sprite create"} {
+					if bytes.Contains(raw, []byte(leaked)) {
+						t.Errorf("%s kept %q: %s", stored, leaked, raw)
+					}
+				}
+			}
+			if invoked, err := os.ReadFile(calls); err != nil || string(invoked) != tt.calls {
+				t.Errorf("provider CLI calls = %q, %v; want %q with no retry or destroy", invoked, err, tt.calls)
+			}
+		})
+	}
+}
+
+func TestAFillKeepsItsReadySpareWhenTheNextCreateIsRejected(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b")
+	*w.session.Config.Orca.Pool.Ready = 2
+	provider := &rejecting{Fake: w.provider, name: "pool-b"}
+	session := w.over(provider)
+	session.Token = w.session.Token
+	session.Stderr = io.Discard
+	pool := openPool(session)
+	fill, err := pool.fill(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-b failed with exit 1 and HTTP status unknown at create.command;") || strings.Contains(err.Error(), "sk-leakedsecret") || !slices.Equal(fill.Created, []string{"pool-a"}) {
+		t.Fatalf("fill = %+v, %v; want pool-a made and pool-b's rejected create reported as metadata", fill, err)
+	}
+	if got := w.member("pool-a"); got.State != memberReady {
+		t.Errorf("pool-a = %+v, want it kept ready", got)
+	}
+	failed := w.member("pool-b")
+	if failed.State != memberFailed || failed.Failure == nil || failed.Failure.Step != sprites.StepCommand || failed.Failure.Exit == nil || *failed.Failure.Exit != 1 || failed.Failure.HTTPStatus != nil {
+		t.Errorf("pool-b = %+v, want it failed at the create command with exit 1", failed)
+	}
+	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-b")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) || bytes.Contains(stored, []byte("sprites.dev")) {
+		t.Errorf("the pool record kept provider output: %s, %v", stored, err)
+	}
+	record := &workspace.Record{}
+	if _, err := state.Load(w.session.Config.State().Workspace("pool-b"), record); err != nil || !record.Unverified || record.Machine != "pool-b" {
+		t.Errorf("workspace pool-b = %+v, %v; want its record kept unverified", record, err)
+	}
+	if ready, err := pool.ready(); err != nil || ready != 1 {
+		t.Errorf("ready = %d, %v; want pool-a alone", ready, err)
+	}
+	creates := 0
+	for _, call := range w.provider.Calls() {
+		if strings.HasPrefix(call, "create ") {
+			creates++
+		}
+		if strings.HasPrefix(call, "destroy ") {
+			t.Errorf("the fill destroyed a machine after the rejected create: %q", call)
+		}
+	}
+	if creates != 1 || provider.creates.Load() != 1 {
+		t.Errorf("creates = %d made and %d rejected, want one of each and no retry", creates, provider.creates.Load())
 	}
 }
 
@@ -993,8 +1106,8 @@ func TestWarmFillRecordsAFailedCreateAndStops(t *testing.T) {
 		t.Fatalf("fill = %+v, %v; want the failed create reported as metadata", fill, err)
 	}
 	member := w.member("pool-a")
-	if member.State != memberFailed || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-		t.Errorf("pool-a = %+v, want it failed with error metadata", member)
+	if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "" || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+		t.Errorf("pool-a = %+v, want it failed with error metadata and no provider create step", member)
 	}
 	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) {
 		t.Errorf("the pool record kept remote output: %s, %v", stored, err)
@@ -1063,21 +1176,34 @@ func TestReplenishStartsOneDetachedFillAndReturnsAtOnce(t *testing.T) {
 }
 
 func TestFailureKeepsOnlyErrorMetadata(t *testing.T) {
-	exit := 7
-	command := fmt.Errorf("check: %w", &providers.CommandError{Command: "sh -c on pool-a", Result: providers.Result{ExitCode: exit, Stderr: []byte("sk-secret")}})
-	plain := errors.New("sprites api answered 502: body")
-	for _, err := range []error{command, plain} {
-		failure := failureOf(err)
-		raw, jsonErr := json.Marshal(failure)
-		if jsonErr != nil || failure.Bytes != len(err.Error()) || len(failure.SHA256) != 64 || failure.HTTPStatus != nil || bytes.Contains(raw, []byte("secret")) || bytes.Contains(raw, []byte("body")) {
-			t.Errorf("failureOf(%v) = %s, %v", err, raw, jsonErr)
-		}
+	secret := providers.Result{ExitCode: 7, Stderr: []byte("sk-secret https://api.sprites.dev/v1/sprites?token=sk-secret {\"body\":1}")}
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"a command", fmt.Errorf("check: %w", &providers.CommandError{Command: "sh -c on pool-a", Result: secret}), `{"exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"plain text", errors.New("sprites api answered 502: body"), `{"exit":null,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a rejected create", &sprites.CreateError{Step: sprites.StepCommand, Err: fmt.Errorf("sprite pool-a: whether the create allocated it is unknown: %w", &providers.CommandError{Command: "sprite create -o org --skip-console pool-a", Result: secret})}, `{"step":"create.command","exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a refused readback", fmt.Errorf("create pool-a: %w", &sprites.CreateError{Step: sprites.StepReadback, Err: fmt.Errorf("%w for pool-a: %s", &sprites.StatusError{Status: 502}, secret.Stderr)}), `{"step":"create.readback","exit":null,"httpStatus":502,"bytes":0,"sha256":""}`},
 	}
-	if failure := failureOf(command); failure.Exit == nil || *failure.Exit != exit {
-		t.Errorf("exit = %v, want %d", failure.Exit, exit)
-	}
-	if failure := failureOf(plain); failure.Exit != nil {
-		t.Errorf("exit = %v, want none for an error without one", failure.Exit)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := failureOf(tt.err)
+			raw, err := json.Marshal(failure)
+			if err != nil || failure.Bytes != len(tt.err.Error()) || len(failure.SHA256) != 64 {
+				t.Fatalf("failureOf(%v) = %s, %v", tt.err, raw, err)
+			}
+			for _, leaked := range []string{"secret", "body", "sprites.dev", "token", "pool-a"} {
+				if bytes.Contains(raw, []byte(leaked)) {
+					t.Errorf("failureOf kept %q: %s", leaked, raw)
+				}
+			}
+			failure.Bytes, failure.SHA256 = 0, ""
+			if metadata, err := json.Marshal(failure); err != nil || string(metadata) != tt.want {
+				t.Errorf("failureOf(%v) = %s, %v; want %s", tt.err, metadata, err, tt.want)
+			}
+		})
 	}
 }
 
