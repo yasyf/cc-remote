@@ -26,6 +26,14 @@ const (
 	pageSize   = 500
 )
 
+const (
+	StepValidate  CreateStep = "create.validate"
+	StepPreflight CreateStep = "create.preflight"
+	StepCommand   CreateStep = "create.command"
+	StepReadback  CreateStep = "create.readback"
+	StepRecord    CreateStep = "create.record"
+)
+
 type Config struct {
 	Org      string `yaml:"org"`
 	CLI      string `yaml:"cli"`
@@ -49,6 +57,17 @@ type Provider struct {
 }
 
 var _ providers.Provider = (*Provider)(nil)
+
+type CreateStep string
+
+type CreateError struct {
+	Step CreateStep
+	Err  error
+}
+
+type StatusError struct {
+	Status int
+}
 
 func New(config Config) (*Provider, error) {
 	if err := config.validate(); err != nil {
@@ -102,29 +121,29 @@ func (p *Provider) ValidateSpec(spec providers.Spec) error {
 func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
 	named := providers.Machine{ID: spec.Name, Provider: Name, State: providers.StateUnknown}
 	if err := providers.CheckName(spec.Name, nameLimit); err != nil {
-		return named, err
+		return named, &CreateError{Step: StepValidate, Err: err}
 	}
 	if err := p.ValidateSpec(spec); err != nil {
-		return named, err
+		return named, &CreateError{Step: StepValidate, Err: err}
 	}
 	switch _, err := p.Get(ctx, spec.Name); {
 	case err == nil:
-		return named, fmt.Errorf("sprite %s: %w", spec.Name, providers.ErrExists)
+		return named, &CreateError{Step: StepPreflight, Err: fmt.Errorf("sprite %s: %w", spec.Name, providers.ErrExists)}
 	case !errors.Is(err, providers.ErrNotFound):
-		return named, err
+		return named, &CreateError{Step: StepPreflight, Err: err}
 	}
 	if _, err := providers.Output(ctx, p.Runner, p.command(nil, "create", "-o", p.Org, "--skip-console", spec.Name)); err != nil {
 		if _, found := p.Get(ctx, spec.Name); found == nil {
-			return named, fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)
+			return named, &CreateError{Step: StepCommand, Err: fmt.Errorf("sprite %s: %w: %w", spec.Name, providers.ErrAmbiguous, err)}
 		}
-		return named, fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)
+		return named, &CreateError{Step: StepCommand, Err: fmt.Errorf("sprite %s: whether the create allocated it is unknown: %w", spec.Name, err)}
 	}
 	created, err := p.Get(ctx, spec.Name)
 	if err != nil {
-		return named, fmt.Errorf("sprite %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)
+		return named, &CreateError{Step: StepReadback, Err: fmt.Errorf("sprite %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)}
 	}
 	if err := p.records().Save(spec.Name, spec.Labels, created.CreatedAt); err != nil {
-		return named, fmt.Errorf("sprite %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)
+		return named, &CreateError{Step: StepRecord, Err: fmt.Errorf("sprite %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)}
 	}
 	created.Labels = maps.Clone(spec.Labels)
 	return created, nil
@@ -172,7 +191,7 @@ func (p *Provider) Get(ctx context.Context, id string) (providers.Machine, error
 	case 404:
 		return providers.Machine{}, fmt.Errorf("sprite %s: %w", id, providers.ErrNotFound)
 	default:
-		return providers.Machine{}, fmt.Errorf("sprites api answered %d for %s: %s", status, id, bytes.TrimSpace(body))
+		return providers.Machine{}, fmt.Errorf("%w for %s: %s", &StatusError{Status: status}, id, bytes.TrimSpace(body))
 	}
 	var found sprite
 	if err := json.Unmarshal(body, &found); err != nil {
@@ -295,3 +314,9 @@ func (p *Provider) api(ctx context.Context, path string) (int, []byte, error) {
 	}
 	return status, out[:cut], nil
 }
+
+func (e *CreateError) Error() string { return e.Err.Error() }
+
+func (e *CreateError) Unwrap() error { return e.Err }
+
+func (e *StatusError) Error() string { return fmt.Sprintf("sprites api answered %d", e.Status) }

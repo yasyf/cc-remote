@@ -33,7 +33,9 @@ type fakeSprites struct {
 	pageSize        int
 	status          int
 	takenAtCreate   bool
+	createRejects   string
 	createFails     string
+	readbackStatus  int
 	destroySurvives bool
 
 	mu      sync.Mutex
@@ -68,6 +70,9 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 		if len(args) != 2 || args[0] != "--skip-console" {
 			f.t.Fatalf("sprite create %q", args)
 		}
+		if f.createRejects != "" {
+			return providers.Result{Stderr: []byte(f.createRejects), ExitCode: 1}, nil
+		}
 		if f.takenAtCreate {
 			f.sprites[args[1]] = &fakeSprite{status: "running", createdAt: time.Now().UTC()}
 		}
@@ -77,6 +82,9 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 		f.sprites[args[1]] = &fakeSprite{status: "running", createdAt: time.Date(2026, 9, 30, 12, 0, len(f.sprites), 0, time.UTC)}
 		if f.createFails != "" {
 			return providers.Result{Stderr: []byte(f.createFails), ExitCode: 1}, nil
+		}
+		if f.readbackStatus != 0 {
+			f.status = f.readbackStatus
 		}
 		return providers.Result{}, nil
 	case "destroy":

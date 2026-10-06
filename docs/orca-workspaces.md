@@ -265,8 +265,8 @@ lane's. Pass `workspace` to `status`, `read`, and `collect`.
 
 A claimed workspace never returns to the pool. A failed preparation is
 recorded `failed` with its error's metadata only: the exit code when one was
-observed, the HTTP status (null unless proved), and the message's byte length
-and SHA-256, never its text. The command neither tries another workspace nor
+observed, the HTTP status when a provider lookup answered one, and the message's
+byte length and SHA-256, never its text. The command neither tries another workspace nor
 creates one. A command that dies leaves its workspace `claimed`.
 A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
 first worker, so `--warm` refuses a lane that already has an Orca task, already
@@ -300,6 +300,17 @@ name and the pool label, so it holds tools, plugins, and a shallow checkout of
 `config.ref`. A fill starts no Orca runtime, records no task, starts no worker,
 and reads no API key. A failed create is recorded `failed` with the same error metadata and ends the
 fill.
+
+When the Sprite create itself fails, the record's `step` names which part
+failed. `create.validate` is the local name and spec check, `create.preflight`
+the lookup before the create, `create.command` the `sprite create` call,
+`create.readback` the lookup after it, and `create.record` the saved labels.
+`httpStatus` is set only when one of those lookups answered with an unexpected
+status. `sprite create` reports no structured error, so a failed
+`create.command` keeps only its exit code. The fill makes no retry and destroys
+nothing. The workspace record stays unverified, except after a preflight that
+found the name already taken, which removes it.
+
 `status` prints the key, the target, and every pool record with its state:
 `provisioning`, `ready`, `claimed`, `prepared`, `failed`, `abandoned`, or
 `refused`.
