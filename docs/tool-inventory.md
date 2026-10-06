@@ -353,7 +353,7 @@ The finalizer removes Claude's `~/.claude.json` identity file,
 session, project, telemetry, and debug state. It also removes Codex auth and
 sessions, plugin data and `.in_use` and `.orphaned_at` markers, daemonkit
 endpoints under `~/.daemonkit/a`, process ID and lock files, and sockets. The
-cc-remote ready, service, and tailnet state and Orca user data go too. It
+cc-remote ready, service, and tailnet state and Orca launcher state go too. It
 keeps `~/.codex/hooks.json`, `~/.codex/config.toml`, and
 `~/.claude/settings.json` byte for byte and fails the build if any of them
 changed.

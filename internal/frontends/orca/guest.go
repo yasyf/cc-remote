@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/version"
@@ -21,10 +20,9 @@ import (
 const (
 	GuestCLI    = "resources/bin/orca-ide"
 	guestSchema = 1
-	userDataDir = ".cc-remote/orca/user-data"
 )
 
-var guestRouting = []string{"ORCA_PAIRING_CODE", "ORCA_REMOTE_PAIRING", "ORCA_ENVIRONMENT"}
+var guestScrubbed = []string{"ORCA_PAIRING_CODE", "ORCA_REMOTE_PAIRING", "ORCA_ENVIRONMENT", "ORCA_USER_DATA_PATH"}
 
 type GuestReview struct {
 	Captain []Pin `json:"captain"`
@@ -99,15 +97,11 @@ func (g Guest) Run(ctx context.Context, home string, local func(context.Context,
 	case !filepath.IsLocal(g.CLI) || filepath.Clean(g.CLI) != g.CLI:
 		return nil, fmt.Errorf("the guest Orca CLI %q is not a clean path under the guest home", g.CLI)
 	}
-	userData := filepath.Join(home, userDataDir)
-	if err := ownedDir(userData); err != nil {
-		return nil, err
-	}
 	cli := filepath.Join(home, g.CLI)
 	if info, err := os.Stat(cli); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
 		return nil, fmt.Errorf("the guest Orca CLI %s is not an executable regular file", cli)
 	}
-	native := NewClient(ExecRunner{Command: cli, Env: guestEnv(os.Environ(), userData)}).Local(g.RuntimeID)
+	native := NewClient(ExecRunner{Command: cli, Env: guestEnv(os.Environ())}).Local(g.RuntimeID)
 	if _, err := native.Status(ctx); err != nil {
 		return nil, err
 	}
@@ -124,25 +118,11 @@ func (g Guest) startup(local func(context.Context, []string) ([]byte, error)) St
 	return StartupOf(Agent{Kind: g.Agent})
 }
 
-func ownedDir(path string) error {
-	info, err := os.Lstat(path)
-	switch {
-	case err != nil:
-		return fmt.Errorf("the guest Orca user data: %w", err)
-	case !info.IsDir():
-		return fmt.Errorf("the guest Orca user data %s is not a directory", path)
-	case int(info.Sys().(*syscall.Stat_t).Uid) != os.Getuid():
-		return fmt.Errorf("the guest Orca user data %s is owned by uid %d, not this user (uid %d)", path, info.Sys().(*syscall.Stat_t).Uid, os.Getuid())
-	}
-	return nil
-}
-
-func guestEnv(environ []string, userData string) []string {
-	env := slices.DeleteFunc(slices.Clone(environ), func(pair string) bool {
+func guestEnv(environ []string) []string {
+	return slices.DeleteFunc(slices.Clone(environ), func(pair string) bool {
 		name, _, _ := strings.Cut(pair, "=")
-		return name == "ORCA_USER_DATA_PATH" || slices.Contains(guestRouting, name)
+		return slices.Contains(guestScrubbed, name)
 	})
-	return append(env, "ORCA_USER_DATA_PATH="+userData)
 }
 
 func LocalExec(ctx context.Context, argv []string) ([]byte, error) {

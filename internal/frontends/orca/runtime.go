@@ -84,7 +84,7 @@ const FirstUseCheck = `test ! -e "` + runtimeDir + `" && test ! -L "` + runtimeD
 func (r Runtime) command() string {
 	return strings.Join(slices.Concat(
 		quoted(r.Display),
-		[]string{`"$HOME/"` + remote.Quote(r.Entry), "serve", "--port", strconv.Itoa(r.Port), "--pairing-address", remote.Quote(cmp.Or(r.Advertise, Loopback)), `--user-data-dir="` + runtimeDir + `/user-data"`, "--json"},
+		[]string{`"$HOME/"` + remote.Quote(r.Entry), "serve", "--port", strconv.Itoa(r.Port), "--pairing-address", remote.Quote(cmp.Or(r.Advertise, Loopback)), "--json"},
 		quoted(r.Args),
 	), " ")
 }
@@ -121,7 +121,7 @@ func (r Runtime) start() string {
 func (r Runtime) EnsureScript() string {
 	return remote.Script(
 		"umask 077",
-		`mkdir -p "`+runtimeDir+`/user-data"`,
+		`mkdir -p "`+runtimeDir+`"`,
 		`chmod 700 "`+runtimeDir+`"`,
 		`test -x "$HOME/"`+remote.Quote(r.Entry)+` || { echo "`+remote.Prefix+`: $HOME/`+r.Entry+` is not an executable Orca runtime; the inventory's runtime tool provides it" >&2; exit 1; }`,
 		`cat > "`+launcher+`.tmp" <<'SH'`,

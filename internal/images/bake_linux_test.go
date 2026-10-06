@@ -157,7 +157,6 @@ func TestFinalizeExcludesInstallerStateAndKeepsReusableContent(t *testing.T) {
 		".cc-remote/start.sh":                                  "",
 		".cc-remote/tailscaled.state":                          identity,
 		".cc-remote/tailscaled.log":                            identity,
-		".cc-remote/orca/user-data/Local State":                identity,
 		".cc-remote/orca/serve.json":                           identity,
 		".config/gh/hosts.yml":                                 "github.com:\n  oauth_token: synthetic\n",
 		".git-credentials":                                     "https://x:synthetic@github.com\n",

@@ -159,18 +159,18 @@ func TestRuntimeLauncher(t *testing.T) {
 		`cd "$HOME/.cc-remote/orca"`,
 		"exec 9> serve.lock",
 		"flock -n 9 || exit 0",
-		`exec xvfb-run --auto-servernum '--server-args=-nolisten tcp' "$HOME/".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun serve --port 7001 --pairing-address 127.0.0.1 --user-data-dir="$HOME/.cc-remote/orca/user-data" --json --log-level info > serve.json 2>> serve.log`,
+		`exec xvfb-run --auto-servernum '--server-args=-nolisten tcp' "$HOME/".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun serve --port 7001 --pairing-address 127.0.0.1 --json --log-level info > serve.json 2>> serve.log`,
 	}, "\n")
 	if got := runtime.Launcher(); got != want {
 		t.Errorf("Launcher =\n%s\nwant\n%s", got, want)
 	}
 }
 
-func TestRuntimeLauncherHandsElectronOneUserDataSwitch(t *testing.T) {
+func TestRuntimeLauncherServesOnStockDefaults(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "a home with spaces")
 	for path, script := range map[string]string{
-		".local/bin/flock":  "#!/bin/sh\nexit 0\n",
-		"tools/orca/AppRun": "#!/bin/sh\nprintf '%s\\0' \"$@\"\n",
+		".local/bin/flock":         "#!/bin/sh\nexit 0\n",
+		"orca runtime/orca/AppRun": "#!/bin/sh\nprintf '%s\\0' \"$@\"\n",
 	} {
 		if err := os.MkdirAll(filepath.Join(home, filepath.Dir(path)), 0o700); err != nil {
 			t.Fatal(err)
@@ -182,7 +182,7 @@ func TestRuntimeLauncherHandsElectronOneUserDataSwitch(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	launch := exec.Command("sh", "-c", orca.Runtime{Entry: "tools/orca/AppRun", Port: 7001}.Launcher())
+	launch := exec.Command("sh", "-c", orca.Runtime{Entry: "orca runtime/orca/AppRun", Port: 7001}.Launcher())
 	launch.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 	if out, err := launch.CombinedOutput(); err != nil {
 		t.Fatalf("launcher: %v: %s", err, out)
@@ -191,7 +191,7 @@ func TestRuntimeLauncherHandsElectronOneUserDataSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"serve", "--port", "7001", "--pairing-address", "127.0.0.1", "--user-data-dir=" + filepath.Join(home, ".cc-remote", "orca", "user-data"), "--json"}
+	want := []string{"serve", "--port", "7001", "--pairing-address", "127.0.0.1", "--json"}
 	if got := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00"); !slices.Equal(got, want) {
 		t.Errorf("runtime argv = %q, want %q", got, want)
 	}
