@@ -308,7 +308,8 @@ the lookup before the create, `create.command` the `sprite create` call,
 `httpStatus` is set only when one of those lookups answered with an unexpected
 status. `sprite create` reports no structured error, so a failed
 `create.command` keeps only its exit code. The fill makes no retry and destroys
-nothing, and the workspace record stays unverified.
+nothing. The workspace record stays unverified, except after a preflight that
+found the name already taken, which removes it.
 
 `status` prints the key, the target, and every pool record with its state:
 `provisioning`, `ready`, `claimed`, `prepared`, `failed`, `abandoned`, or
