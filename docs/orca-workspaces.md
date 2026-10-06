@@ -135,8 +135,10 @@ to inspect delivery before deciding what to send next. The frontend does not
 expose native request replay because the supported runtime can deliver the
 prompt again. These commands never stop the
 runtime, the worker, or the forward. The Orca workspace card's Sleep and Delete
-controls do not manage the provider machine; use `cc-remote suspend` and
-`cc-remote destroy`.
+controls do not manage the provider machine; use `cc-remote suspend` on a
+Namespace workspace and `cc-remote destroy`. `cc-remote suspend` fails on a
+Sprite and changes nothing: Sprites has no stop verb, and the open forward
+keeps the Sprite active, so only `cc-remote destroy` frees it.
 
 `reconnect` restores only the transport to an existing runtime. It does not
 resume a machine, restart a runtime, or recover a worker after process loss.

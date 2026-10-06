@@ -246,10 +246,11 @@ func (p *Provider) Wake(ctx context.Context, id string) error {
 	return nil
 }
 
-// Sprites has no stop verb; a sprite with no session or request sleeps on its own.
 func (p *Provider) Suspend(ctx context.Context, id string) error {
-	_, err := p.Get(ctx, id)
-	return err
+	if _, err := p.Get(ctx, id); err != nil {
+		return err
+	}
+	return fmt.Errorf("suspending sprite %s: %w: Sprites has no stop verb, so cc-remote cannot stop a sprite; it sleeps on its own only once no session, request, or connection holds it, and an open cc-remote orca forward holds it active; run cc-remote destroy to free it", id, errors.ErrUnsupported)
 }
 
 func (p *Provider) Destroy(ctx context.Context, id string) error {

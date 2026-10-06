@@ -183,6 +183,10 @@ Leave a finished task's workspace running.
 | Wake | Select the card | Not needed | Runs `resume` and reconnects; rerun `verify` afterwards |
 | Delete | Right-click, choose `Delete Worktree`, confirm | Required | Runs `destroy` and removes the SSH target |
 
+A Sprites recipe cannot sleep its machine. Its `suspend` fails and leaves the
+Sprite running, and the Sprite stays active while any connection holds it.
+`Delete Worktree` is the only card action that frees a Sprite.
+
 After an authorized delete, check that Orca kept nothing on that host:
 
 ```sh

@@ -30,7 +30,7 @@ import (
 func TestNamespaceSatisfiesTheContract(t *testing.T) {
 	providertest.Run(t, func(t *testing.T) providertest.Harness {
 		p, _, _ := newProvider(t)
-		return providertest.Harness{Provider: p, Spec: spec, TracksState: true}
+		return providertest.Harness{Provider: p, Spec: spec, TracksState: true, Suspends: true}
 	})
 }
 
