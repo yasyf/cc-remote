@@ -180,6 +180,8 @@ func ParseKeyDir(out []byte) (string, error) {
 	return dir, nil
 }
 
+const typesafeVariable = "TYPESAFE_API_KEY"
+
 func KeyWriteScript(dir string) string { return "exec cat > " + remote.Quote(dir+"/key") }
 
 func KeyDropScript(dir string) string { return "rm -rf " + remote.Quote(dir) }
@@ -254,7 +256,7 @@ func CredentialEnv() []string {
 	for _, agent := range []Agent{{Kind: AgentClaude}, {Kind: AgentCodex}} {
 		names = append(append(names, agent.variable()), agent.cleared()...)
 	}
-	return names
+	return append(names, typesafeVariable)
 }
 
 func (a Agent) Argv(policy ShellPolicy) []string {
@@ -302,11 +304,12 @@ func (a Agent) JudgeKeyProvider() string {
 func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
-		"{ { IFS= read -r key; IFS= read -r judge || judge=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared()), " "),
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable}), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
-		"unset key judge",
+		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
+		"unset key judge typesafe",
 		"export CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")

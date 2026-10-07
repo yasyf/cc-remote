@@ -228,7 +228,7 @@ func TestShellPolicyOverrideIsTheTOMLCodexReads(t *testing.T) {
 		want   map[string]any
 	}{
 		{"keyed", orca.ShellPolicy{}, map[string]any{"filters": excluded}},
-		{"legacy", orca.ShellPolicy{Legacy: true, Exclude: []string{"AWS_*", "[!A]?_TOKEN", `A"B\C`, "TAB\tDEL\x7f", "é<&>"}}, map[string]any{"exclude": []any{"AWS_*", "[!A]?_TOKEN", `A"B\C`, "TAB\tDEL\x7f", "é<&>", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"}}},
+		{"legacy", orca.ShellPolicy{Legacy: true, Exclude: []string{"AWS_*", "[!A]?_TOKEN", `A"B\C`, "TAB\tDEL\x7f", "é<&>"}}, map[string]any{"exclude": []any{"AWS_*", "[!A]?_TOKEN", `A"B\C`, "TAB\tDEL\x7f", "é<&>", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "TYPESAFE_API_KEY"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

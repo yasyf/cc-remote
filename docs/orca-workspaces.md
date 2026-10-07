@@ -111,9 +111,12 @@ The runtime is the inventory tool named by `orca.tool`, `orca-runtime` by
 default, and its `orca.entry`, `squashfs-root/AppRun` by default, must be
 executable on the machine. The worker's API key comes from the `orca.keys`
 command for its provider; the defaults read the macOS keychain items
-`cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. The key travels
-only over SSH stdin into a one-use pipe that the worker's terminal reads and
-removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
+`cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. An optional
+`orca.keys.typesafe` command, which has no default, adds a TypeSafe key that
+every worker receives as `TYPESAFE_API_KEY`, the variable capt-hook's
+`evt.decide` reads on an API actor. Codex excludes it from its shell tools
+along with the provider keys. Every key travels only over SSH stdin into a
+one-use pipe that the worker's terminal reads and removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
 worker may start. The frontend accepts Claude and Codex folder trust prompts
 only when `orca.trust` lists the repository's owner.
 

@@ -239,7 +239,7 @@ func TestRuntimeEnsureScript(t *testing.T) {
 }
 
 func TestAgentArgv(t *testing.T) {
-	keyed := `shell_environment_policy.filters={ANTHROPIC_API_KEY="exclude",CLAUDE_CODE_OAUTH_TOKEN="exclude",ANTHROPIC_AUTH_TOKEN="exclude",OPENAI_API_KEY="exclude",CODEX_API_KEY="exclude"}`
+	keyed := `shell_environment_policy.filters={ANTHROPIC_API_KEY="exclude",CLAUDE_CODE_OAUTH_TOKEN="exclude",ANTHROPIC_AUTH_TOKEN="exclude",OPENAI_API_KEY="exclude",CODEX_API_KEY="exclude",TYPESAFE_API_KEY="exclude"}`
 	legacy := orca.ShellPolicy{Legacy: true, Exclude: []string{"AWS_*", "GITHUB_TOKEN"}}
 	tests := []struct {
 		name   string
@@ -287,7 +287,7 @@ func TestAgentArgv(t *testing.T) {
 			"-c", `model_provider="cc_remote_openai"`,
 			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
 			"-c", `cli_auth_credentials_store="ephemeral"`,
-			"-c", `shell_environment_policy.exclude=["AWS_*","GITHUB_TOKEN","ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY"]`,
+			"-c", `shell_environment_policy.exclude=["AWS_*","GITHUB_TOKEN","ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY","TYPESAFE_API_KEY"]`,
 			"-c", "mcp_servers={}",
 		}},
 		{"codex over a legacy include list alone", orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh"}, orca.ShellPolicy{Legacy: true}, []string{
@@ -296,7 +296,7 @@ func TestAgentArgv(t *testing.T) {
 			"-c", `model_provider="cc_remote_openai"`,
 			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
 			"-c", `cli_auth_credentials_store="ephemeral"`,
-			"-c", `shell_environment_policy.exclude=["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY"]`,
+			"-c", `shell_environment_policy.exclude=["ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN","ANTHROPIC_AUTH_TOKEN","OPENAI_API_KEY","CODEX_API_KEY","TYPESAFE_API_KEY"]`,
 			"-c", "mcp_servers={}",
 		}},
 	}
@@ -436,12 +436,14 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 	tests := []struct {
 		name, kind, payload, want string
 	}{
-		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset"},
-		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset"},
-		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset"},
-		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset"},
+		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset"},
+		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset|unset"},
+		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset|unset"},
+		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset|unset"},
+		{"claude with a judge and a TypeSafe key", orca.AgentClaude, "sk-test-key\nsk-judge-key\nts-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|ts-key"},
+		{"codex with only a TypeSafe key", orca.AgentCodex, "sk-test-key\n\nts-key\n", "unset|unset|unset|sk-test-key|unset|ts-key"},
 	}
-	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"}
+	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "TYPESAFE_API_KEY"}
 	report, stale := make([]string, 0, len(names)), make([]string, 0, len(names))
 	for _, name := range names {
 		report = append(report, `"${`+name+`-unset}"`)
