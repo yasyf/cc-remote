@@ -330,7 +330,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 	var result *workspace.Result
 	var keys secrets
 	var err error
-	defer keys.clear()
+	defer func() { keys.clear() }()
 	switch opening {
 	case openExisting:
 		if result, err = session.Resume(ctx, name); err != nil {
