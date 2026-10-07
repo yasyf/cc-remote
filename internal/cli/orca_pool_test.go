@@ -838,7 +838,7 @@ func TestAFillRecountsSparesClaimedWhileItCreates(t *testing.T) {
 }
 
 func TestTheDetachedFillGetsNoModelCredentials(t *testing.T) {
-	keys := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"}
+	keys := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY", "TYPESAFE_API_KEY"}
 	if got := slices.Sorted(slices.Values(orca.CredentialEnv())); !slices.Equal(got, keys) {
 		t.Fatalf("CredentialEnv = %q, want %q", got, keys)
 	}

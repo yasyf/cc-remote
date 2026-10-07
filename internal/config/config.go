@@ -25,6 +25,7 @@ const (
 	DefaultPoolReady       = 1
 	KeyAnthropic           = "anthropic"
 	KeyOpenAI              = "openai"
+	KeyTypeSafe            = "typesafe"
 	HelperPlatform         = "linux/amd64"
 	dirName                = "cc-remote"
 	fileName               = "config.yaml"
@@ -220,8 +221,8 @@ func (o Orca) validate() error {
 		return fmt.Errorf("orca.entry %q must be a clean path inside the runtime tool's directory", o.Entry)
 	}
 	for provider, command := range o.Keys {
-		if provider != KeyAnthropic && provider != KeyOpenAI {
-			return fmt.Errorf("orca.keys.%s: name %s or %s", provider, KeyAnthropic, KeyOpenAI)
+		if provider != KeyAnthropic && provider != KeyOpenAI && provider != KeyTypeSafe {
+			return fmt.Errorf("orca.keys.%s: name %s, %s, or %s", provider, KeyAnthropic, KeyOpenAI, KeyTypeSafe)
 		}
 		if len(command) == 0 || command[0] == "" {
 			return fmt.Errorf("orca.keys.%s needs the command that prints the key as its first element", provider)

@@ -123,22 +123,29 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 		return []string{path}
 	}
 	anthropic, openai := script("anthropic", "sk-anthropic-sentinel"), script("openai", "sk-openai-sentinel")
+	typesafe := script("typesafe", "ts-typesafe-sentinel")
 	tests := []struct {
-		name       string
-		kind       string
-		keys       map[string][]string
-		key, judge string
+		name                 string
+		kind                 string
+		keys                 map[string][]string
+		key, judge, typesafe string
+		payload              string
 	}{
-		{"claude with an OpenAI judge", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai}, "sk-anthropic-sentinel", "sk-openai-sentinel"},
-		{"claude alone", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic}, "sk-anthropic-sentinel", ""},
-		{"codex with a Claude judge", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyAnthropic: anthropic}, "sk-openai-sentinel", "sk-anthropic-sentinel"},
-		{"codex alone", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai}, "sk-openai-sentinel", ""},
+		{"claude with an OpenAI judge", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai}, "sk-anthropic-sentinel", "sk-openai-sentinel", "", "sk-anthropic-sentinel\nsk-openai-sentinel\n"},
+		{"claude alone", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic}, "sk-anthropic-sentinel", "", "", "sk-anthropic-sentinel\n"},
+		{"codex with a Claude judge", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyAnthropic: anthropic}, "sk-openai-sentinel", "sk-anthropic-sentinel", "", "sk-openai-sentinel\nsk-anthropic-sentinel\n"},
+		{"codex alone", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai}, "sk-openai-sentinel", "", "", "sk-openai-sentinel\n"},
+		{"claude with a judge and a TypeSafe key", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe}, "sk-anthropic-sentinel", "sk-openai-sentinel", "ts-typesafe-sentinel", "sk-anthropic-sentinel\nsk-openai-sentinel\nts-typesafe-sentinel\n"},
+		{"codex with only a TypeSafe key", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe}, "sk-openai-sentinel", "", "ts-typesafe-sentinel", "sk-openai-sentinel\n\nts-typesafe-sentinel\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			key, judge, err := captureKeys(t.Context(), tt.keys, orca.Agent{Kind: tt.kind})
-			if err != nil || string(key) != tt.key || string(judge) != tt.judge {
-				t.Errorf("captureKeys = %q, %q, %v; want %q, %q", key, judge, err, tt.key, tt.judge)
+			got, err := captureKeys(t.Context(), tt.keys, orca.Agent{Kind: tt.kind})
+			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe {
+				t.Errorf("captureKeys = %q, %q, %q, %v; want %q, %q, %q", got.key, got.judge, got.typesafe, err, tt.key, tt.judge, tt.typesafe)
+			}
+			if payload := string(got.payload()); payload != tt.payload {
+				t.Errorf("payload = %q, want %q", payload, tt.payload)
 			}
 		})
 	}
@@ -148,12 +155,17 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 	for _, agent := range []orca.Agent{{Kind: orca.AgentClaude}, {Kind: orca.AgentCodex}} {
 		keys := map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), agent.JudgeKeyProvider(): {failing}}
-		key, judge, err := captureKeys(t.Context(), keys, agent)
-		if err == nil || !strings.HasPrefix(err.Error(), "judge key command") || key != nil || judge != nil {
-			t.Errorf("%s captureKeys with a failing judge = %q, %q, %v", agent.Kind, key, judge, err)
+		got, err := captureKeys(t.Context(), keys, agent)
+		if err == nil || !strings.HasPrefix(err.Error(), "judge key command") || got.key != nil || got.judge != nil {
+			t.Errorf("%s captureKeys with a failing judge = %q, %q, %v", agent.Kind, got.key, got.judge, err)
 		}
 		if err != nil && strings.Contains(err.Error(), "sentinel") {
 			t.Errorf("the error leaks a key: %v", err)
+		}
+		keys = map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), config.KeyTypeSafe: {failing}}
+		got, err = captureKeys(t.Context(), keys, agent)
+		if err == nil || !strings.HasPrefix(err.Error(), "typesafe key command") || got.key != nil || got.typesafe != nil {
+			t.Errorf("%s captureKeys with a failing TypeSafe key = %q, %q, %v", agent.Kind, got.key, got.typesafe, err)
 		}
 	}
 }
@@ -391,7 +403,7 @@ func TestLaunchDeliversTheKeyOnlyToTheVerifiedPrimaryTerminal(t *testing.T) {
 				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
 				Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
 			}
-			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), nil, "task-a")
+			err = driver.launch(t.Context(), session, task, runtime, secrets{key: []byte("sk-test-key")}, "task-a")
 			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Fatalf("launch = %v, want %q", err, tt.want)
 			}
@@ -494,7 +506,7 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
 				Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
 			}
-			err = driver.launch(t.Context(), session, task, runtime, []byte("sk-test-key"), nil, "task-a")
+			err = driver.launch(t.Context(), session, task, runtime, secrets{key: []byte("sk-test-key")}, "task-a")
 			if err == nil && tt.create {
 				_, err = driver.prompt(t.Context(), task, "do the task")
 			}

@@ -98,7 +98,7 @@ func launchThroughGuest(t *testing.T, guest *helperGuest, claimed bool, result s
 		Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: guestLaunchAgent, claimed: claimed,
 		Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
 	}
-	run.err = driver.launch(t.Context(), session, run.task, orca.Runtime{Entry: guestLaunchRuntime}, []byte("sk-test-key"), []byte("sk-judge-key"), "task-a")
+	run.err = driver.launch(t.Context(), session, run.task, orca.Runtime{Entry: guestLaunchRuntime}, secrets{key: []byte("sk-test-key"), judge: []byte("sk-judge-key")}, "task-a")
 	run.orcaCalls, run.ssh, run.logs = fake.calls, sshCalls(t), logs.String()
 	run.descriptor, _ = os.ReadFile(descriptor)
 	raw, _ := os.ReadFile(record)
