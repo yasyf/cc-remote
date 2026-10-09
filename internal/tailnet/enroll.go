@@ -185,6 +185,13 @@ func (e *Enroller) Leave(ctx context.Context, held *state.Held, recorded *Node) 
 }
 
 func (e *Enroller) depart(ctx context.Context, bound *Bound, machine Runner, binding Binding, node Node) error {
+	client, err := e.Client(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.Owns(ctx, binding.NodeID, bound.Resource()); err != nil && !errors.Is(err, ErrNoNode) {
+		return fmt.Errorf("refusing to delete: %w", err)
+	}
 	if node.NodeID == binding.NodeID {
 		logout, cancel := context.WithTimeout(ctx, logoutTimeout)
 		defer cancel()

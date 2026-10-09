@@ -554,6 +554,8 @@ func TestACleanupPausedMidDeleteHoldsOffAReplacement(t *testing.T) {
 	h := newHarness(t, m, api)
 	h.bind(boundTo("nOLD"))
 	deleting, proceed := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(proceed) }) })
 	var first sync.Once
 	api.onDelete = func() {
 		first.Do(func() {
@@ -579,7 +581,7 @@ func TestACleanupPausedMidDeleteHoldsOffAReplacement(t *testing.T) {
 	if m.ran(enrolls) != 0 {
 		t.Fatalf("the replacement enrolled while the cleanup still held the resource: %q", m.scripts)
 	}
-	close(proceed)
+	release.Do(func() { close(proceed) })
 	if err := <-cleanup; err != nil {
 		t.Fatal(err)
 	}
@@ -588,6 +590,19 @@ func TestACleanupPausedMidDeleteHoldsOffAReplacement(t *testing.T) {
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != "nOLD" || got == nil || got.NodeID != "nNEW" || h.bound() != boundTo("nNEW") {
 		t.Errorf("deleted %v, recorded %+v, bound %v", api.deleted, got, h.bound())
+	}
+}
+
+func TestReattachRefusesToLogOutAStoppedNodeAnotherWorkspaceOwns(t *testing.T) {
+	m := &machine{status: loggedOut("nOTHER")}
+	api := &fakeTailnet{devices: []Device{foreign("nOTHER")}}
+	h := newHarness(t, m, api)
+	h.bind(boundTo("nOTHER"))
+	if _, _, err := h.reattach(nil); err == nil || !strings.Contains(err.Error(), "refusing to delete") {
+		t.Errorf("err = %v", err)
+	}
+	if m.ran(logsOut) != 0 || len(api.deleted) != 0 || h.bound() != boundTo("nOTHER") {
+		t.Errorf("logged out %d times, deleted %v, bound %v", m.ran(logsOut), api.deleted, h.bound())
 	}
 }
 
