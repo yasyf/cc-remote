@@ -2,7 +2,7 @@ module github.com/yasyf/cc-remote
 
 go 1.26.5
 
-toolchain go1.26.6
+toolchain go1.26.9
 
 require (
 	github.com/spf13/cobra v1.10.2
@@ -22,10 +22,10 @@ require (
 	github.com/jxskiss/base62 v1.1.0 // indirect
 	github.com/segmentio/ksuid v1.0.4 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	inet.af/tcpproxy v0.0.0-20231102063150-2862066fc2a9 // indirect
 	namespacelabs.dev/go-ids v0.0.0-20221124082625-9fc72ee06af7 // indirect

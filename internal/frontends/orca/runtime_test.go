@@ -436,20 +436,23 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 	tests := []struct {
 		name, kind, payload, want string
 	}{
-		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset"},
-		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset|unset"},
-		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset|unset"},
-		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset|unset"},
-		{"claude with a judge and a TypeSafe key", orca.AgentClaude, "sk-test-key\nsk-judge-key\nts-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|ts-key"},
-		{"codex with only a TypeSafe key", orca.AgentCodex, "sk-test-key\n\nts-key\n", "unset|unset|unset|sk-test-key|unset|ts-key"},
+		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset|unset|unset|unset"},
+		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset|unset|unset|unset|unset"},
+		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset|unset|unset|unset|unset"},
+		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset|unset|unset|unset|unset"},
+		{"claude with a judge and a TypeSafe key", orca.AgentClaude, "sk-test-key\nsk-judge-key\nts-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|ts-key|unset|unset|unset"},
+		{"codex with only a TypeSafe key", orca.AgentCodex, "sk-test-key\n\nts-key\n", "unset|unset|unset|sk-test-key|unset|ts-key|unset|unset|unset"},
+		{"claude with a GitHub token", orca.AgentClaude, "sk-test-key\nsk-judge-key\n\ngho-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset|gho-key|unset|!gh auth git-credential"},
+		{"codex with only a GitHub token", orca.AgentCodex, "sk-test-key\n\n\ngho-key\n", "unset|unset|unset|sk-test-key|unset|unset|gho-key|unset|!gh auth git-credential"},
 	}
-	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "TYPESAFE_API_KEY"}
-	report, stale := make([]string, 0, len(names)), make([]string, 0, len(names))
+	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "TYPESAFE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}
+	report, stale := make([]string, 0, len(names)+1), make([]string, 0, len(names))
 	for _, name := range names {
 		report = append(report, `"${`+name+`-unset}"`)
 		stale = append(stale, name+"=stale")
 	}
-	worker := "#!/bin/sh\nprintf '" + strings.Repeat("%s|", len(names)-1) + "%s\\n' " + strings.Join(report, " ") + "\n"
+	report = append(report, `"${GIT_CONFIG_VALUE_1-unset}"`)
+	worker := "#!/bin/sh\nprintf '" + strings.Repeat("%s|", len(report)-1) + "%s\\n' " + strings.Join(report, " ") + "\n"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			agent := orca.Agent{Kind: tt.kind, Model: "m", Effort: "e"}

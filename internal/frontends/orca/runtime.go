@@ -182,6 +182,12 @@ func ParseKeyDir(out []byte) (string, error) {
 
 const typesafeVariable = "TYPESAFE_API_KEY"
 
+var githubVariables = []string{"GH_TOKEN", "GITHUB_TOKEN"}
+
+const githubCredentials = `export GH_TOKEN="$github" GIT_CONFIG_COUNT=2 ` +
+	`GIT_CONFIG_KEY_0=credential.https://github.com.helper GIT_CONFIG_VALUE_0= ` +
+	`GIT_CONFIG_KEY_1=credential.https://github.com.helper 'GIT_CONFIG_VALUE_1=!gh auth git-credential'`
+
 func KeyWriteScript(dir string) string { return "exec cat > " + remote.Quote(dir+"/key") }
 
 func KeyDropScript(dir string) string { return "rm -rf " + remote.Quote(dir) }
@@ -304,12 +310,13 @@ func (a Agent) JudgeKeyProvider() string {
 func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
-		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable}), " "),
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable}, githubVariables), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
 		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
-		"unset key judge typesafe",
+		`{ test -z "$github" || ` + githubCredentials + `; }`,
+		"unset key judge typesafe github",
 		"export CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")
