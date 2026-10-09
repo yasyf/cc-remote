@@ -25,3 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   excludes and that the pool fill and grant probes strip. A failing command
   stops the launch, the same as a failing judge key, and leaving it
   unconfigured changes nothing.
+
+### Fixed
+- **`cc-remote destroy` no longer needs the machine's tailnet daemon.** Destroy
+  used to ask the guest's `tailscaled` which node it held before removing
+  anything, so a machine whose daemon never opened its socket could not be
+  destroyed at all. Leaving the tailnet now reads only the workspace's binding
+  and the tailnet API. A bound node is deleted through the API after the same
+  ownership check as before, and a workspace whose enrollment never registered
+  a node has nothing to remove, so destroy goes on to the machine. The
+  provider's ownership label check is unchanged.

@@ -978,7 +978,7 @@ func (s *Session) abandon(ctx context.Context, held *state.Held, record *Record)
 	s.Log.Error("create failed; removing what it made", "workspace", record.Name, "machine", record.Machine)
 	var left error
 	if s.Enroller != nil {
-		if err := s.Enroller.Leave(ctx, held, runner{s, record.Machine}, record.Tailnet); err != nil {
+		if err := s.Enroller.Leave(ctx, held, record.Tailnet); err != nil {
 			left = fmt.Errorf("removing the tailnet node of %s after the failed create also failed, so delete it from the tailnet by hand: %w", record.Name, err)
 		}
 	}
@@ -1100,7 +1100,7 @@ func (s *Session) rejoin(ctx context.Context, held *state.Held, record *Record) 
 	}
 	result, err := s.deliver(ctx, record)
 	if err != nil && joined && record.Tailnet != nil {
-		return nil, errors.Join(err, s.Enroller.Leave(context.WithoutCancel(ctx), held, machine, record.Tailnet))
+		return nil, errors.Join(err, s.Enroller.Leave(context.WithoutCancel(ctx), held, record.Tailnet))
 	}
 	return result, err
 }
@@ -1164,7 +1164,7 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 		return fmt.Errorf("the create of %s never learned a machine ID from %s, so nothing can be destroyed by ID: look for an instance labelled with workspace %s at the provider and remove it there, then delete %s", name, s.Kind, name, s.State.Workspace(name))
 	}
 	if s.Enroller != nil {
-		if err := s.Enroller.Leave(ctx, held, runner{s, record.Machine}, record.Tailnet); err != nil {
+		if err := s.Enroller.Leave(ctx, held, record.Tailnet); err != nil {
 			return err
 		}
 	}
@@ -1211,5 +1211,5 @@ func (s *Session) forgetBinding(ctx context.Context, held *state.Held, missing e
 		return missing
 	}
 	s.Log.Info("revoking the tailnet node an earlier attempt left bound to this name", "workspace", held.Name, "bound", binding)
-	return s.Enroller.Forget(ctx, held)
+	return s.Enroller.Leave(ctx, held, nil)
 }

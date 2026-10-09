@@ -152,7 +152,7 @@ func (e *Enroller) Reattach(ctx context.Context, held *state.Held, machine Runne
 		return nil, false, fmt.Errorf("refusing to resume %s: it holds tailnet node %s but is bound to %s", name, node.NodeID, binding.NodeID)
 	case !running:
 		e.Log.Info("the tailnet no longer holds this workspace's node; enrolling again", "resource", name, "node", binding.NodeID)
-		if err := e.depart(ctx, bound, machine, binding, node, running); err != nil {
+		if err := e.depart(ctx, bound, machine, binding, node); err != nil {
 			return nil, false, err
 		}
 		joined, err := e.join(ctx, held, machine)
@@ -162,81 +162,51 @@ func (e *Enroller) Reattach(ctx context.Context, held *state.Held, machine Runne
 	return &node, false, nil
 }
 
-func (e *Enroller) Leave(ctx context.Context, held *state.Held, machine Runner, recorded *Node) error {
-	name := held.Name
+func (e *Enroller) Leave(ctx context.Context, held *state.Held, recorded *Node) error {
 	bound := e.Bindings.Of(held)
 	binding, err := bound.Read()
 	if err != nil {
 		return err
 	}
 	if recorded != nil && recorded.NodeID != binding.NodeID {
-		e.Log.Warn("the record names a tailnet node the binding does not; the binding and the machine's daemon decide, and that node is never deleted by this id", "resource", name, "record", recorded.NodeID, "bound", binding)
-	}
-	if binding == (Binding{}) {
-		return nil
-	}
-	node, err := e.daemonNode(ctx, name, machine)
-	if err != nil && !errors.Is(err, ErrNoNode) {
-		return fmt.Errorf("refusing to delete the tailnet node of %s: %w", name, err)
-	}
-	running := err == nil
-	if binding.Unresolved {
-		if node.NodeID == "" {
-			e.Log.Warn("this workspace's enrollment never reported a node and its daemon reports none; check the tailnet for its hostname", "resource", name)
-			return nil
-		}
-		if err := bound.Transition(binding, Binding{NodeID: node.NodeID}); err != nil {
-			return err
-		}
-		binding = Binding{NodeID: node.NodeID}
-	}
-	return e.depart(ctx, bound, machine, binding, node, running)
-}
-
-func (e *Enroller) Forget(ctx context.Context, held *state.Held) error {
-	bound := e.Bindings.Of(held)
-	binding, err := bound.Read()
-	if err != nil {
-		return err
+		e.Log.Warn("the record names a tailnet node the binding does not; the binding decides, and that node is never deleted by this id", "resource", held.Name, "record", recorded.NodeID, "bound", binding)
 	}
 	switch {
 	case binding == Binding{}:
 		return nil
 	case binding.Unresolved:
-		return fmt.Errorf("the last enrollment of %s never reported a node and its machine is gone, so check the tailnet for hostname %s and remove its binding by hand", held.Name, held.Name)
+		if err := bound.Transition(binding, Binding{}); err != nil {
+			return err
+		}
+		e.Log.Info("this workspace's enrollment never registered a node, so it has none to remove; a node it made unseen is ephemeral and leaves with the machine", "resource", held.Name)
+		return nil
 	}
-	client, err := e.Client(ctx)
-	if err != nil {
-		return err
-	}
-	if err := client.DeleteNode(ctx, binding.NodeID, held.Name); err != nil {
-		return err
-	}
-	if err := bound.Transition(binding, Binding{}); err != nil {
-		return err
-	}
-	e.Log.Info("revoked the node an earlier attempt left behind", "resource", held.Name, "node", binding.NodeID)
-	return nil
+	return e.revoke(ctx, bound, binding)
 }
 
-func (e *Enroller) depart(ctx context.Context, bound *Bound, machine Runner, binding Binding, node Node, running bool) error {
-	name := bound.Resource()
-	if running && node.NodeID != binding.NodeID {
-		return fmt.Errorf("refusing to delete tailnet node %s: %s holds node %s", binding.NodeID, name, node.NodeID)
-	}
+func (e *Enroller) depart(ctx context.Context, bound *Bound, machine Runner, binding Binding, node Node) error {
 	client, err := e.Client(ctx)
 	if err != nil {
 		return err
 	}
-	if err := client.Owns(ctx, binding.NodeID, name); err != nil && !errors.Is(err, ErrNoNode) {
+	if err := client.Owns(ctx, binding.NodeID, bound.Resource()); err != nil && !errors.Is(err, ErrNoNode) {
 		return fmt.Errorf("refusing to delete: %w", err)
 	}
 	if node.NodeID == binding.NodeID {
 		logout, cancel := context.WithTimeout(ctx, logoutTimeout)
 		defer cancel()
 		if _, err := machine.Run(logout, e.Daemon.LogoutScript(), nil); err != nil {
-			e.Log.Warn("could not log the workspace out of the tailnet; its node is deleted through the API instead", "resource", name, "err", err)
+			e.Log.Warn("could not log the workspace out of the tailnet; its node is deleted through the API instead", "resource", bound.Resource(), "err", err)
 		}
+	}
+	return e.revoke(ctx, bound, binding)
+}
+
+func (e *Enroller) revoke(ctx context.Context, bound *Bound, binding Binding) error {
+	name := bound.Resource()
+	client, err := e.Client(ctx)
+	if err != nil {
+		return err
 	}
 	if err := client.DeleteNode(ctx, binding.NodeID, name); err != nil {
 		return err
