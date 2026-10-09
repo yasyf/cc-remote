@@ -550,7 +550,7 @@ func TestAStaleRecordNeverSelectsTheNodeToDelete(t *testing.T) {
 
 func TestACleanupPausedMidDeleteHoldsOffAReplacement(t *testing.T) {
 	m := &machine{status: running("nOLD"), minted: "nNEW"}
-	api := &fakeTailnet{devices: []Device{owned("nOLD")}}
+	api := &fakeTailnet{devices: []Device{owned("nOLD"), owned("nNEW")}}
 	h := newHarness(t, m, api)
 	h.bind(boundTo("nOLD"))
 	deleting, proceed := make(chan struct{}), make(chan struct{})
