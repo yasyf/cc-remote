@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -98,11 +99,12 @@ func loggedOut(nodeID string) string {
 }
 
 type fakeTailnet struct {
-	devices []Device
-	refuse  bool
-	minted  int
-	deleted []string
-	tokens  int
+	devices  []Device
+	refuse   bool
+	minted   int
+	deleted  []string
+	tokens   int
+	onDelete func()
 }
 
 func (f *fakeTailnet) serve(t *testing.T) *Client {
@@ -127,7 +129,12 @@ func (f *fakeTailnet) serve(t *testing.T) *Client {
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
-			f.deleted = append(f.deleted, strings.TrimPrefix(r.URL.Path, "/device/"))
+			if f.onDelete != nil {
+				f.onDelete()
+			}
+			nodeID := strings.TrimPrefix(r.URL.Path, "/device/")
+			f.deleted = append(f.deleted, nodeID)
+			f.devices = slices.DeleteFunc(f.devices, func(device Device) bool { return device.NodeID == nodeID })
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -220,7 +227,7 @@ func (h *harness) leave(recorded *Node) error {
 		return err
 	}
 	defer held.Release()
-	return h.enroller.Leave(context.Background(), held, h.machine, recorded)
+	return h.enroller.Leave(context.Background(), held, recorded)
 }
 
 func node(nodeID string) *Node {
@@ -341,18 +348,9 @@ func TestEnrollKeepsTheIntentWhenTheMachineReportsNoNode(t *testing.T) {
 	if got, err := h.enroll(); err == nil || !strings.Contains(err.Error(), "check the tailnet for hostname ws-1") || got != nil || h.bound() != intent {
 		t.Errorf("err = %v, recorded %+v, bound %v", err, got, h.bound())
 	}
-	if err := h.leave(nil); err != nil || m.ran(logsOut) != 0 || len(api.deleted) != 0 || h.bound() != intent {
-		t.Errorf("destroying an unresolved workspace whose daemon holds nothing: %v, ran %q, deleted %v, bound %v", err, m.scripts, api.deleted, h.bound())
-	}
-}
-
-func TestLeaveResolvesAnIntentFromTheNodeTheMachineHolds(t *testing.T) {
-	m := &machine{status: running("nLATE")}
-	api := &fakeTailnet{devices: []Device{owned("nLATE")}}
-	h := newHarness(t, m, api)
-	h.bind(intent)
-	if err := h.leave(nil); err != nil || m.ran(logsOut) != 1 || len(api.deleted) != 1 || api.deleted[0] != "nLATE" || h.bound() != none {
-		t.Errorf("err = %v, ran %q, deleted %v, bound %v", err, m.scripts, api.deleted, h.bound())
+	ran := len(m.scripts)
+	if err := h.leave(nil); err != nil || len(m.scripts) != ran || len(api.deleted) != 0 || h.bound() != none {
+		t.Errorf("destroying a workspace whose node never registered: %v, ran %q, deleted %v, bound %v", err, m.scripts[ran:], api.deleted, h.bound())
 	}
 }
 
@@ -461,7 +459,7 @@ func TestLeaveAfterAFailedResumeRevokesOnlyTheNodeItEnrolled(t *testing.T) {
 	m.setStatus(loggedOut("nNEW"))
 	api.devices = nil
 	stale := node("nOLD")
-	if err := h.leave(stale); err != nil || len(api.deleted) != 1 || m.ran(logsOut) != 1 {
+	if err := h.leave(stale); err != nil || len(api.deleted) != 1 || len(m.scripts) != 0 {
 		t.Errorf("a destroy with the record from before the failed resume: %v, deleted %v, ran %q", err, api.deleted, m.scripts)
 	}
 	m.minted = "nAGAIN"
@@ -483,7 +481,7 @@ func TestReattachTreatsANodeTheTailnetNoLongerHoldsAsGone(t *testing.T) {
 	}
 }
 
-func TestLeaveLogsOutAndDeletesExactlyTheBoundNode(t *testing.T) {
+func TestLeaveDeletesExactlyTheBoundNodeThroughTheAPI(t *testing.T) {
 	m := &machine{status: running("nMINE")}
 	api := &fakeTailnet{devices: []Device{owned("nMINE")}}
 	h := newHarness(t, m, api)
@@ -491,10 +489,10 @@ func TestLeaveLogsOutAndDeletesExactlyTheBoundNode(t *testing.T) {
 	if err := h.leave(node("nMINE")); err != nil {
 		t.Fatal(err)
 	}
-	if m.ran(logsOut) != 1 || len(api.deleted) != 1 || api.deleted[0] != "nMINE" || api.minted != 0 || h.bound() != none {
+	if len(m.scripts) != 0 || len(api.deleted) != 1 || api.deleted[0] != "nMINE" || api.minted != 0 || h.bound() != none {
 		t.Errorf("leave ran %q, deleted %v, minted %d, bound %v", m.scripts, api.deleted, api.minted, h.bound())
 	}
-	if err := h.leave(nil); err != nil || len(api.deleted) != 1 || m.ran(logsOut) != 1 {
+	if err := h.leave(nil); err != nil || len(api.deleted) != 1 || len(m.scripts) != 0 {
 		t.Errorf("a workspace with no node touched the tailnet: %v %v %q", err, api.deleted, m.scripts)
 	}
 }
@@ -507,46 +505,8 @@ func TestLeaveRevokesTheBoundNodeWhenTheRecordOmitsIt(t *testing.T) {
 	if err := h.leave(nil); err != nil {
 		t.Fatal(err)
 	}
-	if m.ran(logsOut) != 1 || len(api.deleted) != 1 || api.deleted[0] != "nMINE" || h.bound() != none {
+	if len(m.scripts) != 0 || len(api.deleted) != 1 || api.deleted[0] != "nMINE" || h.bound() != none {
 		t.Errorf("ran %q, deleted %v, bound %v", m.scripts, api.deleted, h.bound())
-	}
-}
-
-func TestLeaveDeletesAnExpiredBoundNodeWithoutLoggingOut(t *testing.T) {
-	m := &machine{status: noState}
-	api := &fakeTailnet{devices: []Device{owned("nMINE")}}
-	h := newHarness(t, m, api)
-	h.bind(boundTo("nMINE"))
-	if err := h.leave(node("nMINE")); err != nil || m.ran(logsOut) != 0 || len(api.deleted) != 1 || h.bound() != none {
-		t.Errorf("err = %v, ran %q, deleted %v, bound %v", err, m.scripts, api.deleted, h.bound())
-	}
-}
-
-func TestLeaveRefusesWhatTheBindingOrDaemonDoesNotConfirm(t *testing.T) {
-	tests := map[string]struct {
-		binding  Binding
-		status   string
-		recorded *Node
-		devices  []Device
-		want     string
-	}{
-		"a machine holding another node than bound": {boundTo("nMINE"), running("nOTHER"), node("nMINE"), []Device{owned("nMINE"), owned("nOTHER")}, "holds node nOTHER"},
-		"a machine holding a foreign node":          {boundTo("nMINE"), running("nOTHER"), node("nMINE"), []Device{owned("nMINE"), foreign("nOTHER")}, "not its own"},
-	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			m := &machine{status: tt.status}
-			api := &fakeTailnet{devices: tt.devices}
-			h := newHarness(t, m, api)
-			h.bind(tt.binding)
-			err := h.leave(tt.recorded)
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("err = %v", err)
-			}
-			if len(api.deleted) != 0 || m.ran(logsOut) != 0 || h.bound() != tt.binding {
-				t.Errorf("deleted %v, ran %q, bound %v", api.deleted, m.scripts, h.bound())
-			}
-		})
 	}
 }
 
@@ -588,22 +548,22 @@ func TestAStaleRecordNeverSelectsTheNodeToDelete(t *testing.T) {
 	}
 }
 
-func TestACleanupPausedAfterObservingTheDaemonHoldsOffAReplacement(t *testing.T) {
+func TestACleanupPausedMidDeleteHoldsOffAReplacement(t *testing.T) {
 	m := &machine{status: running("nOLD"), minted: "nNEW"}
-	api := &fakeTailnet{devices: []Device{owned("nOLD"), owned("nNEW")}}
+	api := &fakeTailnet{devices: []Device{owned("nOLD")}}
 	h := newHarness(t, m, api)
 	h.bind(boundTo("nOLD"))
-	observed, proceed := make(chan struct{}), make(chan struct{})
+	deleting, proceed := make(chan struct{}), make(chan struct{})
 	var first sync.Once
-	m.onStatus = func() {
+	api.onDelete = func() {
 		first.Do(func() {
-			close(observed)
+			close(deleting)
 			<-proceed
 		})
 	}
 	cleanup := make(chan error, 1)
 	go func() { cleanup <- h.leave(node("nOLD")) }()
-	<-observed
+	<-deleting
 	resumed := make(chan error, 1)
 	var got *Node
 	go func() {
@@ -616,6 +576,9 @@ func TestACleanupPausedAfterObservingTheDaemonHoldsOffAReplacement(t *testing.T)
 		t.Fatalf("the replacement ran while the cleanup still held the resource: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
+	if m.ran(enrolls) != 0 {
+		t.Fatalf("the replacement enrolled while the cleanup still held the resource: %q", m.scripts)
+	}
 	close(proceed)
 	if err := <-cleanup; err != nil {
 		t.Fatal(err)
@@ -626,38 +589,22 @@ func TestACleanupPausedAfterObservingTheDaemonHoldsOffAReplacement(t *testing.T)
 	if len(api.deleted) != 1 || api.deleted[0] != "nOLD" || got == nil || got.NodeID != "nNEW" || h.bound() != boundTo("nNEW") {
 		t.Errorf("deleted %v, recorded %+v, bound %v", api.deleted, got, h.bound())
 	}
-	logout, enroll := -1, -1
-	for i, script := range m.scripts {
-		if strings.Contains(script, logsOut) && logout < 0 {
-			logout = i
-		}
-		if strings.Contains(script, enrolls) {
-			enroll = i
-		}
+}
+
+func TestLeaveRefusesABoundNodeAnotherWorkspaceOwns(t *testing.T) {
+	m := &machine{status: running("nOTHER")}
+	api := &fakeTailnet{devices: []Device{foreign("nOTHER")}}
+	h := newHarness(t, m, api)
+	h.bind(boundTo("nOTHER"))
+	if err := h.leave(nil); err == nil || !strings.Contains(err.Error(), "refusing to delete") {
+		t.Errorf("err = %v", err)
 	}
-	if logout < 0 || enroll < 0 || logout > enroll {
-		t.Errorf("the cleanup's logout did not precede the replacement's enrollment: %q", m.scripts)
+	if len(m.scripts) != 0 || len(api.deleted) != 0 || h.bound() != boundTo("nOTHER") {
+		t.Errorf("ran %q, deleted %v, bound %v", m.scripts, api.deleted, h.bound())
 	}
 }
 
-func TestLeaveChecksOwnershipBeforeLoggingOutAStoppedNode(t *testing.T) {
-	for name, binding := range map[string]Binding{"unresolved": intent, "bound": boundTo("nOTHER")} {
-		t.Run(name, func(t *testing.T) {
-			m := &machine{status: loggedOut("nOTHER")}
-			api := &fakeTailnet{devices: []Device{foreign("nOTHER")}}
-			h := newHarness(t, m, api)
-			h.bind(binding)
-			if err := h.leave(nil); err == nil || !strings.Contains(err.Error(), "refusing to delete") {
-				t.Errorf("err = %v", err)
-			}
-			if m.ran(logsOut) != 0 || len(api.deleted) != 0 {
-				t.Errorf("a stopped node another workspace owns was logged out %d times and deleted %v", m.ran(logsOut), api.deleted)
-			}
-		})
-	}
-}
-
-func TestForgetRevokesOnlyABoundNodeTheTailnetConfirms(t *testing.T) {
+func TestLeaveWithoutARecordRevokesOnlyABoundNodeTheTailnetConfirms(t *testing.T) {
 	tests := map[string]struct {
 		binding Binding
 		devices []Device
@@ -669,7 +616,7 @@ func TestForgetRevokesOnlyABoundNodeTheTailnetConfirms(t *testing.T) {
 		"bound and owned":   {boundTo("nMINE"), []Device{owned("nMINE")}, 1, none, ""},
 		"bound and gone":    {boundTo("nGONE"), nil, 0, none, ""},
 		"bound and foreign": {boundTo("nOTHER"), []Device{foreign("nOTHER")}, 0, boundTo("nOTHER"), "refusing to delete"},
-		"unresolved":        {intent, nil, 0, intent, "by hand"},
+		"unresolved":        {intent, nil, 0, none, ""},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -679,7 +626,7 @@ func TestForgetRevokesOnlyABoundNodeTheTailnetConfirms(t *testing.T) {
 			if tt.binding != none {
 				h.bind(tt.binding)
 			}
-			err := h.enroller.Forget(context.Background(), h.hold())
+			err := h.leave(nil)
 			if (err == nil) != (tt.err == "") || (err != nil && !strings.Contains(err.Error(), tt.err)) {
 				t.Errorf("err = %v", err)
 			}

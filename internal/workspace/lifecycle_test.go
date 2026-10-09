@@ -628,7 +628,7 @@ func TestAFailedCreateLeavesTheTailnetThenDiscardsWhatItMade(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no route") {
 		t.Fatalf("err = %v", err)
 	}
-	if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.machine.ran("ws-1", logsOut) != 1 || h.bound() != (tailnet.Binding{}) {
+	if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.machine.ran("ws-1", logsOut) != 0 || h.bound() != (tailnet.Binding{}) {
 		t.Errorf("deleted %v, logged out %d, bound %v", deleted, h.machine.ran("ws-1", logsOut), h.bound())
 	}
 	if _, err := h.fake.Get(context.Background(), "ws-1"); !errors.Is(err, providers.ErrNotFound) {
@@ -681,7 +681,7 @@ func TestAFailedResumeRevokesOnlyTheNodeItEnrolled(t *testing.T) {
 			if _, err := h.session.Resume(context.Background(), "ws-1"); err == nil {
 				t.Fatal("the resume succeeded")
 			}
-			if strings.Join(h.api.deletedNodes(), ",") != strings.Join(tt.deleted, ",") || h.machine.ran("ws-1", logsOut) != len(tt.deleted) || h.bound() != tt.bound {
+			if strings.Join(h.api.deletedNodes(), ",") != strings.Join(tt.deleted, ",") || h.machine.ran("ws-1", logsOut) != 0 || h.bound() != tt.bound {
 				t.Errorf("deleted %v, ran %q, bound %v", h.api.deletedNodes(), h.machine.scripts["ws-1"], h.bound())
 			}
 		})
@@ -763,31 +763,25 @@ func TestAWorkspaceWithNoTailnetNeverTouchesTheTailnet(t *testing.T) {
 	}
 }
 
-func TestDestroyLeavesTheTailnetBeforeTheMachine(t *testing.T) {
+func TestDestroyRevokesTheNodeThroughTheAPIWhenTheMachineRunsNothing(t *testing.T) {
 	h := newHarness(t, true)
 	ctx := context.Background()
 	if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	calls := len(h.fake.Calls())
+	h.machine.failAll = true
+	scripts := len(h.machine.scripts["ws-1"])
 	if err := h.session.Destroy(ctx, "ws-1"); err != nil {
 		t.Fatal(err)
 	}
-	after := h.fake.Calls()[calls:]
-	logout, destroy := -1, -1
-	for i, call := range after {
-		if strings.HasPrefix(call, "exec ws-1") && strings.Contains(call, "logout") && logout < 0 {
-			logout = i
-		}
-		if call == "destroy ws-1" {
-			destroy = i
-		}
-	}
-	if logout < 0 || destroy < 0 || logout > destroy {
-		t.Errorf("destroy ran %q; want the logout before the machine goes", after)
+	if ran := h.machine.scripts["ws-1"][scripts:]; len(ran) != 0 {
+		t.Errorf("destroy ran %q on the machine", ran)
 	}
 	if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.bound() != (tailnet.Binding{}) {
 		t.Errorf("deleted %v, bound %v", deleted, h.bound())
+	}
+	if _, err := h.fake.Get(ctx, "ws-1"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("the machine survived destroy: %v", err)
 	}
 	if _, found := h.record("ws-1"); found {
 		t.Error("the record survived destroy")
@@ -1640,8 +1634,7 @@ func TestAConfigureFailureAfterTheEnrollmentStartedLeavesTheTailnet(t *testing.T
 			if err := <-created; err == nil || !strings.Contains(err.Error(), "configure held back the create") {
 				t.Fatalf("Create = %v", err)
 			}
-			h.ordered(0, enrolls, logsOut)
-			if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.machine.ran("ws-1", logsOut) != 1 || h.machine.ran("ws-1", publishes) != 0 || h.bound() != (tailnet.Binding{}) {
+			if deleted := h.api.deletedNodes(); len(deleted) != 1 || deleted[0] != "nNEW" || h.machine.ran("ws-1", logsOut) != 0 || h.machine.ran("ws-1", publishes) != 0 || h.bound() != (tailnet.Binding{}) {
 				t.Errorf("deleted %v, ran %q, bound %v", deleted, h.machine.scripts["ws-1"], h.bound())
 			}
 			if _, err := h.fake.Get(context.Background(), "ws-1"); !errors.Is(err, providers.ErrNotFound) {
