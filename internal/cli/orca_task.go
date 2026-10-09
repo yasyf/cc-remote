@@ -1068,16 +1068,13 @@ func captainPins(inventory images.Inventory) []orca.Pin {
 }
 
 type secrets struct {
-	key, judge, typesafe []byte
+	key, judge, typesafe, github []byte
 }
 
 func (s secrets) payload() []byte {
-	lines := [][]byte{s.key}
-	if s.judge != nil || s.typesafe != nil {
-		lines = append(lines, s.judge)
-	}
-	if s.typesafe != nil {
-		lines = append(lines, s.typesafe)
+	lines := [][]byte{s.key, s.judge, s.typesafe, s.github}
+	for lines[len(lines)-1] == nil {
+		lines = lines[:len(lines)-1]
 	}
 	return append(bytes.Join(lines, []byte{'\n'}), '\n')
 }
@@ -1086,6 +1083,7 @@ func (s secrets) clear() {
 	clear(s.key)
 	clear(s.judge)
 	clear(s.typesafe)
+	clear(s.github)
 }
 
 func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
@@ -1104,6 +1102,12 @@ func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent
 		if captured.typesafe, err = captureKey(ctx, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("typesafe %w", err)
+		}
+	}
+	if command, ok := keys[config.KeyGitHub]; ok {
+		if captured.github, err = captureKey(ctx, command); err != nil {
+			captured.clear()
+			return secrets{}, fmt.Errorf("github %w", err)
 		}
 	}
 	return captured, nil

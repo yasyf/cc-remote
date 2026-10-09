@@ -115,7 +115,11 @@ command for its provider; the defaults read the macOS keychain items
 `orca.keys.typesafe` command, which has no default, adds a TypeSafe key that
 every worker receives as `TYPESAFE_API_KEY`, the variable capt-hook's
 `evt.decide` reads on an API actor. Codex excludes it from its shell tools
-along with the provider keys. Every key travels only over SSH stdin into a
+along with the provider keys. An optional `orca.keys.github` command, which has
+no default, adds a GitHub token that every worker receives as `GH_TOKEN`, with
+git's credential helper for `https://github.com` set to `gh auth git-credential`
+through `GIT_CONFIG_*` variables, so the worker can push its branch and open its
+pull request. Codex keeps that token in its shell tools. Every key travels only over SSH stdin into a
 one-use pipe that the worker's terminal reads and removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
 worker may start. The frontend accepts Claude and Codex folder trust prompts
 only when `orca.trust` lists the repository's owner.
