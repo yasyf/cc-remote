@@ -10,11 +10,17 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	"namespacelabs.dev/integrations/api"
 	"namespacelabs.dev/integrations/network/netcopy"
 
 	"github.com/yasyf/cc-remote/internal/providers"
+)
+
+const (
+	gatewayAttempts       = 5
+	gatewayAttemptTimeout = 2 * time.Second
 )
 
 type Gateway func(ctx context.Context, debugLog io.Writer, tokens api.TokenSource, endpoint string) (net.Conn, error)
@@ -74,7 +80,7 @@ func (p *Provider) bridge(ctx context.Context, saved instance, local net.Conn) e
 	if err != nil {
 		return errors.Join(fmt.Errorf("loading the Namespace login for %s: %w", endpoint, err), local.Close())
 	}
-	remote, err := p.Gateway(ctx, io.Discard, tokens, endpoint)
+	remote, err := p.connect(ctx, tokens, endpoint)
 	if err != nil {
 		return errors.Join(fmt.Errorf("dialing %s: %w", endpoint, err), local.Close())
 	}
@@ -84,4 +90,16 @@ func (p *Provider) bridge(ctx context.Context, saved instance, local net.Conn) e
 	_, _ = local.Close(), remote.Close()
 	slog.Debug("a gateway connection ended", "endpoint", endpoint, "err", copied)
 	return nil
+}
+
+func (p *Provider) connect(ctx context.Context, tokens api.TokenSource, endpoint string) (remote net.Conn, err error) {
+	for range gatewayAttempts {
+		attempt, cancel := context.WithTimeout(ctx, gatewayAttemptTimeout)
+		remote, err = p.Gateway(attempt, io.Discard, tokens, endpoint)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return remote, err
+		}
+	}
+	return nil, err
 }

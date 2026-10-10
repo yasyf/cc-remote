@@ -239,6 +239,109 @@ func TestForwardKeepsServingAfterOneBridgeEnds(t *testing.T) {
 	closed(t, secondRemote)
 }
 
+type lossyGateway struct {
+	*pipeGateway
+	mu     sync.Mutex
+	drops  int
+	bounds []time.Duration
+}
+
+var errDropped = errors.New("dial tcp 203.0.113.7:443: i/o timeout")
+
+func (g *lossyGateway) dial(ctx context.Context, debugLog io.Writer, tokens api.TokenSource, endpoint string) (net.Conn, error) {
+	deadline, _ := ctx.Deadline()
+	g.mu.Lock()
+	g.bounds = append(g.bounds, time.Until(deadline))
+	dropped := g.drops > 0
+	if dropped {
+		g.drops--
+	}
+	g.mu.Unlock()
+	if dropped {
+		return nil, errDropped
+	}
+	return g.pipeGateway.dial(ctx, debugLog, tokens, endpoint)
+}
+
+func (g *lossyGateway) Bounds() []time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.bounds)
+}
+
+func TestForwardRedialsAGatewayThatDropsConnections(t *testing.T) {
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	gateway := &lossyGateway{pipeGateway: newPipeGateway(), drops: 2*gatewayAttempts - 1}
+	p.Gateway = gateway.dial
+	listener := &failingListener{accepted: make(chan net.Conn, 2), fail: make(chan struct{}), err: errors.New("unused"), shut: make(chan struct{})}
+	lost, lostLocal := net.Pipe()
+	listener.accepted <- lostLocal
+	ctx, cancel := context.WithCancel(t.Context())
+	served := make(chan error, 1)
+	go func() { served <- p.Forward(ctx, "inst1", listener) }()
+	closed(t, lost)
+	if got := gateway.Bounds(); len(got) != gatewayAttempts {
+		t.Fatalf("a connection the gateway kept dropping was dialed %d times, want %d", len(got), gatewayAttempts)
+	}
+	kept, keptLocal := net.Pipe()
+	listener.accepted <- keptLocal
+	<-gateway.dialed
+	remote := <-gateway.remote
+	go func() { _, _ = io.Copy(remote, remote) }()
+	echo(t, kept, "ping")
+	bounds := gateway.Bounds()
+	if len(bounds) != 2*gatewayAttempts {
+		t.Errorf("the gateway was dialed %d times, want the second connection through on its last of %d attempts", len(bounds), gatewayAttempts)
+	}
+	for attempt, left := range bounds {
+		if left <= 0 || left > gatewayAttemptTimeout {
+			t.Errorf("gateway dial %d had %v left, want a bound of at most %v", attempt, left, gatewayAttemptTimeout)
+		}
+	}
+	select {
+	case err := <-served:
+		t.Fatalf("Forward stopped after a connection the gateway dropped: %v", err)
+	default:
+	}
+	cancel()
+	if err := <-served; !errors.Is(err, context.Canceled) {
+		t.Errorf("Forward after cancel = %v", err)
+	}
+	closed(t, kept)
+}
+
+func TestForwardStopsRedialingOnceItsCallerCancels(t *testing.T) {
+	p, _, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	var mu sync.Mutex
+	dials := 0
+	p.Gateway = func(context.Context, io.Writer, api.TokenSource, string) (net.Conn, error) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		cancel()
+		return nil, errDropped
+	}
+	listener := &failingListener{accepted: make(chan net.Conn, 1), fail: make(chan struct{}), err: errors.New("unused"), shut: make(chan struct{})}
+	client, local := net.Pipe()
+	listener.accepted <- local
+	if err := p.Forward(ctx, "inst1", listener); !errors.Is(err, context.Canceled) {
+		t.Errorf("Forward after cancel = %v", err)
+	}
+	closed(t, client)
+	mu.Lock()
+	defer mu.Unlock()
+	if dials != 1 {
+		t.Errorf("the gateway was dialed %d times, want none after the caller canceled", dials)
+	}
+}
+
 type login struct{ generation int }
 
 func (login) IssueToken(context.Context, time.Duration, bool) (string, error) {
