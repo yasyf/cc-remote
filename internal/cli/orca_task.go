@@ -354,6 +354,15 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
 		}
 	case openCreated:
+		var helper *config.BootstrapHelper
+		if helper, err = selectHelper(session); err != nil {
+			return nil, err
+		}
+		if helper != nil {
+			session.Alongside = func(ctx context.Context, machine string) error {
+				return ensureHelper(ctx, session, machine, helper)
+			}
+		}
 		if keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent); err != nil {
 			return nil, err
 		}
