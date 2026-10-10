@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unconfigured changes nothing.
 
 ### Fixed
+- **`orca prepare --warm` no longer spends a warm workspace on a helper pin it
+  cannot use.** A CLI whose release differed from `orca.bootstrap_helper`
+  claimed a ready workspace first and compared the pin afterwards, so the
+  mismatch left that workspace `claimed` and `failed` for good. A create
+  already refused before it made anything. `--warm` now makes the same
+  comparison before it claims, and the pool is untouched.
 - **A Codex worker prepares on Orca's managed server again.** The Codex hook
   check accepted one set of thirteen definitions, Orca's eight handlers plus
   Captain Hook's five. Orca's managed server installs no agent hooks, because

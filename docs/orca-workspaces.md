@@ -306,7 +306,9 @@ The task record, task lock, Orca environment, terminal title, and
 `$HOME/.cc-remote/orca/tasks/<workspace>/` take the workspace's name, never the
 lane's. Pass `workspace` to `status`, `read`, and `collect`.
 
-A claimed workspace never returns to the pool. A failed preparation is
+`--warm` checks `orca.bootstrap_helper` against the running release before it
+claims, so a CLI the helper pin does not name is refused with the pool
+untouched. A claimed workspace never returns to the pool. A failed preparation is
 recorded `failed` with its error's metadata only: the step that failed, the
 error's class, the exit code when one was observed, the HTTP status when a
 provider lookup answered one, and the message's byte length and SHA-256, never
