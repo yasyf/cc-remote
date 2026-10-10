@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
+	"github.com/yasyf/cc-remote/internal/providers/sprites"
 	"github.com/yasyf/cc-remote/internal/version"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
@@ -62,6 +64,32 @@ func TestSelectHelperPinsTheRunningSpritesRelease(t *testing.T) {
 				t.Fatalf("selectHelper = %+v, %v; want selected %t", helper, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestWarmPrepareRefusesAnotherReleasesHelperBeforeItTouchesThePool(t *testing.T) {
+	original := version.Version
+	t.Cleanup(func() { version.Version = original })
+	version.Version = "0.21.0"
+	w := newWarmPool(t)
+	w.session.Kind = sprites.Name
+	w.session.Config.Orca.BootstrapHelper = testHelper()
+	pool := openPool(w.session)
+	if err := pool.save(&orcaMember{SchemaVersion: orcaPoolSchema, Name: "pool-a", Provider: sprites.Name, Profile: "lean", Key: pool.key, State: memberReady, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	calls := len(w.provider.Calls())
+	native, _ := w.native()
+	var out bytes.Buffer
+	err := w.warm(t.Context(), w.session, native, &out, "lane-a", "")
+	if err == nil || !strings.Contains(err.Error(), "orca.bootstrap_helper pins cc-remote 0.20.0, and this is cc-remote 0.21.0") || out.Len() != 0 {
+		t.Fatalf("warm prepare = %v with output %q; want the helper pin refused and nothing printed", err, out.String())
+	}
+	if got, err := pool.load("pool-a"); err != nil || got == nil || got.State != memberReady || got.Lane != "" || got.Reason != "" || got.Failure != nil {
+		t.Errorf("pool-a = %+v, %v; want it still ready and unclaimed", got, err)
+	}
+	if after := w.provider.Calls(); len(after) != calls {
+		t.Errorf("the refused prepare reached the provider: %q", after[calls:])
 	}
 }
 

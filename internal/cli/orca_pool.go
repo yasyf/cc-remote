@@ -168,6 +168,9 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 	if err := pool.admit(lane); err != nil {
 		return err
 	}
+	if _, err := selectHelper(session); err != nil {
+		return err
+	}
 	member, release, err := pool.claim(ctx, lane, source.Ref)
 	if err != nil {
 		return err
