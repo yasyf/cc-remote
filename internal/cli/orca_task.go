@@ -68,6 +68,14 @@ type orcaTask struct {
 
 	provider providers.Provider
 	claimed  bool
+	booted   *orcaBoot
+}
+
+type orcaBoot struct {
+	port    int
+	ready   orca.Ready
+	pairing string
+	err     error
 }
 
 type orcaGateway struct {
@@ -315,6 +323,13 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		pregrant = nil
 	}
 	var task *orcaTask
+	var booted *orcaBoot
+	if opening != openExisting && l.agent.Kind != orca.AgentCodex {
+		session.AfterTools = func(ctx context.Context, machine string) {
+			booted = driver.boot(ctx, session, task, runtime, machine)
+		}
+		defer func() { session.AfterTools = nil }()
+	}
 	session.Retain = func(ctx context.Context, record *workspace.Record) (err error) {
 		switch opening {
 		case openExisting:
@@ -367,11 +382,15 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			return nil, err
 		}
 	}
-	if err == nil && task == nil {
+	switch {
+	case err != nil || task != nil:
+	case booted != nil && booted.err == nil:
+		task, err = driver.taskOn(result, l.agent, session.Provider, booted.port)
+	default:
 		task, err = driver.task(result, l.agent, session.Provider)
 	}
 	if err == nil {
-		task.Pregrant, task.claimed = pregrant, opening == openSpare
+		task.Pregrant, task.claimed, task.booted = pregrant, opening == openSpare, booted
 		err = driver.launch(ctx, session, task, runtime, keys, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
@@ -714,6 +733,10 @@ func (d orcaDriver) task(result *workspace.Result, agent orca.Agent, provider pr
 	if err != nil {
 		return nil, err
 	}
+	return d.taskOn(result, agent, provider, port)
+}
+
+func (d orcaDriver) taskOn(result *workspace.Result, agent orca.Agent, provider providers.Provider, port int) (*orcaTask, error) {
 	task := &orcaTask{
 		SchemaVersion: orcaTaskSchema,
 		Workspace:     result.Name,
@@ -788,7 +811,13 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err != nil {
 		return err
 	}
-	ready, pairing, err := d.start(ctx, session, task, runtime)
+	var ready orca.Ready
+	var pairing string
+	if booted := task.booted; booted != nil {
+		ready, pairing, err = booted.ready, booted.pairing, booted.err
+	} else {
+		ready, pairing, err = d.start(ctx, session, task, runtime)
+	}
 	if err != nil {
 		return err
 	}
@@ -884,19 +913,36 @@ func (t *orcaTask) runtime(runtime orca.Runtime) orca.Runtime {
 }
 
 func (d orcaDriver) start(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime) (orca.Ready, string, error) {
-	runtime = task.runtime(runtime)
-	result, err := session.Provider.Exec(ctx, task.Machine, []string{"sh", "-c", runtime.EnsureScript()}, nil)
+	return d.startOn(ctx, session, task.Machine, task.runtime(runtime), task.Port)
+}
+
+func (d orcaDriver) boot(ctx context.Context, session *workspace.Session, retained *orcaTask, runtime orca.Runtime, machine string) *orcaBoot {
+	booted := &orcaBoot{}
+	if retained != nil {
+		booted.port, runtime = retained.Port, retained.runtime(runtime)
+	} else {
+		if booted.port, booted.err = workspace.FreePort(); booted.err != nil {
+			return booted
+		}
+		runtime.Port = booted.port
+	}
+	booted.ready, booted.pairing, booted.err = d.startOn(ctx, session, machine, runtime, booted.port)
+	return booted
+}
+
+func (d orcaDriver) startOn(ctx context.Context, session *workspace.Session, machine string, runtime orca.Runtime, port int) (orca.Ready, string, error) {
+	result, err := session.Provider.Exec(ctx, machine, []string{"sh", "-c", runtime.EnsureScript()}, nil)
 	if err != nil {
 		return orca.Ready{}, "", err
 	}
 	if result.ExitCode != 0 {
-		return orca.Ready{}, "", fmt.Errorf("starting the Orca runtime on %s exited %d: %s", task.Machine, result.ExitCode, bytes.TrimSpace(result.Stderr))
+		return orca.Ready{}, "", fmt.Errorf("starting the Orca runtime on %s exited %d: %s", machine, result.ExitCode, bytes.TrimSpace(result.Stderr))
 	}
-	ready, pairing, err := orca.ParseReady(lastReady(result.Stdout), runtime.Port, task.Port)
+	ready, pairing, err := orca.ParseReady(lastReady(result.Stdout), runtime.Port, port)
 	if err != nil {
 		return orca.Ready{}, "", err
 	}
-	d.log.Info("the Orca runtime is ready", "machine", task.Machine, "runtime", ready.RuntimeID, "managedServer", ready.ManagedServer, "service", task.Service)
+	d.log.Info("the Orca runtime is ready", "machine", machine, "runtime", ready.RuntimeID, "managedServer", ready.ManagedServer, "service", orca.RuntimeService)
 	return ready, pairing, nil
 }
 

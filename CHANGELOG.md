@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A Claude worker's Orca runtime starts beside the create or the warm claim.**
+  `orca create` and `orca prepare` used to start the runtime after the whole
+  workspace was ready. They now start it once the machine's tools are
+  installed, or once a claimed warm workspace passes its tools check, while the
+  configure, checkout refresh, and tailnet steps run. A runtime that fails to
+  start still fails the command after the workspace is ready, and the workspace
+  is kept. Codex workers and `--existing` keep the old order.
 - **`orca create` and `orca prepare` start the runtime through Orca's own CLI.**
   `orca.entry` now names the runtime tool's `orca` CLI and defaults to
   `squashfs-root/resources/bin/orca-ide`. The launcher runs `<entry> serve`

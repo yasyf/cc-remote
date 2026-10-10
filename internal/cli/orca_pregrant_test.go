@@ -102,6 +102,9 @@ func TestAClaimedPregrantIsRevalidatedBeforeAnyKeyOrTerminal(t *testing.T) {
 			if !checked {
 				t.Errorf("the claimed checkout was not checked: %q", ran)
 			}
+			if ports := w.servedPorts(); len(ports) != 0 {
+				t.Errorf("a runtime started on ports %v before the revalidation", ports)
+			}
 			if found, err := os.Stat(w.session.Config.State().Orca("pool-a")); err == nil {
 				t.Errorf("a task was recorded for a refused pregrant: %v", found)
 			}
