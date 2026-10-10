@@ -39,20 +39,21 @@ const (
 )
 
 type Session struct {
-	Config   *config.Config
-	Provider providers.Provider
-	Kind     string
-	Profile  string
-	Platform Platform
-	State    state.Dir
-	Enroller *tailnet.Enroller
-	Log      *slog.Logger
-	Stderr   io.Writer
-	Token    func(context.Context) (string, error)
-	Retain   func(ctx context.Context, record *Record) error
-	Now      func() time.Time
-	Scripts  images.Scripts
-	Stamp    string
+	Config    *config.Config
+	Provider  providers.Provider
+	Kind      string
+	Profile   string
+	Platform  Platform
+	State     state.Dir
+	Enroller  *tailnet.Enroller
+	Log       *slog.Logger
+	Stderr    io.Writer
+	Token     func(context.Context) (string, error)
+	Retain    func(ctx context.Context, record *Record) error
+	Alongside func(ctx context.Context, machine string) error
+	Now       func() time.Time
+	Scripts   images.Scripts
+	Stamp     string
 
 	profile          config.Profile
 	labels           []LabelledEnv
@@ -489,6 +490,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		return nil, err
 	}
 	run := newLanes(ctx)
+	if s.Alongside != nil {
+		run.Go(func(ctx context.Context) error { return s.Alongside(ctx, machine) })
+	}
 	packages, tools := s.installLanes(run, machine, staged)
 	loader := run.Go(func(ctx context.Context) error {
 		if err := run.after(packages, tools); err != nil {
