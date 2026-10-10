@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries `health`, the record stores its build as `managedServer` and
   `orca create`, `prepare`, and `status` print it. The field is absent when
   Orca serves on Electron.
+- **A Claude worker's CLI no longer updates itself.** The worker's terminal
+  exports `DISABLE_AUTOUPDATER=1` before it starts Claude, so the CLI stays at
+  the version the machine was built with. A worker left running used to
+  install a newer release in the background and ask for a restart. The
+  variable is Claude Code's own switch for background updates, and a manual
+  `claude update` still works. Codex workers are unchanged.
 
 ### Added
 - **`orca.keys.github` lets an Orca worker push its branch and open its PR.**

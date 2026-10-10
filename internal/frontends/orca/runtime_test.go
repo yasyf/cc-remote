@@ -378,9 +378,10 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 		agent    orca.Agent
 		variable string
 		cleared  string
+		updater  string
 	}{
-		{orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"},
-		{orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e"}, "OPENAI_API_KEY", "CODEX_API_KEY"},
+		{orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "1"},
+		{orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e"}, "OPENAI_API_KEY", "CODEX_API_KEY", "unset"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.agent.Kind, func(t *testing.T) {
@@ -391,7 +392,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			worker := "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$" + tt.variable + "\" \"${" + tt.cleared + "-unset}\" \"$CAPT_HOOK_ACTOR_JUDGE\" \"$1\"\n"
+			worker := "#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' \"$" + tt.variable + "\" \"${" + tt.cleared + "-unset}\" \"$CAPT_HOOK_ACTOR_JUDGE\" \"${DISABLE_AUTOUPDATER-unset}\" \"$1\"\n"
 			if err := os.WriteFile(filepath.Join(bin, tt.agent.Kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -400,7 +401,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 				t.Fatalf("worker command relies on the terminal's configured shell: %s", command)
 			}
 			cmd := exec.Command("sh", "-c", command)
-			cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), tt.cleared+"=oauth-token", tt.variable+"=stale")
+			cmd.Env = append(slices.DeleteFunc(os.Environ(), func(pair string) bool { return strings.HasPrefix(pair, "DISABLE_AUTOUPDATER=") }), "PATH="+bin+":"+os.Getenv("PATH"), tt.cleared+"=oauth-token", tt.variable+"=stale")
 			go func() {
 				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
 				if err != nil {
@@ -413,7 +414,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.agent.Argv(orca.ShellPolicy{})[1] + "\n"
+			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.updater + "|" + tt.agent.Argv(orca.ShellPolicy{})[1] + "\n"
 			if string(out) != want {
 				t.Errorf("worker saw %q, want %q", out, want)
 			}
