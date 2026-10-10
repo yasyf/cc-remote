@@ -19,7 +19,6 @@ const (
 	laneLoader    = "loader"
 	laneCheckout  = "checkout"
 	laneConfigure = "configure"
-	laneWordnet   = "wordnet"
 	laneEnroll    = "enroll"
 	lanePublish   = "publish"
 	laneSSH       = "ssh"

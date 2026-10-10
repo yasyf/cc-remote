@@ -1,7 +1,6 @@
 package workspacetest
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -23,12 +22,11 @@ import (
 const Token = "ghp_contracttokenthatmustneverlandondisk0000"
 
 type Harness struct {
-	Provider  providers.Provider
-	Kind      string
-	Platform  workspace.Platform
-	Root      string
-	Machine   config.Machine
-	Inventory string
+	Provider providers.Provider
+	Kind     string
+	Platform workspace.Platform
+	Root     string
+	Machine  config.Machine
 }
 
 func Run(t *testing.T, newHarness func(t *testing.T) Harness) {
@@ -75,7 +73,7 @@ const Inventory = "version: 1\nconfigure:\n  env: [WEB_PORT]\n"
 func Config(t *testing.T, h Harness) *config.Config {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(cmp.Or(h.Inventory, Inventory)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(Inventory), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Parse([]byte(fmt.Sprintf(`
