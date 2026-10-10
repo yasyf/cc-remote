@@ -36,6 +36,7 @@ const (
 	submitWait     = 15 * time.Second
 	gatewayStart   = 30 * time.Second
 	gatewayPoll    = 100 * time.Millisecond
+	guestPoll      = 250 * time.Millisecond
 )
 
 var ErrNotSubmitted = errors.New("the prompt was accepted, but no turn_started was observed")
@@ -860,6 +861,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	}
 	poll := orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute}
 	if helper != "" {
+		poll.Interval = guestPoll
 		task.Bootstrap, err = d.guestBootstrap(ctx, task, helper, runtime, startup, session.Config.Trusted(), poll)
 	} else {
 		task.Bootstrap, err = native.Bootstrap(ctx, task.Terminal, startup, session.Config.Trusted(), poll)
