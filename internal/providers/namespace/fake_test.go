@@ -6,7 +6,8 @@ import (
 	"io"
 	"maps"
 	"net"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +34,11 @@ const (
 	testImage    = "nscr.io/tenant/agent@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 	testPort     = 18766
 	firstHost    = 30000
+	testSSHUser  = "ns-compute"
+	testSSHHost  = "ssh.compute.test"
+	testSSHPort  = "2222"
+	testHostKey  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGNjLXJlbW90ZS1uYW1lc3BhY2UtdGVzdC1ob3N0"
+	sshArgc      = 34
 )
 
 var epoch = time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
@@ -76,12 +82,28 @@ type fakeInstance struct {
 	exported int32
 }
 
+type sshRequest struct {
+	instance, container string
+}
+
+type command struct {
+	instance, container, script string
+}
+
+type shell struct {
+	command
+	argv []string
+	env  []string
+}
+
 type fakeNamespace struct {
 	computev1beta.ComputeServiceClient
 	t     *testing.T
 	clock *fakeClock
 
 	createErr    error
+	sshConfigErr error
+	sshConfig    func(*computev1beta.GetSSHConfigResponse)
 	anonymous    bool
 	waitErr      error
 	unexported   bool
@@ -101,19 +123,20 @@ type fakeNamespace struct {
 	nativeExit   int
 	nativeStderr string
 
-	mu        sync.Mutex
-	instances map[string]*fakeInstance
-	calls     []string
-	created   []*computev1beta.CreateInstanceRequest
-	extended  []*computev1beta.ExtendInstanceRequest
-	shells    [][]string
-	envs      [][]string
-	dials     []string
-	open      int
+	mu         sync.Mutex
+	instances  map[string]*fakeInstance
+	calls      []string
+	created    []*computev1beta.CreateInstanceRequest
+	extended   []*computev1beta.ExtendInstanceRequest
+	configured []sshRequest
+	issued     map[string]sshRequest
+	shells     []shell
+	dials      []string
+	open       int
 }
 
 func newFakeNamespace(t *testing.T, clock *fakeClock) *fakeNamespace {
-	return &fakeNamespace{t: t, clock: clock, page: 2, uid: "1000", gid: "1000", instances: map[string]*fakeInstance{}}
+	return &fakeNamespace{t: t, clock: clock, page: 2, uid: "1000", gid: "1000", instances: map[string]*fakeInstance{}, issued: map[string]sshRequest{}}
 }
 
 func (f *fakeNamespace) granted(wanted time.Time) time.Time {
@@ -133,16 +156,32 @@ func (f *fakeNamespace) Calls() []string {
 	return slices.Clone(f.calls)
 }
 
-func (f *fakeNamespace) Shells() [][]string {
+func (f *fakeNamespace) Shells() []shell {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.shells)
 }
 
-func (f *fakeNamespace) Envs() [][]string {
+func (f *fakeNamespace) Commands() []command {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return slices.Clone(f.envs)
+	commands := make([]command, 0, len(f.shells))
+	for _, ran := range f.shells {
+		commands = append(commands, ran.command)
+	}
+	return commands
+}
+
+func (f *fakeNamespace) Configured() []sshRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.configured)
+}
+
+func (f *fakeNamespace) Dials() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.dials)
 }
 
 func (f *fakeNamespace) set(id string, to computev1beta.InstanceMetadata_Status) {
@@ -373,30 +412,86 @@ func (f *fakeNamespace) ExtendInstance(_ context.Context, in *computev1beta.Exte
 	return &computev1beta.ExtendInstanceResponse{NewDeadline: instance.metadata.GetDeadline()}, nil
 }
 
+func (f *fakeNamespace) GetSSHConfig(_ context.Context, in *computev1beta.GetSSHConfigRequest, _ ...grpc.CallOption) (*computev1beta.GetSSHConfigResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	asked := sshRequest{instance: in.GetInstanceId(), container: in.GetTargetContainer()}
+	f.configured = append(f.configured, asked)
+	if f.sshConfigErr != nil {
+		return nil, f.sshConfigErr
+	}
+	if _, err := f.lookup(asked.instance); err != nil {
+		return nil, err
+	}
+	config := &computev1beta.GetSSHConfigResponse{
+		SshPrivateKey: fmt.Appendf(nil, "private key %d of %s for %q\n", len(f.configured), asked.instance, asked.container),
+		Username:      testSSHUser,
+		Endpoint:      net.JoinHostPort(testSSHHost, testSSHPort),
+		SshHostKeys:   [][]byte{[]byte(testHostKey + "\n")},
+	}
+	if f.sshConfig != nil {
+		f.sshConfig(config)
+	}
+	f.issued[string(config.GetSshPrivateKey())] = asked
+	return config, nil
+}
+
+func sshArgv(dir, host, port, username, instance, script string) []string {
+	return []string{
+		"-F", "none", "-T",
+		"-o", "HostName=" + host,
+		"-o", "Port=" + port,
+		"-o", "User=" + username,
+		"-o", `IdentityFile="` + filepath.Join(dir, "key") + `"`,
+		"-o", "IdentitiesOnly=yes",
+		"-o", "HostKeyAlias=" + instance,
+		"-o", `UserKnownHostsFile="` + filepath.Join(dir, "known_hosts") + `"`,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "IdentityAgent=none",
+		"-o", "BatchMode=yes",
+		"-o", "GlobalKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=10",
+		"-o", "ConnectionAttempts=6",
+		"--", instance, script,
+	}
+}
+
+func sshIdentity(argv []string) string {
+	return strings.Trim(strings.TrimPrefix(argv[10], "IdentityFile="), `"`)
+}
+
 func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (providers.Result, error) {
 	f.mu.Lock()
-	f.shells = append(f.shells, slices.Clone(cmd.Args))
-	f.envs = append(f.envs, slices.Clone(cmd.Env))
-	if cmd.Name != DefaultCLI {
+	ran := shell{argv: slices.Clone(cmd.Args), env: slices.Clone(cmd.Env)}
+	if cmd.Name != "ssh" || len(cmd.Args) != sshArgc {
+		f.shells = append(f.shells, ran)
 		f.mu.Unlock()
-		return providers.Result{}, fmt.Errorf("%s: %w", cmd.Name, exec.ErrNotFound)
+		f.t.Errorf("%s %q is not the OpenSSH client command", cmd.Name, cmd.Args)
+		return providers.Result{ExitCode: 255}, nil
 	}
-	args, container := cmd.Args, ""
-	switch {
-	case len(args) == 6 && args[0] == "ssh" && args[1] == "--container_name" && args[3] == "-T":
-		container, args = args[2], args[4:]
-	case len(args) == 4 && args[0] == "ssh" && args[1] == "-T":
-		args = args[2:]
-	default:
+	identity, host, port, script := sshIdentity(cmd.Args), strings.TrimPrefix(cmd.Args[4], "HostName="), strings.TrimPrefix(cmd.Args[6], "Port="), cmd.Args[33]
+	if want := sshArgv(filepath.Dir(identity), host, port, strings.TrimPrefix(cmd.Args[8], "User="), cmd.Args[32], script); !slices.Equal(cmd.Args, want) {
+		f.t.Errorf("ssh argv = %q, want %q", cmd.Args, want)
+	}
+	key, err := os.ReadFile(identity)
+	asked, ok := f.issued[string(key)]
+	if err != nil || !ok {
+		f.shells = append(f.shells, ran)
 		f.mu.Unlock()
-		f.t.Errorf("nsc %q is not a native ssh command", cmd.Args)
-		return providers.Result{ExitCode: 2}, nil
+		f.t.Errorf("ssh identity %q, %v is no key GetSSHConfig issued", key, err)
+		return providers.Result{ExitCode: 255}, nil
 	}
-	id, script := args[0], args[1]
+	id, container := asked.instance, asked.container
+	if cmd.Args[32] != id {
+		f.t.Errorf("ssh names %s with the key GetSSHConfig issued for %s", cmd.Args[32], id)
+	}
+	ran.command = command{instance: id, container: container, script: script}
+	f.shells = append(f.shells, ran)
 	instance, ok := f.instances[id]
 	if !ok || instance.metadata.GetStatus() != computev1beta.InstanceMetadata_RUNNING {
 		f.mu.Unlock()
-		return providers.Result{Stderr: []byte("Failed: instance " + id + " is not running\n"), ExitCode: 255}, nil
+		return providers.Result{Stderr: []byte("ssh: connect to host " + host + " port " + port + ": Connection refused\n"), ExitCode: 255}, nil
 	}
 	if want := instance.request.GetContainers()[0].GetName(); container != "" && container != want {
 		f.t.Errorf("ssh into container %q, want %q", container, want)
@@ -425,13 +520,9 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 	if err != nil {
 		return providers.Result{}, err
 	}
-	result, err := providers.OSRunner{}.Run(ctx, providers.Command{Name: argv[0], Args: argv[1:], Env: cmd.Env, Stdin: cmd.Stdin, Stdout: cmd.Stdout})
+	result, err := providers.OSRunner{}.Run(ctx, providers.Command{Name: argv[0], Args: argv[1:], Stdin: cmd.Stdin, Stdout: cmd.Stdout})
 	if err != nil {
 		return result, err
-	}
-	if result.ExitCode != 0 {
-		result.Stderr = fmt.Appendf(result.Stderr, "Failed: exec failed with exit code %d\n", result.ExitCode)
-		result.ExitCode = 1
 	}
 	result.Stderr = append(result.Stderr, nativeStderr...)
 	if nativeExit != 0 {

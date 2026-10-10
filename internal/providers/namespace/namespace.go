@@ -463,14 +463,14 @@ func (p *Provider) initialize(ctx context.Context, compute providers.ComputeInst
 		return err
 	}
 	owner := strconv.Itoa(uid) + ":" + strconv.Itoa(gid)
-	result, err := p.Runner.Run(ctx, p.host(compute, []string{"chown", owner, compute.Volume.HostMount}, nil))
+	result, err := p.ssh(ctx, compute, "", providers.ShellQuote("chown", owner, compute.Volume.HostMount), nil)
 	if err != nil {
 		return fmt.Errorf("giving the new workspace volume to %s: %w", owner, err)
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("giving the new workspace volume %s to %s exited %d: %s", compute.Volume.HostMount, owner, result.ExitCode, bytes.TrimSpace(result.Stderr))
 	}
-	result, err = p.Runner.Run(ctx, p.container(compute, []string{"test", "-w", compute.Volume.ContainerMount}, nil))
+	result, err = p.ssh(ctx, compute, compute.Container, providers.ShellQuote("test", "-w", compute.Volume.ContainerMount), nil)
 	if err != nil {
 		return err
 	}
@@ -481,7 +481,7 @@ func (p *Provider) initialize(ctx context.Context, compute providers.ComputeInst
 }
 
 func (p *Provider) number(ctx context.Context, compute providers.ComputeInstance, flag string) (int, error) {
-	result, err := p.Runner.Run(ctx, p.container(compute, []string{"id", flag}, nil))
+	result, err := p.ssh(ctx, compute, compute.Container, providers.ShellQuote("id", flag), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -754,15 +754,17 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	if _, err := rand.Read(nonce); err != nil {
 		return providers.Result{}, err
 	}
-	native, err := p.Runner.Run(ctx, p.container(saved.Instance, []string{"sh", "-c", framed(nonce, cmd)}, stdin))
+	native, err := p.ssh(ctx, saved.Instance, saved.Instance.Container, providers.ShellQuote("sh", "-c", framed(nonce, cmd)), stdin)
 	result, status, framing := unframe(native.Stdout, nonce)
+	if err != nil || native.ExitCode != 0 {
+		if _, gone := p.describe(ctx, *saved); errors.Is(gone, providers.ErrNotFound) {
+			return providers.Result{}, gone
+		}
+	}
 	if err != nil {
 		return result, fmt.Errorf("running a command on namespace instance %s: %w", id, err)
 	}
 	if native.ExitCode != 0 {
-		if _, err := p.describe(ctx, *saved); errors.Is(err, providers.ErrNotFound) {
-			return providers.Result{}, err
-		}
 		return result, fmt.Errorf("running a command on namespace instance %s: the native ssh exited %d: %s", id, native.ExitCode, bytes.TrimSpace(native.Stderr))
 	}
 	if len(native.Stderr) > 0 {
