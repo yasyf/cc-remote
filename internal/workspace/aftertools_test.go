@@ -14,16 +14,21 @@ import (
 func releasedBeside(t *testing.T, parked *hold) func(context.Context, string) {
 	t.Helper()
 	var late atomic.Bool
-	released := make(chan struct{})
+	released, stop, joined := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		<-joined
+	})
 	go func() {
+		defer close(joined)
 		select {
 		case <-parked.entered:
-		case <-t.Context().Done():
+		case <-stop:
 			return
 		}
 		select {
 		case <-released:
-		case <-t.Context().Done():
+		case <-stop:
 		case <-time.After(5 * time.Second):
 			late.Store(true)
 			parked.release <- providers.Result{}
