@@ -65,7 +65,6 @@ type Session struct {
 	closure          bool
 	privatePlugins   bool
 	tailnetFromTools bool
-	captainHook      string
 	stderr           sync.Mutex
 }
 
@@ -120,7 +119,6 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		closure:          rendered.closure,
 		privatePlugins:   rendered.private,
 		tailnetFromTools: rendered.tailnetFromTools,
-		captainHook:      rendered.captainHook,
 	}
 	s.Token = s.gitToken
 	for _, forward := range cfg.Forwards {
@@ -146,7 +144,6 @@ type rendered struct {
 	private          bool
 	tailnetFromTools bool
 	closure          bool
-	captainHook      string
 }
 
 func render(cfg *config.Config, profile string, machine config.Machine, payload bool, platform string) (rendered, error) {
@@ -166,9 +163,6 @@ func render(cfg *config.Config, profile string, machine config.Machine, payload 
 		private:          slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private }),
 		tailnetFromTools: inventory.TailnetFromTools(),
 		closure:          inventory.Apt.Payload != nil,
-	}
-	if inventory.CaptainHook != nil {
-		out.captainHook = inventory.CaptainHook.Version
 	}
 	if machine.Image == "" {
 		var payload, packages string
@@ -359,7 +353,7 @@ func (s *Session) PoolKey() string {
 	if s.Config.Tailnet != nil {
 		tailnetTag = s.Config.Tailnet.Tag
 	}
-	parts := append([]string{poolSchema, s.Config.Repository, s.Kind, s.Profile, s.ProjectRoot(), string(s.profile.Checkout), s.Stamp, s.image, s.imageSpec, tailnetTag, s.wordnetContract()}, s.profile.Prepare...)
+	parts := append([]string{poolSchema, s.Config.Repository, s.Kind, s.Profile, s.ProjectRoot(), string(s.profile.Checkout), s.Stamp, s.image, s.imageSpec, tailnetTag}, s.profile.Prepare...)
 	if helper := s.Config.Orca.BootstrapHelper; helper != nil {
 		parts = append(parts, images.HelperArtifact.Label, helper.Version, helper.Platform, helper.SHA256, strconv.FormatInt(helper.Size, 10), helper.BinarySHA256)
 	}
@@ -517,12 +511,6 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 			return err
 		}
 		return s.configure(ctx, record, env)
-	})
-	run.Go(func(ctx context.Context) error {
-		if err := run.after(loader); err != nil {
-			return err
-		}
-		return s.prewarmWordnet(ctx, machine)
 	})
 	enrollAfter := []<-chan struct{}{packages, tools}
 	if s.tailnetFromTools {

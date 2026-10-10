@@ -191,26 +191,33 @@ its Sprite and confirms its absence before returning success. The returned
 
 With `path`, the Sprite runs
 `sudo bash -c <stage script> stage-payload <sha256>` with the laptop file on the
-provider's exec stdin. The script runs `cat | tee <staging file> | sha256sum`,
+provider's exec stdin. The script runs
+`cat | tee <staging file> | openssl dgst -sha256`,
 writing and hashing the bytes in one pass. It checks every pipeline stage's exit
 status and compares the digest to the pin before renaming the staging file to
 `/var/lib/cc-remote/payload/<sha256>.sqfs.admitted` under the store lock (`.lock`).
 
 With `url_command`, the machine runs
-`sudo bash -c <fetch script> fetch-payload <sha256> <size>`. The script runs
-`curl -q --config - --silent --fail --proto =https --max-filesize <size>` with a
-30 s connection timeout and a 600 s transfer timeout. It pipes the response
-through `tee` into native `sha256sum`, writing the staging file and hashing the
-bytes in one pass. The checksum overlaps the transfer; the downloaded file is
-never re-read for admission. The script checks every pipeline stage's exit
-status, requires HTTP `200`, and compares the file's size and SHA-256 with both
-pins. Only then does it rename the staging file to `<sha256>.sqfs.admitted` under
-the store lock (`.lock`).
+`sudo bash -c <fetch script> fetch-payload <sha256> <size>`. The script reads
+the curl config from its stdin once and hands it to each `curl` through a pipe.
+It splits the file into 32 MiB ranges and keeps up to eight in flight. Each
+range runs `curl -q --config <pipe> --silent --fail --proto =https --range
+<start>-<end> --max-filesize <length>` with a 30 s connection timeout and a
+600 s transfer timeout, and waits in memory until the ranges before it are
+written. The script
+pipes the ranges in order through `tee` into `openssl dgst -sha256`, writing the
+staging file and hashing the bytes in one pass. The checksum overlaps the
+transfer; the downloaded file is never re-read for admission. The script checks
+every pipeline stage's exit status, requires HTTP `206` for every range, and
+compares the file's size and SHA-256 with both pins. Only then does it rename
+the staging file to `<sha256>.sqfs.admitted` under the store lock (`.lock`).
 
 HTTP errors, including `403` and `404`, fail with the HTTP code; a `403` diagnostic
-notes that the presigned URL may have expired. Redirects are not followed.
-Truncation, a failed pipeline stage, a timeout, a size mismatch, or a digest
-mismatch fails the transfer.
+notes that the presigned URL may have expired. Redirects are not followed, and
+a server that answers a range with the whole file is refused. Truncation, a
+failed pipeline stage, a timeout, a size mismatch, or a digest mismatch fails
+the transfer. After one failed range the script starts no more ranges and
+discards the ones still in flight.
 
 Both scripts enable `pipefail` and use `mktemp` to create a file with mode `0600`
 named `<sha256>.sqfs.<8 random chars>.partial` in the store for each invocation.

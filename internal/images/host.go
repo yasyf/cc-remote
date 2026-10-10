@@ -58,7 +58,11 @@ mkdir -p "$HOME/.cc-remote"
 cat > "` + PluginsPath + `.tmp"
 mv -f "` + PluginsPath + `.tmp" "` + PluginsPath + `"`
 
-const payloadURLLimit = 8192
+const (
+	payloadURLLimit = 8192
+	fetchStreams    = 8
+	fetchRange      = 32 << 20
+)
 
 func (a TransferArtifact) openStaging() string {
 	return `set -euo pipefail
@@ -95,10 +99,60 @@ fi
 
 func (a TransferArtifact) fetchScript() string {
 	return a.openStaging() + `size="$2"
+streams=` + strconv.Itoa(fetchStreams) + `
+range=` + strconv.Itoa(fetchRange) + `
+config="$(cat)"
+
+fetch_ranges() {
+  local count=$(((size + range - 1) / range)) index=0 launched=0 start end status code hold reader writer
+  local -a pids=() readers=()
+  while [ "$index" -lt "$count" ]; do
+    while [ "$launched" -lt "$count" ] && [ "$launched" -lt "$((index + streams))" ]; do
+      start=$((launched * range))
+      end=$((start + range - 1))
+      if [ "$end" -ge "$size" ]; then
+        end=$((size - 1))
+      fi
+      mkfifo "$work/part"
+      exec {hold}<> "$work/part"
+      exec {reader}< "$work/part" {writer}> "$work/part"
+      exec {hold}>&-
+      rm -f "$work/part"
+      echo 1 > "$work/exit.$launched"
+      {
+        curl -q --config <(printf '%s\n' "$config") --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
+          --range "$start-$end" --max-filesize "$((end - start + 1))" \
+          --write-out '%{stderr}%{http_code}' 2> "$work/http.$launched"
+        echo "$?" > "$work/exit.$launched"
+      } | dd bs="$range" iflag=fullblock status=none >&"$writer" &
+      pids+=("$!")
+      readers+=("$reader")
+      exec {writer}>&-
+      launched=$((launched + 1))
+    done
+    reader="${readers[index]}"
+    status=0
+    cat <&"$reader" || status=$?
+    exec {reader}<&-
+    wait "${pids[index]}" || status=$?
+    code="$(cat "$work/exit.$index")"
+    if [ "$code" -ne 0 ]; then
+      status="$code"
+    fi
+    mv -f "$work/http.$index" "$work/http"
+    if [ "$status" -ne 0 ] || [ "$(cat "$work/http")" != 206 ]; then
+      for ((index += 1; index < launched; index += 1)); do
+        cat <&"${readers[index]}" > /dev/null
+      done
+      wait
+      return "$status"
+    fi
+    index=$((index + 1))
+  done
+}
+
 set +e
-curl -q --config - --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
-  --max-filesize "$size" --write-out '%{stderr}%{http_code}' 2> "$work/http" \
-  | tee "$staging" | openssl dgst -sha256 -r > "$work/sum"
+fetch_ranges | tee "$staging" | openssl dgst -sha256 -r > "$work/sum"
 codes=("${PIPESTATUS[@]}")
 set -e
 http="$(cat "$work/http")"
@@ -111,8 +165,8 @@ if [ "${codes[*]}" != "0 0 0" ]; then
   echo "cc-remote: the ` + a.Name + ` download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, openssl exit ${codes[2]})$hint" >&2
   exit 1
 fi
-if [ "$http" != 200 ]; then
-  echo "cc-remote: the ` + a.Name + ` URL answered HTTP $http, want 200" >&2
+if [ "$http" != 206 ]; then
+  echo "cc-remote: the ` + a.Name + ` URL answered HTTP $http, want 206" >&2
   exit 1
 fi
 got="$(stat -c %s "$staging")"
