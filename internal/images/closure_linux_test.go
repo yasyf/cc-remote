@@ -527,7 +527,7 @@ func assertPackagesStoreHolds(t *testing.T, root string, want ...string) {
 
 func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 	base := "installed\tbase-files=13\ninstalled\tlibc6=2.42-1\n"
-	install := "install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
+	install := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
 	drifted := "cc-remote: the packages on this machine differ from the base its payload captured the resident packages against (-payload +machine), so they cannot install offline; rebuild the payload on this base:\n"
 	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
@@ -648,7 +648,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	inventory := scriptInventory()
 	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
 	full := "update -qq\ninstall -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
-	resident := "install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives=@CACHE@/\n"
+	resident := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/\n"
 	tests := []struct {
 		name    string
 		args    []string
@@ -661,7 +661,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 		fetches int
 	}{
 		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
-		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "install -y -qq --no-download @DEBS@/orca-1.4.215.deb\n"},
+		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io @DEBS@/orca-1.4.215.deb\n"},
 		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, packagesDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
 		{name: "a deb naming no package is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package", fetches: 1},
 		{name: "a failing dpkg-deb is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=fail"}, exit: 2, wantErr: "dpkg-deb: error: cannot read", fetches: 1},
