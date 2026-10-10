@@ -177,6 +177,11 @@ func TestGuestRunRefusesBeforeAnyOrcaCall(t *testing.T) {
 			*g = guestFor(orca.AgentCodex, review)
 			g.Grant = &orca.GuestGrant{Captain: captainPins}
 		}, "neither or both", nil},
+		{"codex with no Orca server", func(g *orca.Guest, _ *guestHome) { *g = guestFor(orca.AgentCodex, review) }, `names Orca server "" for codex`, nil},
+		{"codex with an unknown Orca server", func(g *orca.Guest, _ *guestHome) {
+			*g = guestFor(orca.AgentCodex, review)
+			g.Server = "orcad"
+		}, `names Orca server "orcad" for codex`, nil},
 		{"no terminal", func(g *orca.Guest, _ *guestHome) { g.Terminal = "" }, "no runtime or terminal", nil},
 		{"an unbounded poll", func(g *orca.Guest, _ *guestHome) { g.Timeout = 0 }, "polls every", nil},
 		{"a CLI outside the home", func(g *orca.Guest, _ *guestHome) { g.CLI = "../" + guestCLIPath }, "not a clean path under the guest home", nil},
@@ -220,13 +225,17 @@ func TestGuestRunRefusesBeforeAnyOrcaCall(t *testing.T) {
 func TestGuestRunKeepsTheFinalGrantVerification(t *testing.T) {
 	prior := orca.Pregrant{Project: grantProject, Hooks: grantHooks(5)}
 	tests := []struct {
-		name  string
-		final string
-		want  error
-		waits int
+		name   string
+		server orca.Server
+		mode   orca.GrantMode
+		final  string
+		want   error
+		waits  int
 	}{
-		{"verified before the idle wait", grantDoc(t, orca.GrantFinal, nil), nil, 1},
-		{"a refused final grant", refusedDoc(orca.GrantFinal, "untrusted-hook", "Stop", 1, ""), orca.GrantRefusal{Mode: orca.GrantFinal, Reason: "untrusted-hook", Event: "Stop", Record: 1}, 0},
+		{"verified before the idle wait", orca.ServerElectron, orca.GrantFinal, grantDoc(t, orca.GrantFinal, nil), nil, 1},
+		{"a refused final grant", orca.ServerElectron, orca.GrantFinal, refusedDoc(orca.GrantFinal, "untrusted-hook", "Stop", 1, ""), orca.GrantRefusal{Mode: orca.GrantFinal, Reason: "untrusted-hook", Event: "Stop", Record: 1}, 0},
+		{"a managed server keeps the claimed five", orca.ServerManaged, orca.GrantClaim, grantDoc(t, orca.GrantClaim, nil), nil, 1},
+		{"a managed server with Orca's handlers", orca.ServerManaged, orca.GrantClaim, refusedDoc(orca.GrantClaim, "unexpected-event", "", -1, ""), orca.GrantRefusal{Mode: orca.GrantClaim, Reason: "unexpected-event", Record: -1}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -236,13 +245,13 @@ func TestGuestRunKeepsTheFinalGrantVerification(t *testing.T) {
 			execs := 0
 			local := func(_ context.Context, argv []string) ([]byte, error) {
 				execs++
-				if argv[0] != "python3" || argv[3] != string(orca.GrantFinal) {
+				if argv[0] != "python3" || argv[3] != string(tt.mode) {
 					t.Errorf("the local hook check ran %q", argv[:4])
 				}
 				return []byte(tt.final), nil
 			}
 			grant := orca.HookGrant{Captain: captainPins, Codex: "0.159.2", Project: grantProject}
-			steps, err := h.run(t, guestFor(orca.AgentCodex, orca.GrantedCodexStartup(grant, prior)), local)
+			steps, err := h.run(t, guestFor(orca.AgentCodex, orca.GrantedCodexStartup(grant, prior, tt.server)), local)
 			switch {
 			case tt.want == nil && (err != nil || !slices.Equal(steps, []string{"hooks.granted"})):
 				t.Fatalf("Run = %q, %v", steps, err)

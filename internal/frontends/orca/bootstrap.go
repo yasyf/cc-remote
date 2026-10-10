@@ -119,7 +119,7 @@ func (r Remote) bootstrap(ctx context.Context, handle string, startup Startup, t
 				return struct{}{}, false, nil
 			}
 			if startup.Granted != nil && !verified {
-				if err := startup.Granted.Grant.Final(ctx, startup.Granted.Prior); err != nil {
+				if err := startup.Granted.Grant.Final(ctx, startup.Granted.Prior, startup.Granted.Server); err != nil {
 					return struct{}{}, false, fmt.Errorf("hooks: %w", err)
 				}
 				verified = true

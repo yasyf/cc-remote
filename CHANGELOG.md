@@ -41,6 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unconfigured changes nothing.
 
 ### Fixed
+- **A Codex worker prepares on Orca's managed server again.** The Codex hook
+  check accepted one set of thirteen definitions, Orca's eight handlers plus
+  Captain Hook's five. Orca's managed server installs no agent hooks, because
+  only its Electron main process writes them. A Codex worker on a fresh Orca
+  1.4.224 machine therefore failed its bootstrap with
+  `missing at SessionStart record 0`. The check now takes its accepted set
+  from the server Orca reports in its ready event. On a managed server the set
+  is exactly Captain Hook's five, and an Orca handler there is a refusal. On
+  Electron it is the same thirteen as before. A pregranted worker on a managed
+  server must still hold exactly the hooks its pregrant claimed.
 - **`cc-remote destroy` no longer needs the machine's tailnet daemon.** Destroy
   used to ask the guest's `tailscaled` which node it held before removing
   anything, so a machine whose daemon never opened its socket could not be

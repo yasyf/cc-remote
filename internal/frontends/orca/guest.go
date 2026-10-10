@@ -43,6 +43,7 @@ type Guest struct {
 	Trusted   bool          `json:"trusted"`
 	Interval  time.Duration `json:"interval"`
 	Timeout   time.Duration `json:"timeout"`
+	Server    Server        `json:"server,omitempty"`
 	Review    *GuestReview  `json:"review,omitempty"`
 	Grant     *GuestGrant   `json:"grant,omitempty"`
 }
@@ -66,9 +67,9 @@ func NewGuest(platform, runtimeID, terminal, cli string, agent Agent, startup St
 	switch {
 	case startup.Granted != nil:
 		grant := startup.Granted.Grant
-		guest.Grant = &GuestGrant{Captain: grant.Captain, Codex: grant.Codex, Project: grant.Project, Prior: startup.Granted.Prior}
+		guest.Server, guest.Grant = startup.Granted.Server, &GuestGrant{Captain: grant.Captain, Codex: grant.Codex, Project: grant.Project, Prior: startup.Granted.Prior}
 	case startup.Hooks != nil:
-		guest.Review = &GuestReview{Captain: startup.Hooks.Captain}
+		guest.Server, guest.Review = startup.Hooks.Server, &GuestReview{Captain: startup.Hooks.Captain}
 	}
 	return guest
 }
@@ -87,6 +88,8 @@ func (g Guest) Run(ctx context.Context, home string, local func(context.Context,
 		return nil, errors.New("the guest bootstrap descriptor gives claude a Codex hook check")
 	case g.Agent == AgentCodex && (g.Review == nil) == (g.Grant == nil):
 		return nil, errors.New("the guest bootstrap descriptor gives codex neither or both of its hook review and grant")
+	case g.Agent == AgentCodex && g.Server != ServerElectron && g.Server != ServerManaged:
+		return nil, fmt.Errorf("the guest bootstrap descriptor names Orca server %q for codex", g.Server)
 	case g.RuntimeID == "" || g.Terminal == "":
 		return nil, errors.New("the guest bootstrap descriptor names no runtime or terminal")
 	case g.Interval <= 0 || g.Timeout <= 0:
@@ -108,9 +111,9 @@ func (g Guest) Run(ctx context.Context, home string, local func(context.Context,
 func (g Guest) startup(local func(context.Context, []string) ([]byte, error)) Startup {
 	switch {
 	case g.Grant != nil:
-		return GrantedCodexStartup(HookGrant{Captain: g.Grant.Captain, Codex: g.Grant.Codex, Project: g.Grant.Project, Exec: local}, g.Grant.Prior)
+		return GrantedCodexStartup(HookGrant{Captain: g.Grant.Captain, Codex: g.Grant.Codex, Project: g.Grant.Project, Exec: local}, g.Grant.Prior, g.Server)
 	case g.Review != nil:
-		return CodexStartup(HookReview{Captain: g.Review.Captain, Exec: local})
+		return CodexStartup(HookReview{Captain: g.Review.Captain, Server: g.Server, Exec: local})
 	}
 	return StartupOf(Agent{Kind: g.Agent})
 }

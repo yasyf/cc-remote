@@ -159,14 +159,14 @@ def definitions(plugin, version, native):
 
 const HookProbeScript = hookLibrary + `
 
-def probe(plugin, version):
-    home, root, raw, events, _ = definitions(plugin, version, True)
+def probe(plugin, version, server):
+    home, root, raw, events, _ = definitions(plugin, version, server == "electron")
     return {"schema": 1, "outcome": "exact", "reason": "", "event": "", "record": -1, "home": home, "root": root, "hooksSha256": hashlib.sha256(raw).hexdigest(), "definitions": sum(events.values()), "events": events}
 
 
 def main():
     try:
-        result = probe(sys.argv[1], sys.argv[2])
+        result = probe(sys.argv[1], sys.argv[2], sys.argv[3])
     except Refusal as refusal:
         result = {"schema": 1, "outcome": "refused", "reason": refusal.reason, "event": refusal.event, "record": refusal.record}
     except Exception:
@@ -200,6 +200,7 @@ type Pin struct {
 
 type HookReview struct {
 	Captain []Pin
+	Server  Server
 	Exec    func(ctx context.Context, argv []string) ([]byte, error)
 }
 
@@ -271,15 +272,15 @@ func (h HookReview) probe(ctx context.Context) (HookProbe, error) {
 		return HookProbe{}, err
 	}
 	started := time.Now()
-	out, err := h.Exec(ctx, []string{"python3", "-c", HookProbeScript, pin.ID, pin.Version})
+	out, err := h.Exec(ctx, []string{"python3", "-c", HookProbeScript, pin.ID, pin.Version, string(h.Server)})
 	observe(ctx, "hooks.probe", started, err)
 	if err != nil {
 		return HookProbe{}, fmt.Errorf("probe the worker's Codex hooks: %w", err)
 	}
-	return ParseHookProbe(out, pin)
+	return ParseHookProbe(out, pin, h.Server)
 }
 
-func ParseHookProbe(out []byte, pin Pin) (HookProbe, error) {
+func ParseHookProbe(out []byte, pin Pin, server Server) (HookProbe, error) {
 	var probe HookProbe
 	decoder := json.NewDecoder(bytes.NewReader(out))
 	decoder.DisallowUnknownFields()
@@ -300,6 +301,7 @@ func ParseHookProbe(out []byte, pin Pin) (HookProbe, error) {
 		return HookProbe{}, errors.New("the Codex hook probe reported an unrecognized outcome")
 	}
 	name, market, _ := strings.Cut(pin.ID, "@")
+	counts := server.multiplicity()
 	switch {
 	case !path.IsAbs(probe.Home) || path.Clean(probe.Home) != probe.Home:
 		return HookProbe{}, errors.New("the Codex hook probe reported no absolute runtime home")
@@ -307,23 +309,30 @@ func ParseHookProbe(out []byte, pin Pin) (HookProbe, error) {
 		return HookProbe{}, errors.New("the Codex hook probe matched another Captain Hook root")
 	case !sha256Hex.MatchString(probe.HooksSHA256):
 		return HookProbe{}, errors.New("the Codex hook probe reported no hooks digest")
-	case probe.Definitions != len(nativeHookEvents)+len(captainHookEvents) || !maps.Equal(probe.Events, multiplicity()):
+	case probe.Definitions != definitionCount(counts) || !maps.Equal(probe.Events, counts):
 		return HookProbe{}, errors.New("the Codex hook probe counted another set of definitions")
 	}
 	return probe, nil
 }
 
-func multiplicity() map[string]int {
+func (s Server) native() []string {
+	if s == ServerElectron {
+		return nativeHookEvents
+	}
+	return nil
+}
+
+func (s Server) multiplicity() map[string]int {
 	counts := map[string]int{}
-	for _, event := range nativeHookEvents {
-		counts[event] = expectedRow(event).Installed
+	for _, event := range slices.Concat(s.native(), captainHookEvents) {
+		counts[event] = s.row(event).Installed
 	}
 	return counts
 }
 
-func expectedRow(event string) hookRow {
+func (s Server) row(event string) hookRow {
 	row := hookRow{Event: event}
-	if slices.Contains(nativeHookEvents, event) {
+	if slices.Contains(s.native(), event) {
 		row.Installed, row.Active = 1, 1
 	}
 	if slices.Contains(captainHookEvents, event) {
@@ -504,10 +513,10 @@ func (h *hookRows) add(view hookBrowser, pending int) error {
 	return nil
 }
 
-func (h hookRows) check(probe HookProbe) error {
+func (h hookRows) check(probe HookProbe, server Server) error {
 	var installed, active, review int
 	for _, event := range browserEvents {
-		want := expectedRow(event)
+		want := server.row(event)
 		row, seen := h.counts[event]
 		switch {
 		case !seen:
@@ -522,7 +531,7 @@ func (h hookRows) check(probe HookProbe) error {
 	if !slices.Equal(h.order, browserEvents) {
 		return errors.New("the hooks browser lists its events out of the supported order")
 	}
-	if installed != probe.Definitions || active != len(nativeHookEvents) || review != len(captainHookEvents) {
+	if installed != probe.Definitions || active != len(server.native()) || review != len(captainHookEvents) {
 		return fmt.Errorf("the hooks browser totals %d installed, %d active and %d to review", installed, active, review)
 	}
 	return nil
@@ -622,7 +631,7 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 	if err := rows.add(view, pending); err != nil {
 		return err
 	}
-	if err := rows.check(probe); err != nil {
+	if err := rows.check(probe, review.Server); err != nil {
 		return err
 	}
 	if err := r.Key(ctx, handle, keyTrust); err != nil {

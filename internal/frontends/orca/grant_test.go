@@ -166,7 +166,7 @@ func TestHookGrantBindsClaimAndFinalToThePregrant(t *testing.T) {
 	if err := answer(grantDoc(t, orca.GrantClaim, nil)).Claim(context.Background(), orca.Pregrant{Project: "/workspaces", Hooks: prior.Hooks}); err == nil {
 		t.Error("a claim accepted another project's pregrant")
 	}
-	if err := answer(grantDoc(t, orca.GrantFinal, nil)).Final(context.Background(), prior); err != nil {
+	if err := answer(grantDoc(t, orca.GrantFinal, nil)).Final(context.Background(), prior, orca.ServerElectron); err != nil {
 		t.Errorf("the final thirteen lost the five: %v", err)
 	}
 	lost := grantDoc(t, orca.GrantFinal, func(d map[string]any) {
@@ -174,8 +174,16 @@ func TestHookGrantBindsClaimAndFinalToThePregrant(t *testing.T) {
 		hooks[0].Hash = fmt.Sprintf("sha256:%064x", 99)
 		d["hooks"] = hooks
 	})
-	if err := answer(lost).Final(context.Background(), prior); err == nil {
+	if err := answer(lost).Final(context.Background(), prior, orca.ServerElectron); err == nil {
 		t.Error("the final verification accepted a moved Captain Hook handler without its granted hash")
+	}
+	if err := answer(grantDoc(t, orca.GrantClaim, nil)).Final(context.Background(), prior, orca.ServerManaged); err != nil {
+		t.Errorf("a managed server's unchanged five were refused: %v", err)
+	}
+	for name, out := range map[string]string{"Orca's handlers": grantDoc(t, orca.GrantFinal, nil), "a hash its pregrant never trusted": drifted} {
+		if err := answer(out).Final(context.Background(), prior, orca.ServerManaged); err == nil {
+			t.Errorf("the final verification on a managed server accepted %s", name)
+		}
 	}
 }
 
@@ -183,6 +191,8 @@ func TestBootstrapOfAPregrantedCodexWorker(t *testing.T) {
 	prior := orca.Pregrant{Project: grantProject, Hooks: grantHooks(5)}
 	tests := []struct {
 		name    string
+		server  orca.Server
+		mode    orca.GrantMode
 		screens [][]string
 		waits   []string
 		final   string
@@ -190,11 +200,13 @@ func TestBootstrapOfAPregrantedCodexWorker(t *testing.T) {
 		execs   int
 		idles   int
 	}{
-		{"verified before the final idle", [][]string{codexReady}, []string{idleWait}, grantDoc(t, orca.GrantFinal, nil), nil, 1, 1},
-		{"hook review prompt", [][]string{promptScreen(5, "1. Review hooks")}, nil, "", orca.ErrPregrantPrompt, 0, 0},
-		{"folder trust gate", [][]string{folderShown}, nil, "", orca.ErrPregrantPrompt, 0, 0},
-		{"late review after the verification", [][]string{codexReady, promptScreen(8, "1. Review hooks")}, []string{blockedWait}, grantDoc(t, orca.GrantFinal, nil), orca.ErrPregrantPrompt, 1, 1},
-		{"final refusal", [][]string{codexReady}, nil, refusedDoc(orca.GrantFinal, "untrusted-hook", "Stop", 1, ""), orca.GrantRefusal{Mode: orca.GrantFinal, Reason: "untrusted-hook", Event: "Stop", Record: 1}, 1, 0},
+		{"verified before the final idle", orca.ServerElectron, orca.GrantFinal, [][]string{codexReady}, []string{idleWait}, grantDoc(t, orca.GrantFinal, nil), nil, 1, 1},
+		{"hook review prompt", orca.ServerElectron, orca.GrantFinal, [][]string{promptScreen(5, "1. Review hooks")}, nil, "", orca.ErrPregrantPrompt, 0, 0},
+		{"folder trust gate", orca.ServerElectron, orca.GrantFinal, [][]string{folderShown}, nil, "", orca.ErrPregrantPrompt, 0, 0},
+		{"late review after the verification", orca.ServerElectron, orca.GrantFinal, [][]string{codexReady, promptScreen(8, "1. Review hooks")}, []string{blockedWait}, grantDoc(t, orca.GrantFinal, nil), orca.ErrPregrantPrompt, 1, 1},
+		{"final refusal", orca.ServerElectron, orca.GrantFinal, [][]string{codexReady}, nil, refusedDoc(orca.GrantFinal, "untrusted-hook", "Stop", 1, ""), orca.GrantRefusal{Mode: orca.GrantFinal, Reason: "untrusted-hook", Event: "Stop", Record: 1}, 1, 0},
+		{"managed server keeps the claimed five", orca.ServerManaged, orca.GrantClaim, [][]string{codexReady}, []string{idleWait}, grantDoc(t, orca.GrantClaim, nil), nil, 1, 1},
+		{"managed server with Orca's handlers", orca.ServerManaged, orca.GrantClaim, [][]string{codexReady}, nil, refusedDoc(orca.GrantClaim, "unexpected-event", "", -1, ""), orca.GrantRefusal{Mode: orca.GrantClaim, Reason: "unexpected-event", Record: -1}, 1, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -208,12 +220,12 @@ func TestBootstrapOfAPregrantedCodexWorker(t *testing.T) {
 			execs := 0
 			grant := orca.HookGrant{Captain: captainPins, Codex: "0.159.2", Project: grantProject, Exec: func(_ context.Context, argv []string) ([]byte, error) {
 				execs++
-				if argv[3] != string(orca.GrantFinal) || fake.called(waitIdle) != 0 {
+				if argv[3] != string(tt.mode) || fake.called(waitIdle) != 0 {
 					t.Errorf("the %s verification ran after %d idle waits", argv[3], fake.called(waitIdle))
 				}
 				return []byte(tt.final), nil
 			}}
-			steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.GrantedCodexStartup(grant, prior), true, refusalPoll)
+			steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.GrantedCodexStartup(grant, prior, tt.server), true, refusalPoll)
 			switch {
 			case tt.want == nil && (err != nil || !slices.Equal(steps, []string{"hooks.granted"})):
 				t.Fatalf("Bootstrap = %v, %v", steps, err)

@@ -296,6 +296,26 @@ func TestPromptKeepsAnAcceptedReceiptWithoutResending(t *testing.T) {
 	}
 }
 
+func TestCodexStartupChecksTheSetOfTheServerOrcaReported(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), []byte(workspacetest.Inventory), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &workspace.Session{Config: &config.Config{Path: filepath.Join(dir, "config.yaml"), Inventory: "./inventory.yaml"}, Provider: &providertest.Fake{}, Profile: "lean"}
+	for build, want := range map[string]orca.Server{"": orca.ServerElectron, "0.1.0+15ec2904eb00": orca.ServerManaged} {
+		task := &orcaTask{Machine: "task-a", ProjectRoot: "/workspaces/app", Agent: orca.Agent{Kind: orca.AgentCodex}, ManagedServer: build}
+		reviewed, err := orcaStartup(session, task)
+		if err != nil || reviewed.Hooks == nil || reviewed.Hooks.Server != want {
+			t.Errorf("the review of a worker on managed server %q = %+v, %v; want %s", build, reviewed.Hooks, err, want)
+		}
+		task.Pregrant = &orca.Pregrant{Project: task.ProjectRoot}
+		granted, err := orcaStartup(session, task)
+		if err != nil || granted.Granted == nil || granted.Granted.Server != want {
+			t.Errorf("the final grant of a worker on managed server %q = %+v, %v; want %s", build, granted.Granted, err, want)
+		}
+	}
+}
+
 func TestCaptainPinsSelectOnlyCaptainHookPlugins(t *testing.T) {
 	inventory := images.Inventory{Claude: images.Claude{Plugins: []images.Plugin{
 		{ID: "cc-context@cc-context", Version: "0.66.5"},

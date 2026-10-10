@@ -55,6 +55,13 @@ type Ready struct {
 	ManagedServer      string `json:"managedServer,omitempty"`
 }
 
+type Server string
+
+const (
+	ServerElectron Server = "electron"
+	ServerManaged  Server = "managed"
+)
+
 type Agent struct {
 	Kind   string   `json:"kind"`
 	Model  string   `json:"model"`
@@ -174,6 +181,13 @@ func ParseReady(line []byte, listen, advertise int) (Ready, string, error) {
 		return Ready{}, "", errors.New("the Orca runtime's ready event offers no pairing")
 	}
 	return Ready{RuntimeID: event.RuntimeID, BoundEndpoint: event.BoundEndpoint, AdvertisedEndpoint: event.AdvertisedEndpoint, ManagedServer: event.Health.BuildVersion}, event.Pairing.URL, nil
+}
+
+func ServerOf(managedServer string) Server {
+	if managedServer == "" {
+		return ServerElectron
+	}
+	return ServerManaged
 }
 
 func ParseKeyDir(out []byte) (string, error) {
