@@ -118,6 +118,13 @@ holds the managed server's build when the ready event reports one and is
 absent on Electron. Orca writes its reason for a fallback as a `[serve]` line
 in `$HOME/.cc-remote/orca/serve.log` on the machine.
 
+A Claude worker's runtime starts as soon as the machine's tools are installed,
+while the create configures the machine, enrolls it in the tailnet, and writes
+the ready stamp. A runtime that fails to start fails the command once the
+create finishes, and the workspace is kept. A Codex worker's runtime starts
+after the create, once cc-remote has read the machine's shell environment
+policy.
+
 Before a Codex worker's hooks are trusted, cc-remote compares the machine's
 `~/.codex/hooks.json` with one exact set and refuses any other. The set follows
 the server in the ready event. On Electron it is Orca's eight handlers plus
@@ -269,6 +276,10 @@ It fetches `--ref` with `--depth 1` and checks out the fetched commit, so a
 branch that moved since the workspace was made is honored, not matched by
 name. After configure, the key, worker, and brief follow the ordinary `prepare`
 steps. Nothing installs project dependencies or runs profile commands.
+
+A Claude worker's runtime starts once the tools pass that check, while the
+fetch and configure run. A Codex worker's runtime starts after its hook grant
+is revalidated.
 
 If no candidate passes, the command creates the lane's own workspace exactly as
 `prepare lane-name` does, and reports `created` instead of `warm`.

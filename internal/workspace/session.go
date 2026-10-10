@@ -39,21 +39,22 @@ const (
 )
 
 type Session struct {
-	Config    *config.Config
-	Provider  providers.Provider
-	Kind      string
-	Profile   string
-	Platform  Platform
-	State     state.Dir
-	Enroller  *tailnet.Enroller
-	Log       *slog.Logger
-	Stderr    io.Writer
-	Token     func(context.Context) (string, error)
-	Retain    func(ctx context.Context, record *Record) error
-	Alongside func(ctx context.Context, machine string) error
-	Now       func() time.Time
-	Scripts   images.Scripts
-	Stamp     string
+	Config     *config.Config
+	Provider   providers.Provider
+	Kind       string
+	Profile    string
+	Platform   Platform
+	State      state.Dir
+	Enroller   *tailnet.Enroller
+	Log        *slog.Logger
+	Stderr     io.Writer
+	Token      func(context.Context) (string, error)
+	Retain     func(ctx context.Context, record *Record) error
+	Alongside  func(ctx context.Context, machine string) error
+	AfterTools func(ctx context.Context, machine string)
+	Now        func() time.Time
+	Scripts    images.Scripts
+	Stamp      string
 
 	profile          config.Profile
 	labels           []LabelledEnv
@@ -341,11 +342,11 @@ func (s *Session) forget(name string) error {
 }
 
 func (s *Session) Create(ctx context.Context, name string, source Source) (*Result, error) {
-	return s.create(ctx, name, source, map[string]string{LabelWorkspace: name})
+	return s.create(ctx, name, source, map[string]string{LabelWorkspace: name}, s.AfterTools)
 }
 
 func (s *Session) CreateSpare(ctx context.Context, name string, source Source) (*Result, error) {
-	return s.create(ctx, name, source, map[string]string{LabelWorkspace: name, LabelPool: s.PoolKey()})
+	return s.create(ctx, name, source, map[string]string{LabelWorkspace: name, LabelPool: s.PoolKey()}, nil)
 }
 
 func (s *Session) PoolKey() string {
@@ -375,7 +376,7 @@ func (s *Session) Poolable() error {
 	return nil
 }
 
-func (s *Session) create(ctx context.Context, name string, source Source, labels map[string]string) (result *Result, err error) {
+func (s *Session) create(ctx context.Context, name string, source Source, labels map[string]string, afterTools func(context.Context, string)) (result *Result, err error) {
 	ctx = s.begin(ctx)
 	defer func() { s.summarize(ctx, name, err) }()
 	if err := state.ValidateName(name); err != nil {
@@ -427,7 +428,7 @@ func (s *Session) create(ctx context.Context, name string, source Source, labels
 		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 	}
 	s.Log.Info("created", "machine", record.Machine)
-	result, err = s.provision(ctx, held, record, staged)
+	result, err = s.provision(ctx, held, record, staged, afterTools)
 	if err == nil {
 		err = s.save(record)
 	}
@@ -471,7 +472,7 @@ func (s *Session) unbound(name string) error {
 	return nil
 }
 
-func (s *Session) provision(ctx context.Context, held *state.Held, record *Record, staged transfers) (*Result, error) {
+func (s *Session) provision(ctx context.Context, held *state.Held, record *Record, staged transfers, afterTools func(context.Context, string)) (*Result, error) {
 	machine := record.Machine
 	env, err := s.forwards(record)
 	if err != nil {
@@ -494,6 +495,15 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		}
 		return s.registerClosure(ctx, machine)
 	})
+	if afterTools != nil {
+		run.Go(func(ctx context.Context) error {
+			if err := run.after(loader); err != nil {
+				return err
+			}
+			afterTools(ctx, machine)
+			return nil
+		})
+	}
 	run.Go(func(ctx context.Context) error {
 		if err := s.checkout(ctx, record); err != nil {
 			return err
@@ -1056,6 +1066,25 @@ func (s *Session) Reuse(ctx context.Context, name string, source Source) (*Resul
 	if err := s.toolsReady(ctx, record); err != nil {
 		return nil, err
 	}
+	if s.AfterTools == nil {
+		return s.refresh(ctx, held, record, source)
+	}
+	beside, stop := context.WithCancel(ctx)
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.AfterTools(beside, record.Machine)
+	}()
+	result, err := s.refresh(ctx, held, record, source)
+	if err != nil {
+		stop()
+	}
+	<-done
+	return result, err
+}
+
+func (s *Session) refresh(ctx context.Context, held *state.Held, record *Record, source Source) (*Result, error) {
 	record.Source = source
 	if err := s.checkout(ctx, record); err != nil {
 		return nil, err
