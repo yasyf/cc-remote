@@ -41,6 +41,15 @@ type operation struct {
 
 type operationKey struct{}
 
+type PhaseError struct {
+	Phase string
+	Err   error
+}
+
+func (e *PhaseError) Error() string { return e.Err.Error() }
+
+func (e *PhaseError) Unwrap() error { return e.Err }
+
 func (s *Session) begin(ctx context.Context) context.Context {
 	return context.WithValue(ctx, operationKey{}, &operation{started: s.Now()})
 }
@@ -65,7 +74,10 @@ func (s *Session) timed(ctx context.Context, lane, phase, machine string, run fu
 	op.mu.Lock()
 	defer op.mu.Unlock()
 	op.spans = append(op.spans, recorded)
-	return err
+	if err != nil {
+		return &PhaseError{Phase: phase, Err: err}
+	}
+	return nil
 }
 
 func (s *Session) summarize(ctx context.Context, workspace string, err error) {

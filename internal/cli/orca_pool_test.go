@@ -993,19 +993,19 @@ func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
 	}{
 		{
 			"a lookup the CLI cannot make", spriteFails,
-			"exit 1 and HTTP status unknown at create.preflight", `{"step":"create.preflight","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\n",
+			"exit 1 and HTTP status unknown at create.preflight", `{"step":"create.preflight","class":"exit","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\n",
 		},
 		{
 			"a lookup the API refuses", `printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n503'` + "\n",
-			"exit unknown and HTTP status 503 at create.preflight", `{"step":"create.preflight","exit":null,"httpStatus":503,"bytes":0,"sha256":""}`, "api\n",
+			"exit unknown and HTTP status 503 at create.preflight", `{"step":"create.preflight","class":"http","exit":null,"httpStatus":503,"bytes":0,"sha256":""}`, "api\n",
 		},
 		{
 			"a create the CLI rejects", `if [ "$1" = create ]; then echo 'fatal: sk-leakedsecret answered by the synthetic provider' >&2; exit 1; fi` + "\n" + absent,
-			"exit 1 and HTTP status unknown at create.command", `{"step":"create.command","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
+			"exit 1 and HTTP status unknown at create.command", `{"step":"create.command","class":"exit","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 		{
 			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
-			"exit unknown and HTTP status 500 at create.readback", `{"step":"create.readback","exit":null,"httpStatus":500,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
+			"exit unknown and HTTP status 500 at create.readback", `{"step":"create.readback","class":"http","exit":null,"httpStatus":500,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 	}
 	for _, tt := range tests {
@@ -1064,7 +1064,7 @@ func TestAFillKeepsItsReadySpareWhenTheNextCreateIsRejected(t *testing.T) {
 		t.Errorf("pool-a = %+v, want it kept ready", got)
 	}
 	failed := w.member("pool-b")
-	if failed.State != memberFailed || failed.Failure == nil || failed.Failure.Step != sprites.StepCommand || failed.Failure.Exit == nil || *failed.Failure.Exit != 1 || failed.Failure.HTTPStatus != nil {
+	if failed.State != memberFailed || failed.Failure == nil || failed.Failure.Step != string(sprites.StepCommand) || failed.Failure.Exit == nil || *failed.Failure.Exit != 1 || failed.Failure.HTTPStatus != nil {
 		t.Errorf("pool-b = %+v, want it failed at the create command with exit 1", failed)
 	}
 	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-b")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) || bytes.Contains(stored, []byte("sprites.dev")) {
@@ -1102,12 +1102,12 @@ func TestWarmFillRecordsAFailedCreateAndStops(t *testing.T) {
 	}
 	pool := openPool(w.session)
 	fill, err := pool.fill(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit unknown and HTTP status unknown") || strings.Contains(err.Error(), "sk-leakedsecret") || strings.Contains(err.Error(), "fatal") || len(fill.Created) != 0 || len(fill.Ready) != 0 {
+	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit 1 and HTTP status unknown at checkout;") || strings.Contains(err.Error(), "sk-leakedsecret") || strings.Contains(err.Error(), "fatal") || len(fill.Created) != 0 || len(fill.Ready) != 0 {
 		t.Fatalf("fill = %+v, %v; want the failed create reported as metadata", fill, err)
 	}
 	member := w.member("pool-a")
-	if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "" || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-		t.Errorf("pool-a = %+v, want it failed with error metadata and no provider create step", member)
+	if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "checkout" || member.Failure.Class != classExit || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+		t.Errorf("pool-a = %+v with failure %+v, want it failed at the checkout with exit 1 and error metadata", member, member.Failure)
 	}
 	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) {
 		t.Errorf("the pool record kept remote output: %s, %v", stored, err)
@@ -1182,10 +1182,14 @@ func TestFailureKeepsOnlyErrorMetadata(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"a command", fmt.Errorf("check: %w", &providers.CommandError{Command: "sh -c on pool-a", Result: secret}), `{"exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
-		{"plain text", errors.New("sprites api answered 502: body"), `{"exit":null,"httpStatus":null,"bytes":0,"sha256":""}`},
-		{"a rejected create", &sprites.CreateError{Step: sprites.StepCommand, Err: fmt.Errorf("sprite pool-a: whether the create allocated it is unknown: %w", &providers.CommandError{Command: "sprite create -o org --skip-console pool-a", Result: secret})}, `{"step":"create.command","exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
-		{"a refused readback", fmt.Errorf("create pool-a: %w", &sprites.CreateError{Step: sprites.StepReadback, Err: fmt.Errorf("%w for pool-a: %s", &sprites.StatusError{Status: 502}, secret.Stderr)}), `{"step":"create.readback","exit":null,"httpStatus":502,"bytes":0,"sha256":""}`},
+		{"a command", fmt.Errorf("check: %w", &providers.CommandError{Command: "sh -c on pool-a", Result: secret}), `{"class":"exit","exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"plain text", errors.New("sprites api answered 502: body"), `{"class":"other","exit":null,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a provisioning phase that exits", &workspace.PhaseError{Phase: "payload.mount", Err: fmt.Errorf("provision payload: %w", &providers.CommandError{Command: "sudo on pool-a", Result: secret})}, `{"step":"payload.mount","class":"exit","exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a phase the deadline ends", &workspace.PhaseError{Phase: "tools.install", Err: fmt.Errorf("install on pool-a with sk-secret: %w", context.DeadlineExceeded)}, `{"step":"tools.install","class":"deadline","exit":null,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a phase its caller cancels", &workspace.PhaseError{Phase: "checkout", Err: fmt.Errorf("clone on pool-a with sk-secret: %w", context.Canceled)}, `{"step":"checkout","class":"canceled","exit":null,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a rejected create", &sprites.CreateError{Step: sprites.StepCommand, Err: fmt.Errorf("sprite pool-a: whether the create allocated it is unknown: %w", &providers.CommandError{Command: "sprite create -o org --skip-console pool-a", Result: secret})}, `{"step":"create.command","class":"exit","exit":7,"httpStatus":null,"bytes":0,"sha256":""}`},
+		{"a rejected create inside its phase", &workspace.PhaseError{Phase: "machine.create", Err: &sprites.CreateError{Step: sprites.StepPreflight, Err: &sprites.StatusError{Status: 503}}}, `{"step":"create.preflight","class":"http","exit":null,"httpStatus":503,"bytes":0,"sha256":""}`},
+		{"a refused readback", fmt.Errorf("create pool-a: %w", &sprites.CreateError{Step: sprites.StepReadback, Err: fmt.Errorf("%w for pool-a: %s", &sprites.StatusError{Status: 502}, secret.Stderr)}), `{"step":"create.readback","class":"http","exit":null,"httpStatus":502,"bytes":0,"sha256":""}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

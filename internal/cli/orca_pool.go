@@ -65,12 +65,23 @@ type orcaMember struct {
 	UpdatedAt     time.Time      `json:"updatedAt"`
 }
 
+type failureClass string
+
+const (
+	classExit     failureClass = "exit"
+	classHTTP     failureClass = "http"
+	classDeadline failureClass = "deadline"
+	classCanceled failureClass = "canceled"
+	classOther    failureClass = "other"
+)
+
 type orcaFailure struct {
-	Step       sprites.CreateStep `json:"step,omitempty"`
-	Exit       *int               `json:"exit"`
-	HTTPStatus *int               `json:"httpStatus"`
-	Bytes      int                `json:"bytes"`
-	SHA256     string             `json:"sha256"`
+	Step       string       `json:"step,omitempty"`
+	Class      failureClass `json:"class"`
+	Exit       *int         `json:"exit"`
+	HTTPStatus *int         `json:"httpStatus"`
+	Bytes      int          `json:"bytes"`
+	SHA256     string       `json:"sha256"`
 }
 
 type spareFailure struct {
@@ -573,9 +584,9 @@ func (f *orcaFailure) describe() string {
 	}
 	step := ""
 	if f.Step != "" {
-		step = " at " + string(f.Step)
+		step = " at " + f.Step
 	}
-	return fmt.Sprintf("exit %s and HTTP status %s%s; its %d-byte error has SHA-256 %s", exit, status, step, f.Bytes, f.SHA256)
+	return fmt.Sprintf("exit %s and HTTP status %s%s; its %d-byte error, class %s, has SHA-256 %s", exit, status, step, f.Bytes, f.Class, f.SHA256)
 }
 
 func withheld(err error) error {
@@ -598,22 +609,38 @@ func failureOf(err error) *orcaFailure {
 	text := err.Error()
 	sum := sha256.Sum256([]byte(text))
 	failure := &orcaFailure{Bytes: len(text), SHA256: hex.EncodeToString(sum[:])}
+	var phase *workspace.PhaseError
+	if errors.As(err, &phase) {
+		failure.Step = phase.Phase
+	}
 	var create *sprites.CreateError
 	if errors.As(err, &create) {
-		failure.Step = create.Step
+		failure.Step = string(create.Step)
 	}
 	var answered *sprites.StatusError
 	if errors.As(err, &answered) {
 		failure.HTTPStatus = &answered.Status
 	}
 	var command *providers.CommandError
-	var exited *exec.ExitError
+	var exited interface{ ExitCode() int }
 	switch {
 	case errors.As(err, &command):
 		failure.Exit = &command.Result.ExitCode
 	case errors.As(err, &exited):
 		code := exited.ExitCode()
 		failure.Exit = &code
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		failure.Class = classDeadline
+	case errors.Is(err, context.Canceled):
+		failure.Class = classCanceled
+	case failure.Exit != nil:
+		failure.Class = classExit
+	case failure.HTTPStatus != nil:
+		failure.Class = classHTTP
+	default:
+		failure.Class = classOther
 	}
 	return failure
 }
@@ -637,7 +664,7 @@ recorded unused and still eligible, then exits. Each is a plain create labelled 
 key: tools, plugins, and a shallow checkout of config.ref, with no Orca runtime, task, worker, or API key. One
 fill runs per key at a time; a fill that finds another running exits at once, and the running one counts again
 before it ends. A failed create is recorded as failed and ends the fill without another attempt, and its error
-is shown only as the Sprite create step that failed, exit, HTTP status, length, and SHA-256. The fill stops at a
+is shown only as the step that failed, its class, exit, HTTP status, length, and SHA-256. The fill stops at a
 20 minute deadline. prepare --warm starts this command detached once it has claimed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

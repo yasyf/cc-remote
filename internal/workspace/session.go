@@ -260,6 +260,15 @@ func (r runner) Run(ctx context.Context, script string, stdin io.Reader) ([]byte
 	return r.session.run(ctx, r.machine, script, stdin)
 }
 
+type ExitError struct {
+	Code int
+	text string
+}
+
+func (e *ExitError) Error() string { return e.text }
+
+func (e *ExitError) ExitCode() int { return e.Code }
+
 func (s *Session) run(ctx context.Context, machine, script string, stdin io.Reader) ([]byte, error) {
 	return s.execute(ctx, machine, []string{"sh", "-c", script}, stdin)
 }
@@ -274,7 +283,7 @@ func (s *Session) execute(ctx context.Context, machine string, argv []string, st
 		return nil, err
 	}
 	if result.ExitCode != 0 {
-		return result.Stdout, fmt.Errorf("%s on %s exited %d: %s", argv[0], machine, result.ExitCode, bytes.TrimSpace(result.Stderr))
+		return result.Stdout, &ExitError{Code: result.ExitCode, text: fmt.Sprintf("%s on %s exited %d: %s", argv[0], machine, result.ExitCode, bytes.TrimSpace(result.Stderr))}
 	}
 	return result.Stdout, nil
 }
@@ -301,7 +310,7 @@ func (s *Session) capture(machine string) images.Capture {
 			return nil, err
 		}
 		if result.ExitCode != 0 {
-			return nil, fmt.Errorf("%s on %s exited %d", argv[0], machine, result.ExitCode)
+			return nil, &ExitError{Code: result.ExitCode, text: fmt.Sprintf("%s on %s exited %d", argv[0], machine, result.ExitCode)}
 		}
 		return result.Stdout, nil
 	}
