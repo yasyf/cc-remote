@@ -118,6 +118,13 @@ holds the managed server's build when the ready event reports one and is
 absent on Electron. Orca writes its reason for a fallback as a `[serve]` line
 in `$HOME/.cc-remote/orca/serve.log` on the machine.
 
+Before a Codex worker's hooks are trusted, cc-remote compares the machine's
+`~/.codex/hooks.json` with one exact set and refuses any other. The set follows
+the server in the ready event. On Electron it is Orca's eight handlers plus
+Captain Hook's five. Orca's managed server installs no agent hooks, so on a
+managed server the set is Captain Hook's five alone, and an Orca handler found
+there is refused.
+
 The worker's API key comes from the `orca.keys`
 command for its provider; the defaults read the macOS keychain items
 `cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. An optional

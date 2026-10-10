@@ -26,6 +26,7 @@ var (
 )
 
 type hookHome struct {
+	server     orca.Server
 	home       string
 	root       string
 	hooks      map[string][]any
@@ -55,6 +56,7 @@ func newProbeHome(t *testing.T) *hookHome {
 	home := t.TempDir()
 	root := home + "/.claude/plugins/cache/captain-hook/captain-hook/" + probeVersion
 	h := &hookHome{
+		server:     orca.ServerElectron,
 		home:       home,
 		root:       root,
 		hooks:      map[string][]any{},
@@ -68,6 +70,17 @@ func newProbeHome(t *testing.T) *hookHome {
 		if slices.Contains(probeCaptains, event) {
 			h.hooks[event] = append(h.hooks[event], captainGroup(root, event))
 		}
+	}
+	return h
+}
+
+func newManagedHome(t *testing.T) *hookHome {
+	t.Helper()
+	h := newProbeHome(t)
+	h.server = orca.ServerManaged
+	h.hooks = map[string][]any{}
+	for _, event := range probeCaptains {
+		h.hooks[event] = []any{captainGroup(h.root, event)}
 	}
 	return h
 }
@@ -114,7 +127,7 @@ func (h *hookHome) stage(t *testing.T) []byte {
 func (h *hookHome) run(t *testing.T) (string, []byte, orca.HookProbe, error) {
 	t.Helper()
 	hooks := h.stage(t)
-	cmd := exec.Command("python3", "-c", orca.HookProbeScript, probeCaptain, probeVersion)
+	cmd := exec.Command("python3", "-c", orca.HookProbeScript, probeCaptain, probeVersion, string(h.server))
 	cmd.Env = []string{"HOME=" + h.home, "PATH=" + os.Getenv("PATH")}
 	out, err := cmd.Output()
 	if err != nil {
@@ -125,7 +138,7 @@ func (h *hookHome) run(t *testing.T) (string, []byte, orca.HookProbe, error) {
 			t.Errorf("the probe output carries %q: %s", private, out)
 		}
 	}
-	probe, perr := orca.ParseHookProbe(out, orca.Pin{ID: probeCaptain, Version: probeVersion})
+	probe, perr := orca.ParseHookProbe(out, orca.Pin{ID: probeCaptain, Version: probeVersion}, h.server)
 	if perr != nil && strings.Contains(perr.Error(), leaked) {
 		t.Errorf("the probe diagnostic carries a credential: %v", perr)
 	}
@@ -158,6 +171,49 @@ func TestHookProbeComparesTheThirteenDefinitionsPrivately(t *testing.T) {
 	}
 	if _, _, _, err := reversed.run(t); err != nil {
 		t.Errorf("the installer order of the same definitions was refused: %v", err)
+	}
+}
+
+func TestHookProbeAcceptsOnlyCaptainHookOnAManagedServer(t *testing.T) {
+	h := newManagedHome(t)
+	_, hooks, probe, err := h.run(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(hooks)
+	if probe.Home != h.home || probe.Root != h.root || probe.Definitions != 5 || len(probe.Events) != 5 || probe.HooksSHA256 != hex.EncodeToString(sum[:]) {
+		t.Errorf("probe = %+v", probe)
+	}
+	for _, event := range probeCaptains {
+		if probe.Events[event] != 1 {
+			t.Errorf("%s multiplicity %d, want 1", event, probe.Events[event])
+		}
+	}
+	tests := []struct {
+		name string
+		home func(*testing.T) *hookHome
+		edit func(*hookHome)
+		want orca.HookRefusal
+	}{
+		{"a fresh managed-server home read as Electron", newManagedHome, func(h *hookHome) { h.server = orca.ServerElectron }, orca.HookRefusal{Reason: "missing", Event: "SessionStart", Record: 0}},
+		{"an Electron home read as a managed server", newProbeHome, func(h *hookHome) { h.server = orca.ServerManaged }, orca.HookRefusal{Reason: "unexpected-event", Record: -1}},
+		{"Orca's handler beside Captain Hook", newManagedHome, func(h *hookHome) {
+			h.hooks["SessionStart"] = []any{nativeGroup(h.home), captainGroup(h.root, "SessionStart")}
+		}, orca.HookRefusal{Reason: "mismatch", Event: "SessionStart", Record: 0}},
+		{"Orca's handler on an event of its own", newManagedHome, func(h *hookHome) { h.hooks["PermissionRequest"] = []any{nativeGroup(h.home)} }, orca.HookRefusal{Reason: "unexpected-event", Record: -1}},
+		{"missing Captain Hook definition", newManagedHome, func(h *hookHome) { delete(h.hooks, "Stop") }, orca.HookRefusal{Reason: "missing", Event: "Stop", Record: 0}},
+		{"extra definition", newManagedHome, func(h *hookHome) { h.hooks["Stop"] = append(h.hooks["Stop"], captainGroup(h.root, "Stop")) }, orca.HookRefusal{Reason: "mismatch", Event: "Stop", Record: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := tt.home(t)
+			tt.edit(h)
+			out, _, _, err := h.run(t)
+			var refusal orca.HookRefusal
+			if !errors.As(err, &refusal) || refusal != tt.want {
+				t.Fatalf("probe = %s, %v; want %+v", out, err, tt.want)
+			}
+		})
 	}
 }
 

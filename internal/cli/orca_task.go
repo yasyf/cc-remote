@@ -985,7 +985,7 @@ func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, erro
 	}
 	if task.Pregrant != nil {
 		grant, _, err := codexGrant(session, task.Machine, task.ProjectRoot)
-		return orca.GrantedCodexStartup(grant, *task.Pregrant), err
+		return orca.GrantedCodexStartup(grant, *task.Pregrant, orca.ServerOf(task.ManagedServer)), err
 	}
 	cfg := session.Config
 	inventory, err := images.Load(cfg.ScriptPath(cfg.Inventory))
@@ -994,6 +994,7 @@ func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, erro
 	}
 	return orca.CodexStartup(orca.HookReview{
 		Captain: captainPins(inventory),
+		Server:  orca.ServerOf(task.ManagedServer),
 		Exec:    machineExec(session, task.Machine, "the Codex hook probe"),
 	}), nil
 }

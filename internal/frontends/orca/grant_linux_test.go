@@ -390,7 +390,7 @@ func TestHookGrantFinalSeesTheFiveSurviveOrcasPositionalMove(t *testing.T) {
 			cmd.Env = h.env
 			return cmd.Output()
 		}}
-		if err := grant.Final(context.Background(), orca.Pregrant{Project: h.project, Hooks: fill.Hooks}); err != nil {
+		if err := grant.Final(context.Background(), orca.Pregrant{Project: h.project, Hooks: fill.Hooks}, orca.ServerElectron); err != nil {
 			t.Errorf("the five did not survive the move: %v", err)
 		}
 		moved := 0
@@ -402,6 +402,29 @@ func TestHookGrantFinalSeesTheFiveSurviveOrcasPositionalMove(t *testing.T) {
 		if moved != 5 {
 			t.Errorf("%d of the five moved keys", moved)
 		}
+	}
+}
+
+func TestHookGrantFinalOnAManagedServerKeepsTheClaimedFive(t *testing.T) {
+	h := newGrantHome(t)
+	fill, err := h.run(t, orca.GrantFill, "20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := orca.HookGrant{Captain: []orca.Pin{{ID: probeCaptain, Version: probeVersion}}, Codex: "0.159.2", Project: h.project, Exec: func(_ context.Context, argv []string) ([]byte, error) {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Env = h.env
+		return cmd.Output()
+	}}
+	prior := orca.Pregrant{Project: h.project, Hooks: fill.Hooks}
+	if err := grant.Final(context.Background(), prior, orca.ServerManaged); err != nil {
+		t.Fatalf("a managed server's untouched five were refused: %v", err)
+	}
+	h.moveForOrca(t, true)
+	h.stage(t)
+	var refusal orca.GrantRefusal
+	if err := grant.Final(context.Background(), prior, orca.ServerManaged); !errors.As(err, &refusal) || refusal.Mode != orca.GrantClaim || refusal.Reason != "unexpected-event" {
+		t.Errorf("a managed server with Orca's handlers = %v", err)
 	}
 }
 

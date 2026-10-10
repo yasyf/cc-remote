@@ -321,12 +321,13 @@ type GrantRefusal struct {
 }
 
 type GrantedHooks struct {
-	Grant HookGrant
-	Prior Pregrant
+	Grant  HookGrant
+	Prior  Pregrant
+	Server Server
 }
 
-func GrantedCodexStartup(grant HookGrant, prior Pregrant) Startup {
-	return Startup{Gates: []Gate{folderTrust}, Granted: &GrantedHooks{Grant: grant, Prior: prior}}
+func GrantedCodexStartup(grant HookGrant, prior Pregrant, server Server) Startup {
+	return Startup{Gates: []Gate{folderTrust}, Granted: &GrantedHooks{Grant: grant, Prior: prior, Server: server}}
 }
 
 func (e GrantRefusal) Error() string {
@@ -378,7 +379,10 @@ func (g HookGrant) Claim(ctx context.Context, prior Pregrant) error {
 	return nil
 }
 
-func (g HookGrant) Final(ctx context.Context, prior Pregrant) error {
+func (g HookGrant) Final(ctx context.Context, prior Pregrant, server Server) error {
+	if server == ServerManaged {
+		return g.Claim(ctx, prior)
+	}
 	result, err := g.Run(ctx, GrantFinal)
 	if err != nil {
 		return err
@@ -421,7 +425,7 @@ func ParseHookGrant(out []byte, pin Pin, mode GrantMode, project string) (HookGr
 	}
 	writable := len(captainHookEvents)
 	if mode == GrantFinal {
-		counts = multiplicity()
+		counts = ServerElectron.multiplicity()
 	}
 	if mode != GrantFill {
 		writable = 0

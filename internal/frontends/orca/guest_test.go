@@ -80,11 +80,12 @@ func TestNewGuestCarriesOnlyNonsecretMetadata(t *testing.T) {
 		name    string
 		agent   orca.Agent
 		startup orca.Startup
+		server  orca.Server
 		keys    []string
 	}{
-		{"granted codex", agent, orca.GrantedCodexStartup(grant, prior), []string{"agent", "cli", "grant", "interval", "platform", "runtimeId", "schema", "terminal", "timeout", "trusted", "version"}},
-		{"reviewed codex", agent, orca.CodexStartup(orca.HookReview{Captain: captainPins, Exec: grant.Exec}), []string{"agent", "cli", "interval", "platform", "review", "runtimeId", "schema", "terminal", "timeout", "trusted", "version"}},
-		{"claude", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, orca.ClaudeStartup, []string{"agent", "cli", "interval", "platform", "runtimeId", "schema", "terminal", "timeout", "trusted", "version"}},
+		{"granted codex", agent, orca.GrantedCodexStartup(grant, prior, orca.ServerManaged), orca.ServerManaged, []string{"agent", "cli", "grant", "interval", "platform", "runtimeId", "schema", "server", "terminal", "timeout", "trusted", "version"}},
+		{"reviewed codex", agent, orca.CodexStartup(orca.HookReview{Captain: captainPins, Server: orca.ServerElectron, Exec: grant.Exec}), orca.ServerElectron, []string{"agent", "cli", "interval", "platform", "review", "runtimeId", "schema", "server", "terminal", "timeout", "trusted", "version"}},
+		{"claude", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, orca.ClaudeStartup, "", []string{"agent", "cli", "interval", "platform", "runtimeId", "schema", "terminal", "timeout", "trusted", "version"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -111,8 +112,8 @@ func TestNewGuestCarriesOnlyNonsecretMetadata(t *testing.T) {
 			if err := decoder.Decode(&decoded); err != nil {
 				t.Fatal(err)
 			}
-			if again, _ := json.Marshal(decoded); !bytes.Equal(again, raw) {
-				t.Errorf("the descriptor does not round-trip:\n%s\n%s", again, raw)
+			if again, _ := json.Marshal(decoded); !bytes.Equal(again, raw) || decoded.Server != tt.server {
+				t.Errorf("the descriptor does not round-trip with server %q:\n%s\n%s", tt.server, again, raw)
 			}
 		})
 	}

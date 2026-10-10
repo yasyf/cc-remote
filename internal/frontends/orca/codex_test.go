@@ -31,12 +31,13 @@ const (
 )
 
 var (
-	captainPins = []orca.Pin{{ID: "captain-hook@captain-hook", Version: "12.79.15"}}
-	exactProbe  = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":13,"events":{"SessionStart":2,"UserPromptSubmit":2,"PreToolUse":2,"PermissionRequest":1,"PostToolUse":2,"SubagentStart":1,"SubagentStop":1,"Stop":2}}`
-	codexBanner = []string{"  >_ OpenAI Codex (v0.159.2)", "     ~/app", "  permissions: YOLO mode"}
-	codexReady  = append(slices.Clone(codexBanner), "  › Ask Codex anything")
-	refusalPoll = orca.Poll{Interval: time.Millisecond, Timeout: time.Second}
-	folderShown = []string{
+	captainPins  = []orca.Pin{{ID: "captain-hook@captain-hook", Version: "12.79.15"}}
+	exactProbe   = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":13,"events":{"SessionStart":2,"UserPromptSubmit":2,"PreToolUse":2,"PermissionRequest":1,"PostToolUse":2,"SubagentStart":1,"SubagentStop":1,"Stop":2}}`
+	managedProbe = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":5,"events":{"SessionStart":1,"UserPromptSubmit":1,"PreToolUse":1,"PostToolUse":1,"Stop":1}}`
+	codexBanner  = []string{"  >_ OpenAI Codex (v0.159.2)", "     ~/app", "  permissions: YOLO mode"}
+	codexReady   = append(slices.Clone(codexBanner), "  › Ask Codex anything")
+	refusalPoll  = orca.Poll{Interval: time.Millisecond, Timeout: time.Second}
+	folderShown  = []string{
 		"  Folder access",
 		"  /workspaces/monorepo",
 		"  Trust this folder? Codex can read, edit, and run files here, subject to your permission settings. Folder settings",
@@ -68,6 +69,21 @@ var acceptedRows = []browserRow{
 	{"SubagentStart", 1, 1, 0, "When a subagent is created"},
 	{"SubagentStop", 1, 1, 0, "Right before a subagent ends its turn"},
 	{"Stop", 2, 1, 1, "Right before Codex ends its turn"},
+	{"Interrupt", 0, 0, 0, "Right before an interrupted turn is aborted"},
+}
+
+var managedRows = []browserRow{
+	{"PreToolUse", 1, 0, 1, "Before a tool executes"},
+	{"PermissionRequest", 0, 0, 0, "When permission is requested"},
+	{"PostToolUse", 1, 0, 1, "After a tool executes"},
+	{"PreCompact", 0, 0, 0, "Before context compaction"},
+	{"PostCompact", 0, 0, 0, "After context compaction"},
+	{"SessionStart", 1, 0, 1, "When a new session starts"},
+	{"SessionEnd", 0, 0, 0, "Right before a session ends"},
+	{"UserPromptSubmit", 1, 0, 1, "When the user submits a prompt"},
+	{"SubagentStart", 0, 0, 0, "When a subagent is created"},
+	{"SubagentStop", 0, 0, 0, "Right before a subagent ends its turn"},
+	{"Stop", 1, 0, 1, "Right before Codex ends its turn"},
 	{"Interrupt", 0, 0, 0, "Right before an interrupted turn is aborted"},
 }
 
@@ -195,12 +211,16 @@ type probeRecorder struct {
 }
 
 func (p *probeRecorder) review(captain []orca.Pin) orca.HookReview {
-	return orca.HookReview{Captain: captain, Exec: func(_ context.Context, argv []string) ([]byte, error) {
+	return p.reviewOn(orca.ServerElectron, captain)
+}
+
+func (p *probeRecorder) reviewOn(server orca.Server, captain []orca.Pin) orca.HookReview {
+	return orca.HookReview{Captain: captain, Server: server, Exec: func(_ context.Context, argv []string) ([]byte, error) {
 		p.calls++
 		if p.fake.called(sendEnter) != p.enters || p.fake.called(sendTrust) != 0 {
 			p.t.Error("the probe ran after review input")
 		}
-		if len(argv) != 5 || argv[0] != "python3" || argv[1] != "-c" || argv[2] != orca.HookProbeScript || argv[3] != captain[0].ID || argv[4] != captain[0].Version {
+		if len(argv) != 6 || argv[0] != "python3" || argv[1] != "-c" || argv[2] != orca.HookProbeScript || argv[3] != captain[0].ID || argv[4] != captain[0].Version || argv[5] != string(server) {
 			p.t.Errorf("probe argv = %q", argv)
 		}
 		return []byte(p.out), nil
@@ -352,6 +372,45 @@ func TestCodexReviewCoversBothEdgesAndTrustsOnce(t *testing.T) {
 					t.Errorf("timings =\n%q\nwant\n%q", got, want)
 				}
 			})
+		})
+	}
+}
+
+func TestCodexReviewAcceptsTheSetOfTheServerOrcaReports(t *testing.T) {
+	refused := map[string]int{sendEnter: 0, sendTrust: 0, sendEscape: 0}
+	browsed := map[string]int{sendEnter: 1, sendTrust: 0, sendEscape: 0}
+	tests := []struct {
+		name   string
+		server orca.Server
+		rows   []browserRow
+		probe  string
+		want   string
+		sent   map[string]int
+	}{
+		{"managed server with only Captain Hook", orca.ServerManaged, managedRows, managedProbe, "", map[string]int{sendEnter: 1, sendTrust: 1, sendEscape: 1, waitIdle: 1}},
+		{"managed server with Orca's handlers in the hooks file", orca.ServerManaged, managedRows, exactProbe, "another set of definitions", refused},
+		{"managed server with Orca's handlers in the browser", orca.ServerManaged, acceptedRows, managedProbe, "PreToolUse with 2 installed, 1 active and 1 to review, not 1, 0 and 1", browsed},
+		{"Electron without Orca's handlers in the hooks file", orca.ServerElectron, acceptedRows, managedProbe, "another set of definitions", refused},
+		{"Electron without Orca's handlers in the browser", orca.ServerElectron, managedRows, exactProbe, "PreToolUse with 1 installed, 0 active and 1 to review, not 2, 1 and 1", browsed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := codexFake(t).on(readScreen, historyLost(t, promptScreen(5, "")))
+			for _, screen := range slices.Concat(reviewReads(t, tt.rows, 8, 5), trustedReads(t, trusted(tt.rows), 8, false)) {
+				fake.on(readScreen, screen)
+			}
+			probe := &probeRecorder{t: t, fake: fake, out: tt.probe}
+			steps, err := runCodex(t, fake, probe.reviewOn(tt.server, captainPins), refusalPoll)
+			switch {
+			case tt.want == "" && (err != nil || !slices.Equal(steps, []string{"hooks"})):
+				t.Fatalf("Bootstrap = %v, %v", steps, err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
+			}
+			if probe.calls != 1 {
+				t.Errorf("probes %d", probe.calls)
+			}
+			assertSent(t, fake, tt.sent)
 		})
 	}
 }
@@ -1008,7 +1067,7 @@ func TestCodexReviewStaysWithinThePollTimeout(t *testing.T) {
 }
 
 func TestParseHookProbeReturnsOnlySafeFields(t *testing.T) {
-	probe, err := orca.ParseHookProbe([]byte(exactProbe+"\n"), captainPins[0])
+	probe, err := orca.ParseHookProbe([]byte(exactProbe+"\n"), captainPins[0], orca.ServerElectron)
 	if err != nil || probe.Home != probeHome || probe.Root != probeRoot || probe.Definitions != 13 || probe.Events["Stop"] != 2 {
 		t.Fatalf("ParseHookProbe = %+v, %v", probe, err)
 	}
@@ -1026,14 +1085,14 @@ func TestParseHookProbeReturnsOnlySafeFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := orca.ParseHookProbe([]byte(tt.out), captainPins[0])
+			_, err := orca.ParseHookProbe([]byte(tt.out), captainPins[0], orca.ServerElectron)
 			if err == nil || !strings.Contains(err.Error(), tt.want) || strings.Contains(err.Error(), leaked) {
 				t.Errorf("ParseHookProbe = %v, want %q without the probe's values", err, tt.want)
 			}
 		})
 	}
 	var refusal orca.HookRefusal
-	_, err = orca.ParseHookProbe([]byte(`{"schema":1,"outcome":"refused","reason":"missing","event":"PreToolUse","record":1}`), captainPins[0])
+	_, err = orca.ParseHookProbe([]byte(`{"schema":1,"outcome":"refused","reason":"missing","event":"PreToolUse","record":1}`), captainPins[0], orca.ServerElectron)
 	if !errors.As(err, &refusal) || refusal != (orca.HookRefusal{Reason: "missing", Event: "PreToolUse", Record: 1}) {
 		t.Errorf("refusal = %+v, %v", refusal, err)
 	}

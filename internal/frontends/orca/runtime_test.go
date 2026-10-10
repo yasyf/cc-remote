@@ -32,6 +32,9 @@ func TestParseReady(t *testing.T) {
 	if ready, _, err := orca.ParseReady([]byte(managed), 7001, 7001); err != nil || ready.ManagedServer != "0.1.0+15ec2904eb00" {
 		t.Errorf("ParseReady of a managed server = %+v, %v", ready, err)
 	}
+	if on, off := orca.ServerOf("0.1.0+15ec2904eb00"), orca.ServerOf(ready.ManagedServer); on != orca.ServerManaged || off != orca.ServerElectron {
+		t.Errorf("ServerOf = %q with a managed server's build and %q without one", on, off)
+	}
 	tests := []struct {
 		name, line, want string
 	}{
