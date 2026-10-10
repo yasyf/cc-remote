@@ -427,6 +427,20 @@ func TestAFailedCreateStillLogsItsSummary(t *testing.T) {
 	}
 }
 
+func TestAFailedPhaseNamesItselfAndTheRemoteExit(t *testing.T) {
+	h := newHarness(t, false)
+	h.machine.hold(t, configures).release <- providers.Result{Stderr: []byte("the configure step refused\n"), ExitCode: 7}
+	_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+	var phase *PhaseError
+	var exited *ExitError
+	if !errors.As(err, &phase) || phase.Phase != "configure" || !errors.As(err, &exited) || exited.ExitCode() != 7 {
+		t.Fatalf("Create = %v; want the configure phase and its exit 7", err)
+	}
+	if !strings.Contains(err.Error(), "exited 7: the configure step refused") {
+		t.Errorf("Create = %q; want the remote exit's own text", err)
+	}
+}
+
 func TestTheSSHTargetResolvesWhilePublishIsInFlight(t *testing.T) {
 	tests := []struct {
 		name    string

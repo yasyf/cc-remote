@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   install a newer release in the background and ask for a restart. The
   variable is Claude Code's own switch for background updates, and a manual
   `claude update` still works. Codex workers are unchanged.
+- **A failed warm pool fill records where it failed and how.** The pool record
+  of a failed create named a step only when the Sprite create itself failed. A
+  command that failed on the machine left no exit code. A fill that died while
+  mounting the payload therefore left a length and a hash. The `step` field now
+  also names the create phase, such as `payload.mount` or `checkout`. `exit`
+  holds the exit code of the command that phase ran. A new `class` says whether
+  the error was an exit, an HTTP status, the deadline, a cancel, or something
+  else. The error's text is still never stored.
 
 ### Added
 - **`orca.keys.github` lets an Orca worker push its branch and open its PR.**

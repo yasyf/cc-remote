@@ -307,9 +307,10 @@ The task record, task lock, Orca environment, terminal title, and
 lane's. Pass `workspace` to `status`, `read`, and `collect`.
 
 A claimed workspace never returns to the pool. A failed preparation is
-recorded `failed` with its error's metadata only: the exit code when one was
-observed, the HTTP status when a provider lookup answered one, and the message's
-byte length and SHA-256, never its text. The command neither tries another workspace nor
+recorded `failed` with its error's metadata only: the step that failed, the
+error's class, the exit code when one was observed, the HTTP status when a
+provider lookup answered one, and the message's byte length and SHA-256, never
+its text. The command neither tries another workspace nor
 creates one. A command that dies leaves its workspace `claimed`.
 A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
 first worker, so `--warm` refuses a lane that already has an Orca task, already
@@ -344,7 +345,15 @@ name and the pool label, so it holds tools, plugins, and a shallow checkout of
 and reads no API key. A failed create is recorded `failed` with the same error metadata and ends the
 fill.
 
-When the Sprite create itself fails, the record's `step` names which part
+The record's `step` names where the create failed. Once the Sprite exists it
+is the create phase, such as `payload.mount`, `tools.install`, or `checkout`,
+and `exit` holds the exit code of the command that phase ran on the machine.
+`class` says what kind of error ended it: `exit` for a command that exited
+non-zero, `http` for a provider lookup that answered an unexpected status,
+`deadline` for the fill's deadline, `canceled` for a caller that stopped it, and
+`other` for anything else.
+
+When the Sprite create itself fails, `step` names which part of it
 failed. `create.validate` is the local name and spec check, `create.preflight`
 the lookup before the create, `create.command` the `sprite create` call,
 `create.readback` the lookup after it, and `create.record` the saved labels.
