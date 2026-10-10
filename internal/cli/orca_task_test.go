@@ -446,7 +446,7 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 	agent := orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", MCP: []string{`{"mcpServers":{"docs":{"command":"docs-mcp"}}}`}}
 	brief := []byte("Read every line.\n\n'quoted' \"double\" $(touch pwned) `touch pwned`\n")
 	runtime := orca.Runtime{Entry: "tools/orca/AppRun"}
-	ready := `{"type":"orca_server_ready","schemaVersion":1,"runtimeId":"rt-1","boundEndpoint":"ws://0.0.0.0:7001","advertisedEndpoint":"ws://127.0.0.1:7001","pairing":{"available":true,"url":"orca://pair?code=private"}}`
+	ready := `{"type":"orca_server_ready","schemaVersion":1,"runtimeId":"rt-1","boundEndpoint":"ws://0.0.0.0:7001","advertisedEndpoint":"ws://127.0.0.1:7001","pairing":{"available":true,"url":"orca://pair?code=private"},"health":{"buildVersion":"0.1.0+15ec2904eb00"}}`
 	envelope := func(runtimeID, result string) string {
 		return `{"ok":true,"result":` + result + `,"_meta":{"runtimeId":"` + runtimeID + `"}}`
 	}
@@ -537,7 +537,7 @@ func TestLaunchStopsAtIdleAndOnlyCreateSendsAPrompt(t *testing.T) {
 				t.Errorf("timings = %q, want %q", got, tt.timings)
 			}
 			loaded, err := loadTask(driver.state, "task-a")
-			if err != nil || loaded.RuntimeID != "rt-1" || loaded.Agent.Model != agent.Model || loaded.Agent.Effort != agent.Effort || !slices.Equal(loaded.Agent.MCP, agent.MCP) {
+			if err != nil || loaded.RuntimeID != "rt-1" || loaded.ManagedServer != "0.1.0+15ec2904eb00" || loaded.Agent.Model != agent.Model || loaded.Agent.Effort != agent.Effort || !slices.Equal(loaded.Agent.MCP, agent.MCP) {
 				t.Fatalf("stored task = %+v, %v", loaded, err)
 			}
 			dir := filepath.Join(home, ".cc-remote", "orca", "tasks", "task-a")

@@ -28,6 +28,10 @@ func TestParseReady(t *testing.T) {
 	if ready != want || pairing != pairingURL {
 		t.Errorf("ParseReady = %+v, %q", ready, pairing)
 	}
+	managed := strings.Replace(readyLine("ws://127.0.0.1:7001"), `"pairing":`, `"health":{"buildVersion":"0.1.0+15ec2904eb00","nodeVersion":"24.21.0"},"pairing":`, 1)
+	if ready, _, err := orca.ParseReady([]byte(managed), 7001, 7001); err != nil || ready.ManagedServer != "0.1.0+15ec2904eb00" {
+		t.Errorf("ParseReady of a managed server = %+v, %v", ready, err)
+	}
 	tests := []struct {
 		name, line, want string
 	}{

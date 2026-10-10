@@ -17,10 +17,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/version"
 )
 
-const (
-	GuestCLI    = "resources/bin/orca-ide"
-	guestSchema = 1
-)
+const guestSchema = 1
 
 var guestScrubbed = []string{"ORCA_PAIRING_CODE", "ORCA_REMOTE_PAIRING", "ORCA_ENVIRONMENT", "ORCA_USER_DATA_PATH"}
 

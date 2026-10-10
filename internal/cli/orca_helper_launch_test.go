@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -24,7 +23,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
 
-const guestLaunchRuntime = "tools/orca/squashfs-root/AppRun"
+const guestLaunchRuntime = "tools/orca/squashfs-root/resources/bin/orca-ide"
 
 var guestLaunchAgent = orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}
 
@@ -146,7 +145,7 @@ func TestLaunchHandsTheBootstrapToTheAdmittedGuestHelper(t *testing.T) {
 			if err := decoder.Decode(&guestDescriptor); err != nil {
 				t.Fatal(err)
 			}
-			want := orca.NewGuest(config.HelperPlatform, "rt-1", "term-1", path.Join(path.Dir(guestLaunchRuntime), orca.GuestCLI), guestLaunchAgent, orca.ClaudeStartup, false, orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute})
+			want := orca.NewGuest(config.HelperPlatform, "rt-1", "term-1", guestLaunchRuntime, guestLaunchAgent, orca.ClaudeStartup, false, orca.Poll{Interval: time.Second, Timeout: 3 * time.Minute})
 			if fmt.Sprint(guestDescriptor) != fmt.Sprint(want) || guestDescriptor.Version != "0.20.0" || guestDescriptor.CLI != "tools/orca/squashfs-root/resources/bin/orca-ide" {
 				t.Errorf("descriptor = %+v, want %+v", guestDescriptor, want)
 			}

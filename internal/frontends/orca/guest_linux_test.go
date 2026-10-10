@@ -45,7 +45,7 @@ with open(state_path, "w") as sink:
 print(replies[min(count, len(replies) - 1)])
 `
 
-const guestCLIPath = "tools/orca/squashfs-root/" + orca.GuestCLI
+const guestCLIPath = "tools/orca/squashfs-root/resources/bin/orca-ide"
 
 type guestHome struct {
 	home     string

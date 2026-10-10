@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -244,7 +243,7 @@ func (d orcaDriver) prepareHelper(ctx context.Context, session *workspace.Sessio
 }
 
 func (d orcaDriver) guestBootstrap(ctx context.Context, task *orcaTask, helper string, runtime orca.Runtime, startup orca.Startup, trusted bool, p orca.Poll) ([]string, error) {
-	descriptor, err := json.Marshal(orca.NewGuest(config.HelperPlatform, task.RuntimeID, task.Terminal, path.Join(path.Dir(runtime.Entry), orca.GuestCLI), task.Agent, startup, trusted, p))
+	descriptor, err := json.Marshal(orca.NewGuest(config.HelperPlatform, task.RuntimeID, task.Terminal, runtime.Entry, task.Agent, startup, trusted, p))
 	if err != nil {
 		return nil, err
 	}
