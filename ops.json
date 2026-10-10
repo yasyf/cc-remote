@@ -1,1 +1,1 @@
-{"v":1,"lamport":2,"session":"183608a3-d64f-4824-abd6-be8a07b5ea50","ops":[{"kind":"set_criterion_status","id":"7a251a129774c135f9784a3b6146dfaa","status":"met"}]}
+{"v":1,"lamport":3,"session":"183608a3-d64f-4824-abd6-be8a07b5ea50","ops":[{"kind":"set_criterion_status","id":"4ba291fe0ba4d3fe4635e52db997050c","status":"failed"}]}
