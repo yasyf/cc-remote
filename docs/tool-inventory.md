@@ -113,6 +113,28 @@ receives executable and content checks against its marketplace source, including
 the descriptor's version, sizes, and SHA-256 pins. Verification leaves its payload
 for first use. Captain Hook binaries retain their runtime probes.
 
+### Provision WordNet for a task that needs it
+
+A standard startup does not eagerly initialize Captain Hook's WordNet lexicon.
+Create, resume, a payload, an image build, and Captain Hook's builtin hook
+packs leave it as they find it. Captain Hook 12.92.7 still provisions it at
+session start for a custom pack that declares `wordnet:oewn:2025` under
+`resources`, and on demand the first time a custom hook reads an expanded
+phrase. A task that needs the lexicon in place before either runs Captain
+Hook's provisioner once on the machine, with the interpreter of the installed
+tool environment:
+
+```sh
+tool="$HOME/.daemonkit/tools/capt-hook/$(capt-hookd version | jq -r .build)"
+"$(dirname "$(readlink -f "$tool/bin/hook")")/python" -P -c \
+  'from captain_hook.util.model_cache import provision_resources; provision_resources(["wordnet:oewn:2025"])'
+```
+
+The version comes from the installed host, so the command follows the
+inventory's `captainHook.version` pin. It downloads a 13 MB archive, imports it
+into `~/.wn_data/wn.db`, and returns at once when that database is already
+verified.
+
 `claude.env` and service `env` values may reference `${NAME}` when `NAME` is
 declared in `configure.env`. Configuration requires exactly those declared names
 and nonempty values. The install phase reads a GitHub token from stdin for private

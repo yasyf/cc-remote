@@ -191,6 +191,10 @@ TOML table for Codex, because a path names a file on this machine. It
 refuses Fable models, which run only as an explicit local choice.
 `--service-tier` is a Codex setting on both `prepare` and `create`.
 
+Neither command initializes WordNet. The brief of a task that needs it in place
+tells the worker to
+[provision it first](tool-inventory.md#provision-wordnet-for-a-task-that-needs-it).
+
 ### Prepare the first worker on a recorded workspace
 
 `prepare --existing` starts the first worker of a workspace that
