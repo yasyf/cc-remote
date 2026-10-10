@@ -104,7 +104,7 @@ range=` + strconv.Itoa(fetchRange) + `
 config="$(cat)"
 
 fetch_ranges() {
-  local count=$(((size + range - 1) / range)) index=0 launched=0 start end status hold reader writer
+  local count=$(((size + range - 1) / range)) index=0 launched=0 start end status code hold reader writer
   local -a pids=() readers=()
   while [ "$index" -lt "$count" ]; do
     while [ "$launched" -lt "$count" ] && [ "$launched" -lt "$((index + streams))" ]; do
@@ -118,10 +118,13 @@ fetch_ranges() {
       exec {reader}< "$work/part" {writer}> "$work/part"
       exec {hold}>&-
       rm -f "$work/part"
-      curl -q --config <(printf '%s\n' "$config") --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
-        --range "$start-$end" --max-filesize "$((end - start + 1))" \
-        --write-out '%{stderr}%{http_code}' 2> "$work/http.$launched" \
-        | dd bs="$range" iflag=fullblock status=none >&"$writer" &
+      echo 1 > "$work/exit.$launched"
+      {
+        curl -q --config <(printf '%s\n' "$config") --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
+          --range "$start-$end" --max-filesize "$((end - start + 1))" \
+          --write-out '%{stderr}%{http_code}' 2> "$work/http.$launched"
+        echo "$?" > "$work/exit.$launched"
+      } | dd bs="$range" iflag=fullblock status=none >&"$writer" &
       pids+=("$!")
       readers+=("$reader")
       exec {writer}>&-
@@ -132,6 +135,10 @@ fetch_ranges() {
     cat <&"$reader" || status=$?
     exec {reader}<&-
     wait "${pids[index]}" || status=$?
+    code="$(cat "$work/exit.$index")"
+    if [ "$code" -ne 0 ]; then
+      status="$code"
+    fi
     mv -f "$work/http.$index" "$work/http"
     if [ "$status" -ne 0 ] || [ "$(cat "$work/http")" != 206 ]; then
       for ((index += 1; index < launched; index += 1)); do
