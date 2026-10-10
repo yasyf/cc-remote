@@ -127,7 +127,10 @@ fetch_ranges() {
     mv -f "$work/http.$index" "$work/http"
     rm -f "$work/part.$index"
     if [ "$status" -ne 0 ] || [ "$(cat "$work/http")" != 206 ]; then
-      kill $(jobs -pr) "${pids[@]:index+1}" 2> /dev/null
+      for ((index += 1; index < launched; index += 1)); do
+        cat "$work/part.$index" > /dev/null
+      done
+      wait
       return "$status"
     fi
     index=$((index + 1))

@@ -216,7 +216,8 @@ HTTP errors, including `403` and `404`, fail with the HTTP code; a `403` diagnos
 notes that the presigned URL may have expired. Redirects are not followed, and
 a server that answers a range with the whole file is refused. Truncation, a
 failed pipeline stage, a timeout, a size mismatch, or a digest mismatch fails
-the transfer, and one failed range stops the ranges still in flight.
+the transfer. After one failed range the script starts no more ranges and
+discards the ones still in flight.
 
 Both scripts enable `pipefail` and use `mktemp` to create a file with mode `0600`
 named `<sha256>.sqfs.<8 random chars>.partial` in the store for each invocation.
