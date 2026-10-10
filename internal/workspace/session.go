@@ -489,21 +489,19 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 		run.Go(func(ctx context.Context) error { return s.Alongside(ctx, machine) })
 	}
 	packages, tools := s.installLanes(run, machine, staged)
+	tooled := make(chan struct{})
 	loader := run.Go(func(ctx context.Context) error {
 		if err := run.after(packages, tools); err != nil {
 			return err
 		}
-		return s.registerClosure(ctx, machine)
+		if err := s.registerClosure(ctx, machine); err != nil {
+			return err
+		}
+		close(tooled)
+		return nil
 	})
-	if afterTools != nil {
-		run.Go(func(ctx context.Context) error {
-			if err := run.after(loader); err != nil {
-				return err
-			}
-			afterTools(ctx, machine)
-			return nil
-		})
-	}
+	step := beside(ctx, tooled, machine, afterTools)
+	defer step.stop()
 	run.Go(func(ctx context.Context) error {
 		if err := s.checkout(ctx, record); err != nil {
 			return err
@@ -545,7 +543,42 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if err := tail.Wait(); err != nil {
 		return nil, err
 	}
+	step.wait()
 	return s.deliverAccess(record, access)
+}
+
+type sideStep struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func beside(ctx context.Context, ready <-chan struct{}, machine string, step func(context.Context, string)) sideStep {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if step == nil {
+			return
+		}
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return
+		}
+		if ctx.Err() == nil {
+			step(ctx, machine)
+		}
+	}()
+	return sideStep{cancel: cancel, done: done}
+}
+
+func (b sideStep) wait() {
+	<-b.done
+}
+
+func (b sideStep) stop() {
+	b.cancel()
+	<-b.done
 }
 
 func (s *Session) installTools(ctx context.Context, machine string) error {
@@ -1066,22 +1099,16 @@ func (s *Session) Reuse(ctx context.Context, name string, source Source) (*Resul
 	if err := s.toolsReady(ctx, record); err != nil {
 		return nil, err
 	}
-	if s.AfterTools == nil {
-		return s.refresh(ctx, held, record, source)
-	}
-	beside, stop := context.WithCancel(ctx)
-	defer stop()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		s.AfterTools(beside, record.Machine)
-	}()
+	tooled := make(chan struct{})
+	close(tooled)
+	step := beside(ctx, tooled, record.Machine, s.AfterTools)
+	defer step.stop()
 	result, err := s.refresh(ctx, held, record, source)
 	if err != nil {
-		stop()
+		return nil, err
 	}
-	<-done
-	return result, err
+	step.wait()
+	return result, nil
 }
 
 func (s *Session) refresh(ctx context.Context, held *state.Held, record *Record, source Source) (*Result, error) {

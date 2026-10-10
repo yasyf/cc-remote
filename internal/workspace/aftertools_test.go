@@ -50,27 +50,31 @@ func releasedBeside(t *testing.T, parked *hold) func(context.Context, string) {
 	}
 }
 
-func TestCreateRunsItsAfterToolsStepOnceTheToolsAreInstalledAndBeforeItPublishes(t *testing.T) {
+func TestCreateRunsItsAfterToolsStepOnceAfterTheToolsAreInstalled(t *testing.T) {
 	h := newHarness(t, false)
 	var machines []string
-	installed, published := -1, -1
+	installed := -1
 	h.session.AfterTools = func(_ context.Context, machine string) {
 		machines = append(machines, machine)
-		installed, published = h.machine.ran("ws-1", installs), h.machine.ran("ws-1", publishes)
+		installed = h.machine.ran("ws-1", installs)
 	}
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(machines, []string{"ws-1"}) || installed != 1 || published != 0 || h.machine.ran("ws-1", publishes) != 1 {
-		t.Errorf("the after-tools step ran on %q after %d installs and %d publishes, and the create published %d times; want one run on ws-1 between the install and the one publish", machines, installed, published, h.machine.ran("ws-1", publishes))
+	if !slices.Equal(machines, []string{"ws-1"}) || installed != 1 {
+		t.Errorf("the after-tools step ran on %q after %d installs; want one run on ws-1 after the one install", machines, installed)
 	}
 }
 
-func TestCreateConfiguresWhileItsAfterToolsStepRuns(t *testing.T) {
-	h := newHarness(t, false)
-	h.session.AfterTools = releasedBeside(t, h.machine.hold(t, configures))
-	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
-		t.Fatal(err)
+func TestCreateConfiguresAndPublishesWhileItsAfterToolsStepRuns(t *testing.T) {
+	for _, fragment := range []string{configures, publishes} {
+		t.Run(fragment, func(t *testing.T) {
+			h := newHarness(t, false)
+			h.session.AfterTools = releasedBeside(t, h.machine.hold(t, fragment))
+			if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
