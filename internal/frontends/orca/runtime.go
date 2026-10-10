@@ -314,6 +314,14 @@ func (a Agent) Argv(policy ShellPolicy) []string {
 	)
 }
 
+func (a Agent) exports() []string {
+	judge := "CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind)
+	if a.Kind == AgentCodex {
+		return []string{judge}
+	}
+	return []string{judge, "DISABLE_AUTOUPDATER=1"}
+}
+
 func (a Agent) judge() Agent {
 	if a.Kind == AgentCodex {
 		return Agent{Kind: AgentClaude}
@@ -335,7 +343,7 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
 		`{ test -z "$github" || ` + githubCredentials + `; }`,
 		"unset key judge typesafe github",
-		"export CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind),
+		"export " + strings.Join(a.exports(), " "),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")
 	return "exec sh -c " + remote.Quote(script)

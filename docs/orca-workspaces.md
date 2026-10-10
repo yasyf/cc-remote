@@ -144,7 +144,8 @@ git's credential helper for `https://github.com` set to `gh auth git-credential`
 through `GIT_CONFIG_*` variables, so the worker can push its branch and open its
 pull request. Codex keeps that token in its shell tools. Every key travels only over SSH stdin into a
 one-use pipe that the worker's terminal reads and removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
-worker may start. The frontend accepts Claude and Codex folder trust prompts
+worker may start. A Claude worker starts with `DISABLE_AUTOUPDATER=1`, so its
+CLI stays at the version the machine was built with. The frontend accepts Claude and Codex folder trust prompts
 only when `orca.trust` lists the repository's owner.
 
 ```yaml
