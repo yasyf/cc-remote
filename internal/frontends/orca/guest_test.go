@@ -88,7 +88,7 @@ func TestNewGuestCarriesOnlyNonsecretMetadata(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			guest := orca.NewGuest("linux/amd64", "rt-1", "term-1", "tools/orca/squashfs-root/"+orca.GuestCLI, tt.agent, tt.startup, true, bootstrapPoll)
+			guest := orca.NewGuest("linux/amd64", "rt-1", "term-1", "tools/orca/squashfs-root/resources/bin/orca-ide", tt.agent, tt.startup, true, bootstrapPoll)
 			raw, err := json.Marshal(guest)
 			if err != nil {
 				t.Fatal(err)

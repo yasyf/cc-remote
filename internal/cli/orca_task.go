@@ -54,6 +54,7 @@ type orcaTask struct {
 	Environment   string         `json:"environment"`
 	EnvironmentID string         `json:"environmentId,omitempty"`
 	RuntimeID     string         `json:"runtimeId,omitempty"`
+	ManagedServer string         `json:"managedServer,omitempty"`
 	RepoID        string         `json:"repoId,omitempty"`
 	WorktreeID    string         `json:"worktreeId,omitempty"`
 	Agent         orca.Agent     `json:"agent"`
@@ -785,7 +786,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err != nil {
 		return err
 	}
-	task.RuntimeID = ready.RuntimeID
+	task.RuntimeID, task.ManagedServer = ready.RuntimeID, ready.ManagedServer
 	if err := d.save(task); err != nil {
 		return err
 	}
@@ -861,7 +862,7 @@ func (d orcaDriver) serve(ctx context.Context, session *workspace.Session, task 
 	if err != nil {
 		return "", err
 	}
-	task.RuntimeID = ready.RuntimeID
+	task.RuntimeID, task.ManagedServer = ready.RuntimeID, ready.ManagedServer
 	if err := d.save(task); err != nil {
 		return "", err
 	}
@@ -889,7 +890,7 @@ func (d orcaDriver) start(ctx context.Context, session *workspace.Session, task 
 	if err != nil {
 		return orca.Ready{}, "", err
 	}
-	d.log.Info("the Orca runtime is ready", "machine", task.Machine, "runtime", ready.RuntimeID, "service", task.Service)
+	d.log.Info("the Orca runtime is ready", "machine", task.Machine, "runtime", ready.RuntimeID, "managedServer", ready.ManagedServer, "service", task.Service)
 	return ready, pairing, nil
 }
 

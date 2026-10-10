@@ -21,7 +21,7 @@ const (
 	DefaultTailnetAPI      = "https://api.tailscale.com/api/v2"
 	DefaultKeychainService = "cc-remote-tailnet"
 	DefaultOrcaTool        = "orca-runtime"
-	DefaultOrcaEntry       = "squashfs-root/AppRun"
+	DefaultOrcaEntry       = "squashfs-root/resources/bin/orca-ide"
 	DefaultPoolReady       = 1
 	KeyAnthropic           = "anthropic"
 	KeyOpenAI              = "openai"

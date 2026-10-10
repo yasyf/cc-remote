@@ -108,8 +108,17 @@ cc-remote orca create task-name --config .cc-remote/config.yaml \
 ```
 
 The runtime is the inventory tool named by `orca.tool`, `orca-runtime` by
-default, and its `orca.entry`, `squashfs-root/AppRun` by default, must be
-executable on the machine. The worker's API key comes from the `orca.keys`
+default. Its `orca.entry` is that tool's `orca` CLI,
+`squashfs-root/resources/bin/orca-ide` by default, and must be executable on
+the machine. cc-remote starts the runtime as `<entry> serve`, and the guest
+bootstrap helper drives the same entry. Orca picks the server behind that
+command: from 1.4.224 on Linux it serves on its managed server and falls back
+to Electron when the machine cannot run one. The task record's `managedServer`
+holds the managed server's build when the ready event reports one and is
+absent on Electron. Orca writes its reason for a fallback as a `[serve]` line
+in `$HOME/.cc-remote/orca/serve.log` on the machine.
+
+The worker's API key comes from the `orca.keys`
 command for its provider; the defaults read the macOS keychain items
 `cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. An optional
 `orca.keys.typesafe` command, which has no default, adds a TypeSafe key that

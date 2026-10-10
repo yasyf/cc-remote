@@ -52,6 +52,7 @@ type Ready struct {
 	RuntimeID          string `json:"runtimeId"`
 	BoundEndpoint      string `json:"boundEndpoint"`
 	AdvertisedEndpoint string `json:"advertisedEndpoint"`
+	ManagedServer      string `json:"managedServer,omitempty"`
 }
 
 type Agent struct {
@@ -151,6 +152,9 @@ func ParseReady(line []byte, listen, advertise int) (Ready, string, error) {
 			Available bool   `json:"available"`
 			URL       string `json:"url"`
 		} `json:"pairing"`
+		Health struct {
+			BuildVersion string `json:"buildVersion"`
+		} `json:"health"`
 	}
 	if err := json.Unmarshal(line, &event); err != nil {
 		return Ready{}, "", fmt.Errorf("decode the Orca runtime's ready event: %w", err)
@@ -169,7 +173,7 @@ func ParseReady(line []byte, listen, advertise int) (Ready, string, error) {
 	case !event.Pairing.Available || event.Pairing.URL == "":
 		return Ready{}, "", errors.New("the Orca runtime's ready event offers no pairing")
 	}
-	return Ready{RuntimeID: event.RuntimeID, BoundEndpoint: event.BoundEndpoint, AdvertisedEndpoint: event.AdvertisedEndpoint}, event.Pairing.URL, nil
+	return Ready{RuntimeID: event.RuntimeID, BoundEndpoint: event.BoundEndpoint, AdvertisedEndpoint: event.AdvertisedEndpoint, ManagedServer: event.Health.BuildVersion}, event.Pairing.URL, nil
 }
 
 func ParseKeyDir(out []byte) (string, error) {

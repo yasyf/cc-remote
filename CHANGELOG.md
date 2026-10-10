@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`orca create` and `orca prepare` start the runtime through Orca's own CLI.**
+  `orca.entry` now names the runtime tool's `orca` CLI and defaults to
+  `squashfs-root/resources/bin/orca-ide`. The launcher runs `<entry> serve`
+  and the guest bootstrap helper drives the same entry. The old default,
+  `squashfs-root/AppRun serve`, stays inside the Electron process and never
+  asks Orca which server to use, so a machine launched that way cannot reach
+  the managed server Orca 1.4.224 added. A config that sets `orca.entry`
+  explicitly keeps its value.
+- **The task record names the managed server.** When the runtime's ready event
+  carries `health`, the record stores its build as `managedServer` and
+  `orca create`, `prepare`, and `status` print it. The field is absent when
+  Orca serves on Electron.
+
 ### Added
 - **`orca.keys.github` lets an Orca worker push its branch and open its PR.**
   When the config names a command for `github`, cc-remote runs it beside the

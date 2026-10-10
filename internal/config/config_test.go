@@ -184,7 +184,7 @@ func TestParseFillsOrcaDefaults(t *testing.T) {
 	ready := 1
 	want := Orca{
 		Tool:    "orca-runtime",
-		Entry:   "squashfs-root/AppRun",
+		Entry:   "squashfs-root/resources/bin/orca-ide",
 		Display: []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"},
 		Keys: map[string][]string{
 			"anthropic": {"/usr/bin/security", "find-generic-password", "-s", "cc-remote-anthropic-api-key", "-a", "anthropic", "-w"},
