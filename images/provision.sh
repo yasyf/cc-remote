@@ -176,7 +176,7 @@ provision_packages() {
   if [ "$mode" = resident ]; then
     deb_dir="$packages_store/$sha256"
     manifest="$deb_dir/debs.json"
-    deb_flags=(--no-download -o Dpkg::Options::=--force-unsafe-io)
+    deb_flags=(--no-download)
     admit_packages "$sha256"
     check_base "$manifest"
     jq -r '.debs[] | "\(.sha256) \(.file)"' "$manifest" > "$tmp_dir/debs"
@@ -186,7 +186,7 @@ provision_packages() {
       install -m 0644 "$deb_dir/$file" "$tmp_dir/apt-archives/$file"
       captured+=("$deb_dir/$file")
     done < "$tmp_dir/debs"
-    apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null
+    apt-get install -y -qq --no-download --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null
   else
     apt-get update -qq
     mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
