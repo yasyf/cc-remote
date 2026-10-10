@@ -140,19 +140,20 @@ func TestFetchAdmitsRangesInOrder(t *testing.T) {
 	refused := "bytes=" + strconv.Itoa(5*span) + "-" + strconv.Itoa(6*span-1)
 	tests := []struct {
 		name    string
-		slow    string
+		held    string
 		refuse  string
 		wantErr string
 	}{
 		{name: "every range is admitted in order"},
-		{name: "a first range that arrives last is still admitted first", slow: "bytes=0-" + strconv.Itoa(span-1)},
+		{name: "a first range that arrives after a later one is still admitted first", held: "bytes=0-" + strconv.Itoa(span-1)},
 		{name: "one refused range refuses the download", refuse: refused, wantErr: " download failed (curl exit 22, HTTP 403, tee exit 0, openssl exit 0); a 403 usually means the presigned URL expired"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var asked []string
-			open, most := 0, 0
+			var served sync.Once
+			open, most, later := 0, 0, make(chan struct{})
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				asks := r.Header.Get("Range")
 				mu.Lock()
@@ -171,8 +172,14 @@ func TestFetchAdmitsRangesInOrder(t *testing.T) {
 				case tt.refuse:
 					http.Error(w, "AccessDenied", http.StatusForbidden)
 					return
-				case tt.slow:
-					time.Sleep(300 * time.Millisecond)
+				case tt.held:
+					select {
+					case <-later:
+					case <-time.After(10 * time.Second):
+						t.Errorf("no later range was served while the first was held")
+					}
+				default:
+					defer served.Do(func() { close(later) })
 				}
 				serveRanges(payload)(w, r)
 			}))
@@ -189,8 +196,11 @@ func TestFetchAdmitsRangesInOrder(t *testing.T) {
 			cmd.Stdin = bytes.NewReader(PayloadURL{raw: server.URL + "/tools.sqfs"}.curlConfig())
 			cmd.Env = append(os.Environ(), "CURL_CA_BUNDLE="+bundle)
 			out, err := cmd.CombinedOutput()
-			if most > fetchStreams {
-				t.Errorf("%d ranges were open at once, want at most %d", most, fetchStreams)
+			mu.Lock()
+			requested, overlap := slices.Clone(asked), most
+			mu.Unlock()
+			if overlap > fetchStreams {
+				t.Errorf("%d ranges were open at once, want at most %d", overlap, fetchStreams)
 			}
 			admitted := filepath.Join(store, sha+".sqfs.admitted")
 			assertOnlyTheStaleDownloadRemains(t, store, stale)
@@ -213,10 +223,10 @@ func TestFetchAdmitsRangesInOrder(t *testing.T) {
 			for start := 0; start < size; start += span {
 				want = append(want, "bytes="+strconv.Itoa(start)+"-"+strconv.Itoa(min(start+span, size)-1))
 			}
-			slices.Sort(asked)
+			slices.Sort(requested)
 			slices.Sort(want)
-			if !slices.Equal(asked, want) {
-				t.Errorf("the server was asked for %q, want each range once: %q", asked, want)
+			if !slices.Equal(requested, want) {
+				t.Errorf("the server was asked for %q, want each range once: %q", requested, want)
 			}
 		})
 	}
