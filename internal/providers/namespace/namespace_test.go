@@ -117,14 +117,18 @@ func TestCreateOwnsOnlyTheNewMountWithOneNonRecursiveChown(t *testing.T) {
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
 	}
-	want := [][]string{
-		{"ssh", "--container_name", "agent", "-T", "inst1", "id -u"},
-		{"ssh", "--container_name", "agent", "-T", "inst1", "id -g"},
-		{"ssh", "-T", "inst1", "chown 1000:1000 /volumes/volume0"},
-		{"ssh", "--container_name", "agent", "-T", "inst1", "test -w /workspaces"},
+	want := []command{
+		{"inst1", "agent", "id -u"},
+		{"inst1", "agent", "id -g"},
+		{"inst1", "", "chown 1000:1000 /volumes/volume0"},
+		{"inst1", "agent", "test -w /workspaces"},
 	}
-	if got := fake.Shells(); !slices.EqualFunc(got, want, slices.Equal) {
-		t.Errorf("nsc commands =\n%q\nwant\n%q", got, want)
+	if got := fake.Commands(); !slices.Equal(got, want) {
+		t.Errorf("ssh commands =\n%q\nwant\n%q", got, want)
+	}
+	asked := []sshRequest{{"inst1", "agent"}, {"inst1", "agent"}, {"inst1", ""}, {"inst1", "agent"}}
+	if got := fake.Configured(); !slices.Equal(got, asked) {
+		t.Errorf("ssh configs asked for = %q, want one per command with the host one naming no container: %q", got, asked)
 	}
 	ctx := t.Context()
 	if _, err := p.Get(ctx, "inst1"); err != nil {
@@ -145,8 +149,8 @@ func TestCreateOwnsOnlyTheNewMountWithOneNonRecursiveChown(t *testing.T) {
 	if _, err := p.Extend(ctx, "inst1", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if got := fake.Shells(); len(got) != len(want) {
-		t.Errorf("lifecycle calls after create ran nsc %q, want no further ownership change", got[len(want):])
+	if got := fake.Commands(); len(got) != len(want) {
+		t.Errorf("lifecycle calls after create ran ssh %q, want no further ownership change", got[len(want):])
 	}
 }
 
@@ -222,8 +226,8 @@ func TestCreateKeepsAKnownIDWhenInitializationFails(t *testing.T) {
 				t.Errorf("calls = %q; a failed initialization destroyed the instance", fake.Calls())
 			}
 			host := 0
-			for _, shell := range fake.Shells() {
-				if shell[1] == "-T" {
+			for _, ran := range fake.Commands() {
+				if ran.container == "" {
 					host++
 				}
 			}
@@ -519,7 +523,7 @@ func TestNativeContainerSSHDoesNotEvaluateShellExpressions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := p.Runner.Run(t.Context(), p.containerScript(saved.Instance, tt.script, nil))
+			result, err := p.ssh(t.Context(), saved.Instance, saved.Instance.Container, tt.script, nil)
 			if !errors.Is(err, tt.err) || string(result.Stdout) != tt.stdout || len(result.Stderr) != 0 || result.ExitCode != 0 {
 				t.Errorf("native ssh = %q, %q, exit %d, %v; want %q, empty stderr, exit 0, %v", result.Stdout, result.Stderr, result.ExitCode, err, tt.stdout, tt.err)
 			}
@@ -542,14 +546,14 @@ func TestExecRunsTheFramedCommandThroughTheNativeContainerSSH(t *testing.T) {
 	nonceArg := regexp.MustCompile(`[0-9a-f]{64}`)
 	nonces := make([]string, 0, len(fake.Shells())-before)
 	for _, got := range fake.Shells()[before:] {
-		nonce := nonceArg.FindString(got[len(got)-1])
+		nonce := nonceArg.FindString(got.script)
 		if nonce == "" {
-			t.Fatalf("nsc argv = %q, want the framed wrapper", got)
+			t.Fatalf("ssh argv = %q, want the framed wrapper", got.argv)
 		}
 		script := "LC_ALL=C " + providers.ShellQuote("python3", "-I", "-S", "-c", frameWrapper, nonce) + ` "${LC_ALL+=$LC_ALL}" sh -c 'cat; exit 4'`
-		want := []string{"ssh", "--container_name", "agent", "-T", "inst1", providers.ShellQuote("sh", "-c", script)}
-		if !slices.Equal(got, want) {
-			t.Errorf("nsc argv = %q, want %q", got, want)
+		want := sshArgv(filepath.Dir(sshIdentity(got.argv)), "ssh.compute.test", "2222", "ns-compute", "inst1", providers.ShellQuote("sh", "-c", script))
+		if got.instance != "inst1" || got.container != "agent" || !slices.Equal(got.argv, want) {
+			t.Errorf("ssh into %s container %q with argv %q, want inst1's agent with %q", got.instance, got.container, got.argv, want)
 		}
 		nonces = append(nonces, nonce)
 	}
@@ -560,9 +564,13 @@ func TestExecRunsTheFramedCommandThroughTheNativeContainerSSH(t *testing.T) {
 	if _, err := p.Exec(t.Context(), "inst1", []string{"true"}, nil); !errors.Is(err, providers.ErrNotFound) {
 		t.Errorf("Exec on a destroyed instance = %v, want ErrNotFound", err)
 	}
+	fake.sshConfigErr = status.Error(codes.FailedPrecondition, "instance inst1 failed to start or was destroyed")
+	if _, err := p.Exec(t.Context(), "inst1", []string{"true"}, nil); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("Exec on a destroyed instance that answers no ssh config = %v, want ErrNotFound", err)
+	}
 }
 
-func TestExecKeepsTheRemoteStatusTheNativeSSHCollapses(t *testing.T) {
+func TestExecKeepsTheRemoteStatusInItsFrame(t *testing.T) {
 	p, _, _ := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
@@ -571,9 +579,9 @@ func TestExecKeepsTheRemoteStatusTheNativeSSHCollapses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	native, err := p.Runner.Run(t.Context(), p.container(saved.Instance, []string{"sh", "-c", "exit 7"}, nil))
-	if err != nil || native.ExitCode != 1 || !strings.Contains(string(native.Stderr), "exit code 7") {
-		t.Fatalf("unframed native ssh = exit %d, %q, %v; want the native collapse to exit 1", native.ExitCode, native.Stderr, err)
+	native, err := p.ssh(t.Context(), saved.Instance, saved.Instance.Container, providers.ShellQuote("sh", "-c", "exit 7"), nil)
+	if err != nil || native.ExitCode != 7 || len(native.Stderr) != 0 {
+		t.Fatalf("unframed native ssh = exit %d, %q, %v; want the remote exit 7 as the client's own", native.ExitCode, native.Stderr, err)
 	}
 	tests := []struct {
 		script string
@@ -634,8 +642,7 @@ func TestTheWrapperGivesTheCommandItsOriginalEnvironment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := slices.Concat(unrelated, tt.locale)
-			command := (&Provider{}).container(providers.ComputeInstance{}, []string{"sh", "-c", framed(nonce, child)}, nil)
-			argv, err := nativeArgv(t.Context(), command.Args[len(command.Args)-1])
+			argv, err := nativeArgv(t.Context(), providers.ShellQuote("sh", "-c", framed(nonce, child)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -766,7 +773,7 @@ func TestExecAcceptsOnlyThisCallsCompleteFraming(t *testing.T) {
 			p.Runner = runnerFunc(func(_ context.Context, cmd providers.Command) (providers.Result, error) {
 				raw, err := hex.DecodeString(nonceArg.FindString(cmd.Args[len(cmd.Args)-1]))
 				if err != nil || len(raw) != 32 {
-					t.Fatalf("nsc argv %q carries no call nonce", cmd.Args)
+					t.Fatalf("ssh argv %q carries no call nonce", cmd.Args)
 				}
 				return providers.Result{Stdout: []byte(tt.stream(string(raw)))}, tt.err
 			})
@@ -901,34 +908,215 @@ func TestARecordThatVanishesAfterEnumerationIsSkipped(t *testing.T) {
 	}
 }
 
-func TestNativeCommandsUseTheSavedEndpointAndNoInheritedDiagnostics(t *testing.T) {
-	t.Setenv("NSC_ENDPOINT", "https://ambient.compute.test")
-	t.Setenv("NSC_GRPC_DEBUG_RESPONSES", "1")
+func TestNativeCommandsAskTheSavedEndpointForAFreshSSHConfig(t *testing.T) {
 	p, fake, _ := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
 	}
 	p.Endpoint = "https://changed.compute.test"
-	result, err := p.Exec(t.Context(), "inst1", []string{"sh", "-c", `printf '%s|%s|%s|%s' "$NSC_ENDPOINT" "$NS_GRPC_DEBUG" "$NSC_GRPC_DEBUG_REQUESTS" "$NSC_GRPC_DEBUG_RESPONSES"`}, nil)
-	if want := testEndpoint + "|0|0|0"; err != nil || string(result.Stdout) != want {
-		t.Errorf("Exec saw %q, %v; want %q", result.Stdout, err, want)
+	dialed := len(fake.Dials())
+	result, err := p.Exec(t.Context(), "inst1", []string{"printf", "ran"}, nil)
+	if err != nil || string(result.Stdout) != "ran" {
+		t.Errorf("Exec = %q, %v; want \"ran\"", result.Stdout, err)
 	}
-	want := []string{"NS_GRPC_DEBUG=0", "NSC_GRPC_DEBUG_REQUESTS=0", "NSC_GRPC_DEBUG_RESPONSES=0", "NSC_ENDPOINT=" + testEndpoint}
-	shells, envs := fake.Shells(), fake.Envs()
+	if got := fake.Dials()[dialed:]; !slices.Equal(got, []string{testEndpoint}) {
+		t.Errorf("Exec dialed %q, want only the instance's recorded endpoint %q", got, testEndpoint)
+	}
+	shells := fake.Shells()
 	hosts := 0
-	for i, shell := range shells {
-		if shell[1] == "-T" {
+	identities := map[string]bool{}
+	for _, ran := range shells {
+		if ran.container == "" {
 			hosts++
 		}
-		if !slices.Equal(envs[i], want) {
-			t.Errorf("nsc %q ran with env %q, want %q", shell, envs[i], want)
+		if len(ran.env) != 0 {
+			t.Errorf("ssh %q ran with env %q, want none", ran.argv, ran.env)
 		}
+		identities[ran.argv[4]] = true
 	}
-	if len(shells) != 5 || hosts != 1 {
-		t.Errorf("nsc commands = %q, want ownership setup with its one host chown and the one Exec", shells)
+	if len(shells) != 5 || hosts != 1 || len(identities) != 5 {
+		t.Errorf("ssh commands = %q, want ownership setup with its one host chown and the one Exec, each with its own key file", fake.Commands())
 	}
-	if got := os.Getenv("NSC_ENDPOINT"); got != "https://ambient.compute.test" {
-		t.Errorf("the controller's NSC_ENDPOINT changed to %q", got)
+	want := []sshRequest{{"inst1", "agent"}, {"inst1", "agent"}, {"inst1", ""}, {"inst1", "agent"}, {"inst1", "agent"}}
+	if got := fake.Configured(); !slices.Equal(got, want) {
+		t.Errorf("ssh configs asked for = %q, want an uncached one per command: %q", got, want)
+	}
+}
+
+func TestNativeSSHRunsOpenSSHWithTheInstancesConfig(t *testing.T) {
+	const (
+		privateKey = "\x00the instance's private key\xff\n"
+		rsaHostKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCcLXJlbW90ZS1uYW1lc3BhY2U="
+	)
+	killed := errors.New("ssh: signal: killed")
+	tests := []struct {
+		name      string
+		tmp       string
+		container string
+		endpoint  string
+		hostKeys  []string
+		host      string
+		port      string
+		known     string
+		ran       providers.Result
+		err       error
+	}{
+		{"the container on a bare host", "", "agent", "ssh.compute.test", []string{testHostKey}, "ssh.compute.test", "22", "inst1 " + testHostKey + "\n", providers.Result{Stdout: []byte("out")}, nil},
+		{"the host on its own port", "", "", "ssh.compute.test:2222", []string{"\n " + testHostKey + " \n", rsaHostKey + "\n"}, "ssh.compute.test", "2222", "inst1 " + testHostKey + "\ninst1 " + rsaHostKey + "\n", providers.Result{Stderr: []byte("Permission denied (publickey).\n"), ExitCode: 255}, nil},
+		{"a port with a leading zero", "", "agent", "203.0.113.7:022", []string{testHostKey}, "203.0.113.7", "22", "inst1 " + testHostKey + "\n", providers.Result{}, nil},
+		{"a temporary directory with a space", "ssh keys", "agent", "ssh.compute.test:2222", []string{testHostKey}, "ssh.compute.test", "2222", "inst1 " + testHostKey + "\n", providers.Result{}, nil},
+		{"a run that fails", "", "agent", "ssh.compute.test:2222", []string{testHostKey}, "ssh.compute.test", "2222", "inst1 " + testHostKey + "\n", providers.Result{Stdout: []byte("partial")}, killed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := filepath.Join(t.TempDir(), tt.tmp)
+			if err := os.MkdirAll(tmp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", tmp)
+			p, fake, _ := newProvider(t)
+			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := p.load("inst1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.sshConfig = func(config *computev1beta.GetSSHConfigResponse) {
+				config.SshPrivateKey = []byte(privateKey)
+				config.Username = "ns-agent"
+				config.Endpoint = tt.endpoint
+				config.SshHostKeys = nil
+				for _, key := range tt.hostKeys {
+					config.SshHostKeys = append(config.SshHostKeys, []byte(key))
+				}
+			}
+			read := func(path string) string {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(raw)
+			}
+			mode := func(path string) os.FileMode {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return info.Mode().Perm()
+			}
+			var ran []providers.Command
+			var dir, key, known string
+			var dirMode, keyMode os.FileMode
+			p.Runner = runnerFunc(func(_ context.Context, cmd providers.Command) (providers.Result, error) {
+				ran = append(ran, cmd)
+				if len(cmd.Args) != sshArgc {
+					t.Fatalf("ssh argv = %q, want %d arguments", cmd.Args, sshArgc)
+				}
+				identity := sshIdentity(cmd.Args)
+				dir = filepath.Dir(identity)
+				key, known = read(identity), read(filepath.Join(dir, "known_hosts"))
+				dirMode, keyMode = mode(dir), mode(identity)
+				return tt.ran, tt.err
+			})
+			stdin := strings.NewReader("in")
+			result, err := p.ssh(t.Context(), saved.Instance, tt.container, "printf ran", stdin)
+			if !errors.Is(err, tt.err) || string(result.Stdout) != string(tt.ran.Stdout) || string(result.Stderr) != string(tt.ran.Stderr) || result.ExitCode != tt.ran.ExitCode {
+				t.Errorf("ssh = %q, %q, exit %d, %v; want the runner's own %q, %q, exit %d, %v", result.Stdout, result.Stderr, result.ExitCode, err, tt.ran.Stdout, tt.ran.Stderr, tt.ran.ExitCode, tt.err)
+			}
+			if len(ran) != 1 {
+				t.Fatalf("the runner ran %d commands, want one", len(ran))
+			}
+			if want := sshArgv(dir, tt.host, tt.port, "ns-agent", "inst1", "printf ran"); ran[0].Name != "ssh" || !slices.Equal(ran[0].Args, want) || len(ran[0].Env) != 0 || ran[0].Stdin != stdin || ran[0].Stdout != nil {
+				t.Errorf("ran %s %q with env %q; want ssh %q with no env and the caller's stdin", ran[0].Name, ran[0].Args, ran[0].Env, want)
+			}
+			if filepath.Dir(dir) != tmp || dirMode != 0o700 {
+				t.Errorf("the key directory %s has mode %o, want a private one directly under %s", dir, dirMode, tmp)
+			}
+			if key != privateKey || keyMode != 0o600 {
+				t.Errorf("the key file holds %q with mode %o, want %q with mode 600", key, keyMode, privateKey)
+			}
+			if known != tt.known {
+				t.Errorf("known_hosts = %q, want %q", known, tt.known)
+			}
+			if got := fake.Configured(); len(got) != 5 || got[4] != (sshRequest{"inst1", tt.container}) {
+				t.Errorf("ssh configs asked for = %q, want the fifth for inst1 and container %q", got, tt.container)
+			}
+			if left, err := os.ReadDir(tmp); err != nil || len(left) != 0 {
+				t.Errorf("after the run the temporary directory holds %v, %v; want the key directory removed", left, err)
+			}
+		})
+	}
+}
+
+func TestNativeSSHRefusesAnIncompleteConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		strip func(*computev1beta.GetSSHConfigResponse)
+		want  string
+	}{
+		{"no private key", func(config *computev1beta.GetSSHConfigResponse) { config.SshPrivateKey = nil }, "the ssh config of namespace instance inst1 carries no private key"},
+		{"no username", func(config *computev1beta.GetSSHConfigResponse) { config.Username = "" }, "the ssh config of namespace instance inst1 carries no username"},
+		{"no endpoint", func(config *computev1beta.GetSSHConfigResponse) { config.Endpoint = "" }, "the ssh config of namespace instance inst1 carries no endpoint"},
+		{"no host keys", func(config *computev1beta.GetSSHConfigResponse) { config.SshHostKeys = nil }, "the ssh config of namespace instance inst1 carries no host keys"},
+		{"a port that is no number", func(config *computev1beta.GetSSHConfigResponse) { config.Endpoint = "ssh.compute.test:ssh" }, `the ssh endpoint "ssh.compute.test:ssh" of namespace instance inst1: strconv.Atoi: parsing "ssh": invalid syntax`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("TMPDIR", tmp)
+			p, fake, _ := newProvider(t)
+			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := p.load("inst1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.sshConfig = tt.strip
+			p.Runner = runnerFunc(func(_ context.Context, cmd providers.Command) (providers.Result, error) {
+				t.Errorf("ran %s %q on a refused ssh config", cmd.Name, cmd.Args)
+				return providers.Result{}, nil
+			})
+			result, err := p.ssh(t.Context(), saved.Instance, saved.Instance.Container, "true", nil)
+			if err == nil || err.Error() != tt.want {
+				t.Errorf("ssh = %v, want %q", err, tt.want)
+			}
+			if len(result.Stdout) != 0 || len(result.Stderr) != 0 || result.ExitCode != 0 {
+				t.Errorf("ssh = %q, %q, exit %d; want no result", result.Stdout, result.Stderr, result.ExitCode)
+			}
+			if left, err := os.ReadDir(tmp); err != nil || len(left) != 0 {
+				t.Errorf("after the refusal the temporary directory holds %v, %v; want nothing written", left, err)
+			}
+		})
+	}
+}
+
+func TestExecSurfacesAFailedSSHConfigCall(t *testing.T) {
+	p, fake, _ := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	denied := status.Error(codes.PermissionDenied, "this token opens no ssh session")
+	fake.sshConfigErr = denied
+	p.Runner = runnerFunc(func(_ context.Context, cmd providers.Command) (providers.Result, error) {
+		t.Errorf("ran %s %q without an ssh config", cmd.Name, cmd.Args)
+		return providers.Result{}, nil
+	})
+	before := fake.Calls()
+	result, err := p.Exec(t.Context(), "inst1", []string{"true"}, nil)
+	want := "running a command on namespace instance inst1: the ssh config of namespace instance inst1: rpc error: code = PermissionDenied desc = this token opens no ssh session"
+	if !errors.Is(err, denied) || status.Code(err) != codes.PermissionDenied || err.Error() != want {
+		t.Errorf("Exec = %v, want the wrapped call failure %q", err, want)
+	}
+	if len(result.Stdout) != 0 || len(result.Stderr) != 0 || result.ExitCode != 0 {
+		t.Errorf("Exec = %q, %q, exit %d; want no result", result.Stdout, result.Stderr, result.ExitCode)
+	}
+	if got, want := fake.Calls(), append(before, "describe inst1"); !slices.Equal(got, want) {
+		t.Errorf("calls = %q, want %q", got, want)
+	}
+	if got := fake.Configured(); len(got) != 5 || got[4] != (sshRequest{"inst1", "agent"}) {
+		t.Errorf("ssh configs asked for = %q, want the one failed call for inst1's agent", got)
 	}
 }
 
@@ -965,7 +1153,7 @@ func TestCreateHandsTheAllocatedInstanceToItsKeeperBeforeReadiness(t *testing.T)
 		t.Errorf("handed %+v, compute %+v; want the exact allocated instance and its short returned deadline, not yet ready", got.machine, got.machine.Compute)
 	}
 	if !got.recorded || !slices.Equal(got.calls, []string{"create"}) || got.shells != 0 || !got.at.Before(deadline) {
-		t.Errorf("handed after calls %q and %d nsc commands at %v; want it recorded, before WaitInstanceSync and ownership, and before %v", got.calls, got.shells, got.at, deadline)
+		t.Errorf("handed after calls %q and %d ssh commands at %v; want it recorded, before WaitInstanceSync and ownership, and before %v", got.calls, got.shells, got.at, deadline)
 	}
 	if !clock.Now().After(deadline) {
 		t.Errorf("readiness and ownership finished at %v, inside the %v deadline the case must outlast", clock.Now(), deadline)
@@ -987,8 +1175,8 @@ func TestCreateKeepsTheInstanceWhenItsKeeperCannotStart(t *testing.T) {
 	if saved, err := p.load("inst1"); err != nil || saved == nil {
 		t.Errorf("record = %+v, %v; want the known instance kept", saved, err)
 	}
-	if got := fake.Calls(); !slices.Equal(got, []string{"create"}) || len(fake.Shells()) != 0 {
-		t.Errorf("calls = %q and nsc %q; want no readiness, ownership, or destroy after the keeper failed", got, fake.Shells())
+	if got := fake.Calls(); !slices.Equal(got, []string{"create"}) || len(fake.Commands()) != 0 {
+		t.Errorf("calls = %q and ssh %q; want no readiness, ownership, or destroy after the keeper failed", got, fake.Commands())
 	}
 }
 
@@ -1007,9 +1195,9 @@ func TestOwnershipInitializationIsBoundedByReadyTimeout(t *testing.T) {
 	if machine.ID != "inst1" {
 		t.Errorf("machine = %+v, want the known instance", machine)
 	}
-	for _, shell := range fake.Shells() {
-		if shell[1] == "-T" {
-			t.Errorf("the host chown ran after the uid probe stalled: %q", shell)
+	for _, ran := range fake.Commands() {
+		if ran.container == "" {
+			t.Errorf("the host chown ran after the uid probe stalled: %q", ran)
 		}
 	}
 	if saved, err := p.load("inst1"); err != nil || saved == nil {

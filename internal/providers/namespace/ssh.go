@@ -2,12 +2,18 @@ package namespace
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"slices"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+
+	computev1beta "namespacelabs.dev/integrations/proto/namespace/cloud/compute/v1beta"
 
 	"github.com/yasyf/cc-remote/internal/providers"
 )
@@ -19,6 +25,13 @@ const (
 	recordStdout = 1
 	recordStderr = 2
 	recordStatus = 3
+)
+
+const (
+	sshClient             = "ssh"
+	sshDefaultPort        = 22
+	connectTimeoutSeconds = 10
+	connectionAttempts    = 6
 )
 
 const frameWrapper = `import os, selectors, struct, subprocess, sys
@@ -55,28 +68,86 @@ emit(struct.pack(">BIi", 3, 4, code if code >= 0 else -1))
 
 var errFraming = errors.New("the native command stream is not this call's complete framing")
 
-var quietNative = []string{"NS_GRPC_DEBUG=0", "NSC_GRPC_DEBUG_REQUESTS=0", "NSC_GRPC_DEBUG_RESPONSES=0"}
-
-func (p *Provider) container(compute providers.ComputeInstance, cmd []string, stdin io.Reader) providers.Command {
-	return p.containerScript(compute, providers.ShellQuote(cmd...), stdin)
+func (p *Provider) ssh(ctx context.Context, compute providers.ComputeInstance, container, script string, stdin io.Reader) (result providers.Result, err error) {
+	config, err := p.sshConfig(ctx, compute, container)
+	if err != nil {
+		return providers.Result{}, err
+	}
+	host, port, err := hostPort(config.GetEndpoint())
+	if err != nil {
+		return providers.Result{}, fmt.Errorf("the ssh endpoint %q of namespace instance %s: %w", config.GetEndpoint(), compute.InstanceID, err)
+	}
+	dir, err := os.MkdirTemp("", "cc-remote-namespace-ssh-")
+	if err != nil {
+		return providers.Result{}, err
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(dir)) }()
+	target := providers.Target{
+		Host:          host,
+		Port:          port,
+		User:          config.GetUsername(),
+		IdentityFile:  filepath.Join(dir, "key"),
+		HostKeyPolicy: providers.HostKeyPolicy{Mode: providers.HostKeyPinned, Alias: compute.InstanceID, KnownHostsFile: filepath.Join(dir, "known_hosts")},
+	}
+	if err = os.WriteFile(target.IdentityFile, config.GetSshPrivateKey(), 0o600); err != nil {
+		return providers.Result{}, err
+	}
+	if err = os.WriteFile(target.HostKeyPolicy.KnownHostsFile, knownHosts(target.HostKeyPolicy.Alias, config.GetSshHostKeys()), 0o600); err != nil {
+		return providers.Result{}, err
+	}
+	args := []string{"-F", "none", "-T"}
+	for _, option := range append(target.SSHOptions(),
+		"IdentityAgent=none",
+		"BatchMode=yes",
+		"GlobalKnownHostsFile=/dev/null",
+		"LogLevel=ERROR",
+		"ConnectTimeout="+strconv.Itoa(connectTimeoutSeconds),
+		"ConnectionAttempts="+strconv.Itoa(connectionAttempts),
+	) {
+		args = append(args, "-o", option)
+	}
+	return p.Runner.Run(ctx, providers.Command{Name: sshClient, Args: append(args, "--", compute.InstanceID, script), Stdin: stdin})
 }
 
-func (p *Provider) containerScript(compute providers.ComputeInstance, script string, stdin io.Reader) providers.Command {
-	return providers.Command{
-		Name:  p.CLI,
-		Args:  []string{"ssh", "--container_name", compute.Container, "-T", compute.InstanceID, script},
-		Env:   slices.Concat(quietNative, []string{"NSC_ENDPOINT=" + compute.Endpoint}),
-		Stdin: stdin,
+func (p *Provider) sshConfig(ctx context.Context, compute providers.ComputeInstance, container string) (*computev1beta.GetSSHConfigResponse, error) {
+	var config *computev1beta.GetSSHConfigResponse
+	if err := p.call(ctx, compute.Endpoint, func(ctx context.Context, client computev1beta.ComputeServiceClient) (err error) {
+		config, err = client.GetSSHConfig(ctx, &computev1beta.GetSSHConfigRequest{InstanceId: compute.InstanceID, TargetContainer: container})
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("the ssh config of namespace instance %s: %w", compute.InstanceID, err)
 	}
+	var missing string
+	switch {
+	case len(config.GetSshPrivateKey()) == 0:
+		missing = "private key"
+	case config.GetUsername() == "":
+		missing = "username"
+	case config.GetEndpoint() == "":
+		missing = "endpoint"
+	case len(config.GetSshHostKeys()) == 0:
+		missing = "host keys"
+	default:
+		return config, nil
+	}
+	return nil, fmt.Errorf("the ssh config of namespace instance %s carries no %s", compute.InstanceID, missing)
 }
 
-func (p *Provider) host(compute providers.ComputeInstance, cmd []string, stdin io.Reader) providers.Command {
-	return providers.Command{
-		Name:  p.CLI,
-		Args:  []string{"ssh", "-T", compute.InstanceID, providers.ShellQuote(cmd...)},
-		Env:   slices.Concat(quietNative, []string{"NSC_ENDPOINT=" + compute.Endpoint}),
-		Stdin: stdin,
+func hostPort(endpoint string) (string, int, error) {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return endpoint, sshDefaultPort, nil
 	}
+	number, err := strconv.Atoi(port)
+	return host, number, err
+}
+
+func knownHosts(alias string, keys [][]byte) []byte {
+	var lines []byte
+	for _, key := range keys {
+		lines = fmt.Appendf(lines, "%s %s\n", alias, bytes.TrimSpace(key))
+	}
+	return lines
 }
 
 func framed(nonce []byte, cmd []string) string {
