@@ -932,7 +932,7 @@ func TestNativeCommandsAskTheSavedEndpointForAFreshSSHConfig(t *testing.T) {
 		if len(ran.env) != 0 {
 			t.Errorf("ssh %q ran with env %q, want none", ran.argv, ran.env)
 		}
-		identities[ran.argv[4]] = true
+		identities[sshIdentity(ran.argv)] = true
 	}
 	if len(shells) != 5 || hosts != 1 || len(identities) != 5 {
 		t.Errorf("ssh commands = %q, want ownership setup with its one host chown and the one Exec, each with its own key file", fake.Commands())
