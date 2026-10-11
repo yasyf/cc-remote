@@ -459,7 +459,7 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 		report = append(report, `"${`+name+`-unset}"`)
 		stale = append(stale, name+"=stale")
 	}
-	report = append(report, `"${GIT_CONFIG_VALUE_1-unset}"`)
+	report = append(report, `"${GIT_CONFIG_VALUE_3-unset}"`)
 	worker := "#!/bin/sh\nprintf '" + strings.Repeat("%s|", len(report)-1) + "%s\\n' " + strings.Join(report, " ") + "\n"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -493,6 +493,58 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
 				t.Errorf("the key directory survived: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentCommandGivesEveryWorkerTheLaunchersGitIdentityOverTheMachinesOwn(t *testing.T) {
+	machine := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(machine, []byte("[user]\n\tname = Sprite\n\temail = noreply@sprites.dev\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker := "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$(git config --get user.name)\" \"$(git config --get user.email)\" \"$GIT_CONFIG_COUNT\" \"${name-unset}${email-unset}\"\n"
+	tests := []struct {
+		name, kind, payload, want string
+	}{
+		{"claude with a GitHub token", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "Ada O'Launcher|ada@example.test|4|unsetunset"},
+		{"claude without one", orca.AgentClaude, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n", "Ada O'Launcher|ada@example.test|2|unsetunset"},
+		{"codex with a GitHub token", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "Ada O'Launcher|ada@example.test|4|unsetunset"},
+		{"codex without one", orca.AgentCodex, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n", "Ada O'Launcher|ada@example.test|2|unsetunset"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := orca.Agent{Kind: tt.kind, Model: "m", Effort: "e"}
+			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			command := agent.Command(dir, orca.ShellPolicy{})
+			if strings.Contains(command, "Ada O") || strings.Contains(command, "ada@example.test") {
+				t.Errorf("the command text carries the identity: %s", command)
+			}
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"), "GIT_CONFIG_GLOBAL="+machine, "GIT_CONFIG_NOSYSTEM=1", "name=stale", "email=stale")
+			go func() {
+				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = fifo.WriteString(tt.payload)
+				_ = fifo.Close()
+			}()
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Errorf("worker saw %q, want %q", got, tt.want)
 			}
 		})
 	}

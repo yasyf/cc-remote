@@ -143,7 +143,17 @@ no default, adds a GitHub token that every worker receives as `GH_TOKEN`, with
 git's credential helper for `https://github.com` set to `gh auth git-credential`
 through `GIT_CONFIG_*` variables, so the worker can push its branch and open its
 pull request. Codex keeps that token in its shell tools. Every key travels only over SSH stdin into a
-one-use pipe that the worker's terminal reads and removes. Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
+one-use pipe that the worker's terminal reads and removes.
+
+A worker commits as the person who launches it. `orca create` and `orca prepare`
+read `user.name` and `user.email` from this machine's `git config` and send them
+down the same pipe. The worker's terminal sets them through `GIT_CONFIG_*`
+variables, which outrank any identity the machine's own git config holds. A
+launch refuses before it reaches the provider when either key is unset, and the
+refusal names the key. The identity is not written to the task record, the
+workspace record, a receipt, a log, or a file on the machine.
+
+Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
 worker may start. A Claude worker starts with `DISABLE_AUTOUPDATER=1`, so its
 CLI stays at the version the machine was built with. The frontend accepts Claude and Codex folder trust prompts
 only when `orca.trust` lists the repository's owner.
