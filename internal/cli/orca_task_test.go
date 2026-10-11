@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/images"
@@ -129,16 +131,15 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 		kind                         string
 		keys                         map[string][]string
 		key, judge, typesafe, github string
-		payload                      string
 	}{
-		{"claude with an OpenAI judge", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai}, "sk-anthropic-sentinel", "sk-openai-sentinel", "", "", "sk-anthropic-sentinel\nsk-openai-sentinel\n"},
-		{"claude alone", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic}, "sk-anthropic-sentinel", "", "", "", "sk-anthropic-sentinel\n"},
-		{"codex with a Claude judge", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyAnthropic: anthropic}, "sk-openai-sentinel", "sk-anthropic-sentinel", "", "", "sk-openai-sentinel\nsk-anthropic-sentinel\n"},
-		{"codex alone", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai}, "sk-openai-sentinel", "", "", "", "sk-openai-sentinel\n"},
-		{"claude with a judge and a TypeSafe key", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe}, "sk-anthropic-sentinel", "sk-openai-sentinel", "ts-typesafe-sentinel", "", "sk-anthropic-sentinel\nsk-openai-sentinel\nts-typesafe-sentinel\n"},
-		{"codex with only a TypeSafe key", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe}, "sk-openai-sentinel", "", "ts-typesafe-sentinel", "", "sk-openai-sentinel\n\nts-typesafe-sentinel\n"},
-		{"claude with every key", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe, config.KeyGitHub: github}, "sk-anthropic-sentinel", "sk-openai-sentinel", "ts-typesafe-sentinel", "gho-github-sentinel", "sk-anthropic-sentinel\nsk-openai-sentinel\nts-typesafe-sentinel\ngho-github-sentinel\n"},
-		{"codex with only a GitHub token", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyGitHub: github}, "sk-openai-sentinel", "", "", "gho-github-sentinel", "sk-openai-sentinel\n\n\ngho-github-sentinel\n"},
+		{"claude with an OpenAI judge", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai}, "sk-anthropic-sentinel", "sk-openai-sentinel", "", ""},
+		{"claude alone", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic}, "sk-anthropic-sentinel", "", "", ""},
+		{"codex with a Claude judge", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyAnthropic: anthropic}, "sk-openai-sentinel", "sk-anthropic-sentinel", "", ""},
+		{"codex alone", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai}, "sk-openai-sentinel", "", "", ""},
+		{"claude with a judge and a TypeSafe key", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe}, "sk-anthropic-sentinel", "sk-openai-sentinel", "ts-typesafe-sentinel", ""},
+		{"codex with only a TypeSafe key", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe}, "sk-openai-sentinel", "", "ts-typesafe-sentinel", ""},
+		{"claude with every key", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe, config.KeyGitHub: github}, "sk-anthropic-sentinel", "sk-openai-sentinel", "ts-typesafe-sentinel", "gho-github-sentinel"},
+		{"codex with only a GitHub token", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyGitHub: github}, "sk-openai-sentinel", "", "", "gho-github-sentinel"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,8 +147,9 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
-			if payload := string(got.payload()); payload != tt.payload {
-				t.Errorf("payload = %q, want %q", payload, tt.payload)
+			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n"
+			if payload := string(got.payload(firstAuthor)); payload != want {
+				t.Errorf("payload = %q, want %q", payload, want)
 			}
 		})
 	}
@@ -174,6 +176,93 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 		if err == nil || !strings.HasPrefix(err.Error(), "github key command") || got.key != nil || got.github != nil {
 			t.Errorf("%s captureKeys with a failing GitHub token = %q, %q, %v", agent.Kind, got.key, got.github, err)
 		}
+	}
+}
+
+func launcherGit(t *testing.T, config string) {
+	t.Helper()
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "0")
+	t.Chdir(t.TempDir())
+}
+
+func TestCaptureAuthorReadsTheLaunchersGitIdentityOrNamesTheMissingKey(t *testing.T) {
+	tests := []struct {
+		name, config string
+		want         author
+		missing      string
+	}{
+		{"both set", "[user]\n\tname = Ada O'Launcher\n\temail = ada@example.test\n", firstAuthor, ""},
+		{"no name", "[user]\n\temail = ada@example.test\n", author{}, "user.name"},
+		{"no email", "[user]\n\tname = Ada O'Launcher\n", author{}, "user.email"},
+		{"neither", "", author{}, "user.name"},
+		{"an empty email", "[user]\n\tname = Ada O'Launcher\n\temail =\n", author{}, "user.email"},
+		{"a two-line name", "[user]\n\tname = \"Ada\\nLauncher\"\n\temail = ada@example.test\n", author{}, "user.name"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			launcherGit(t, tt.config)
+			got, err := captureAuthor(t.Context())
+			if got != tt.want || (err == nil) != (tt.missing == "") {
+				t.Fatalf("captureAuthor = %+v, %v; want %+v", got, err, tt.want)
+			}
+			if err != nil && !strings.Contains(err.Error(), "holds no single-line "+tt.missing+",") {
+				t.Errorf("refusal = %v, want it to name %s", err, tt.missing)
+			}
+		})
+	}
+}
+
+func TestLaunchRefusesAMissingGitIdentityBeforeAnyProviderCall(t *testing.T) {
+	fakeRemote(t)
+	dir := t.TempDir()
+	path, provider := spritesConfig(t, dir, "")
+	work := filepath.Join(dir, "work.md")
+	if err := os.WriteFile(work, []byte("do the work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
+		calls++
+		return nil, errors.New("no runtime operation is expected")
+	})
+	claude := []string{"--model", "claude-opus-5-5", "--effort", "xhigh"}
+	codex := []string{"--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "xhigh"}
+	tests := []struct {
+		name, config string
+		cmd          func(orca.Runner) *cobra.Command
+		args         []string
+		want         string
+	}{
+		{"prepare without a name", "[user]\n\temail = ada@example.test\n", newOrcaPrepareCmd, slices.Concat(claude, []string{"--brief-file", work}), "holds no single-line user.name,"},
+		{"prepare without an email", "[user]\n\tname = Ada O'Launcher\n", newOrcaPrepareCmd, slices.Concat(claude, []string{"--brief-file", work}), "holds no single-line user.email,"},
+		{"codex prepare without an email", "[user]\n\tname = Ada O'Launcher\n", newOrcaPrepareCmd, slices.Concat(codex, []string{"--brief-file", work}), "holds no single-line user.email,"},
+		{"existing prepare without an email", "[user]\n\tname = Ada O'Launcher\n", newOrcaPrepareCmd, slices.Concat(claude, []string{"--existing", "--brief-file", work}), "holds no single-line user.email,"},
+		{"create without either", "", newOrcaCreateCmd, slices.Concat(claude, []string{"--prompt-file", work}), "holds no single-line user.name,"},
+		{"prepare with both reaches the inventory", "[user]\n\tname = Ada O'Launcher\n\temail = ada@example.test\n", newOrcaPrepareCmd, slices.Concat(claude, []string{"--brief-file", work}), "the inventory has no orca-runtime tool"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			launcherGit(t, tt.config)
+			cmd := tt.cmd(runner)
+			cmd.SetArgs(append([]string{"task-a", "--config", path}, tt.args...))
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			if err := cmd.ExecuteContext(t.Context()); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("%s = %v, want %q", cmd.Name(), err, tt.want)
+			}
+			if _, err := os.Stat(provider); !os.IsNotExist(err) || calls != 0 {
+				t.Errorf("the refusal reached the provider CLI (%v) or made %d Orca calls", err, calls)
+			}
+			if got := sshCalls(t); len(got) != 0 {
+				t.Errorf("ssh calls = %q", got)
+			}
+		})
 	}
 }
 
@@ -713,6 +802,7 @@ func TestSendRefusesAPreparedTask(t *testing.T) {
 
 var (
 	firstAgent   = orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}
+	firstAuthor  = author{name: "Ada O'Launcher", email: "ada@example.test"}
 	serveCommand = regexp.MustCompile(` serve --port (\d+) --pairing-address (?:ws://127\.0\.0\.1:(\d+)|127\.0\.0\.1) `)
 )
 
@@ -852,7 +942,7 @@ func (w *firstWorker) contender() *workspace.Session {
 }
 
 func (w *firstWorker) prepare(ctx context.Context, session *workspace.Session, runner orca.Runner, out io.Writer, name string, existing bool) error {
-	launch := orcaLaunch{agent: firstAgent, existing: existing}
+	launch := orcaLaunch{agent: firstAgent, existing: existing, author: firstAuthor}
 	return launch.start(ctx, out, session, runner, orca.Runtime{Entry: "tools/orca/AppRun"}, name, func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
 		return driver.publish(ctx, task, []byte("Read every line.\n"))
 	})
@@ -1208,6 +1298,38 @@ func TestExistingPrepareRefusesAForeignCheckoutOrRuntimeBeforeTheKey(t *testing.
 			w.free("task-a")
 		})
 	}
+}
+
+func TestPrepareSendsTheLaunchersGitIdentityOnlyDownTheKeyPipe(t *testing.T) {
+	w := newFirstWorker(t, nil, false)
+	pipe := filepath.Join(t.TempDir(), "pipe")
+	t.Setenv("KEY_PIPE", pipe)
+	var logged bytes.Buffer
+	original := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(original)
+	w.session.Log = slog.Default()
+	native, _ := w.native()
+	var out bytes.Buffer
+	if err := w.prepare(t.Context(), w.session, native, &out, "task-a", false); err != nil {
+		t.Fatal(err)
+	}
+	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
+	w.prepared(out.Bytes())
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n" {
+		t.Errorf("key pipe = %q, %v", sent, err)
+	}
+	kept := w.effects()
+	places := map[string]string{"stdout": out.String(), "task record": kept.task, "workspace record": kept.record, "log": logged.String(), "Orca CLI calls": strings.Join(native.calls, "\n")}
+	for place, text := range places {
+		if strings.Contains(text, "Ada O") || strings.Contains(text, firstAuthor.email) {
+			t.Errorf("the %s carries the launcher's identity: %s", place, text)
+		}
+	}
+	if kept.task == "" || logged.Len() == 0 {
+		t.Errorf("the task record is %d bytes and the log %d, so neither proves the identity stayed out", len(kept.task), logged.Len())
+	}
+	w.free("task-a")
 }
 
 func TestDefaultPrepareStillCreatesAFreshWorkspaceUnderTheTaskLock(t *testing.T) {

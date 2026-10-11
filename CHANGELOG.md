@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries `health`, the record stores its build as `managedServer` and
   `orca create`, `prepare`, and `status` print it. The field is absent when
   Orca serves on Electron.
+- **An Orca worker commits as the person who launches it.** `orca create` and
+  `orca prepare` read `user.name` and `user.email` from the launching machine's
+  `git config` and send them down the one-use key pipe. The worker's terminal
+  sets them through `GIT_CONFIG_*` variables on both providers. A Namespace
+  worker used to have no author at all, so `git commit` failed there. A Sprites
+  worker used to commit as the placeholder its base image ships, `Sprite
+  <noreply@sprites.dev>`, which the variables now outrank. A launch refuses
+  before any provider call when either key is unset and names the missing key.
+  The identity reaches no task record, workspace record, receipt, log, or file
+  on the machine. The credential helper entries that `orca.keys.github` adds
+  move from `GIT_CONFIG_KEY_0` and `_1` to `_2` and `_3`.
 - **A Claude worker's CLI no longer updates itself.** The worker's terminal
   exports `DISABLE_AUTOUPDATER=1` before it starts Claude, so the CLI stays at
   the version the machine was built with. A worker left running used to

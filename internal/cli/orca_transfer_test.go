@@ -46,7 +46,7 @@ printf '%s\0' "$script" >> "$SSH_LOG"
 case $script in
 *"orca guest-bootstrap"*) cat > "$GUEST_DESCRIPTOR"; printf '%s\n' "$GUEST_RESULT"; exit 0 ;;
 *mkfifo*) printf '%s\n' ` + fakeKeyDir + `; exit 0 ;;
-*key.Ab12/key*) cat > /dev/null; exit 0 ;;
+*key.Ab12/key*) cat > "${KEY_PIPE:-/dev/null}"; exit 0 ;;
 *"rm -rf"*) exit 0 ;;
 esac
 if [ -n "${REMOTE_FAIL-}" ]; then

@@ -69,6 +69,7 @@ type orcaTask struct {
 	provider providers.Provider
 	claimed  bool
 	booted   *orcaBoot
+	author   author
 }
 
 type orcaBoot struct {
@@ -91,6 +92,7 @@ type orcaLaunch struct {
 	ref, title     string
 	agent          orca.Agent
 	existing, warm bool
+	author         author
 }
 
 type orcaOpening int
@@ -286,6 +288,9 @@ func (l *orcaLaunch) run(cmd *cobra.Command, runner orca.Runner, name string, fi
 		}
 		start = l.allocate
 	}
+	if l.author, err = captureAuthor(cmd.Context()); err != nil {
+		return err
+	}
 	runtime, err := orcaRuntime(session)
 	if err != nil {
 		return err
@@ -390,7 +395,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		task, err = driver.task(result, l.agent, session.Provider)
 	}
 	if err == nil {
-		task.Pregrant, task.claimed, task.booted = pregrant, opening == openSpare, booted
+		task.Pregrant, task.claimed, task.booted, task.author = pregrant, opening == openSpare, booted, l.author
 		err = driver.launch(ctx, session, task, runtime, keys, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
@@ -465,8 +470,10 @@ func newOrcaCreateCmd(runner orca.Runner) *cobra.Command {
 provider service, forwards its loopback port over SSH, pairs it with this machine's Orca CLI as an
 environment named after the workspace, adds the workspace's checkout as an Orca repo, and starts the
 worker in an Orca terminal on that checkout. The worker's API key comes from the orca.keys command for
-its provider and reaches only the worker, through a one-use pipe over SSH. stdout carries the task
-record, also kept under the state directory for status, reconnect, send, and read.`,
+its provider and reaches only the worker, through a one-use pipe over SSH. The worker commits as this
+machine's git user.name and user.email, which travel down the same pipe; create refuses before it
+reaches the provider when either is unset. stdout carries the task record, also kept under the state
+directory for status, reconnect, send, and read.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := launch.agent.Validate(); err != nil {
@@ -986,7 +993,7 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 		return terminal.Handle, errors.Join(err, dropped)
 	}
 	task.WorktreeID = terminal.WorktreeID
-	payload := keys.payload()
+	payload := keys.payload(task.author)
 	defer clear(payload)
 	write, cancel := context.WithTimeout(ctx, keyPipeTimeout)
 	defer cancel()
@@ -1125,11 +1132,8 @@ type secrets struct {
 	key, judge, typesafe, github []byte
 }
 
-func (s secrets) payload() []byte {
-	lines := [][]byte{s.key, s.judge, s.typesafe, s.github}
-	for lines[len(lines)-1] == nil {
-		lines = lines[:len(lines)-1]
-	}
+func (s secrets) payload(launcher author) []byte {
+	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email)}
 	return append(bytes.Join(lines, []byte{'\n'}), '\n')
 }
 
@@ -1181,6 +1185,35 @@ func captureKey(ctx context.Context, command []string) ([]byte, error) {
 		return nil, fmt.Errorf("key command %s must print exactly one non-empty line", strings.Join(command, " "))
 	}
 	return key, nil
+}
+
+type author struct {
+	name, email string
+}
+
+func captureAuthor(ctx context.Context) (author, error) {
+	name, err := launcherGitConfig(ctx, "user.name")
+	if err != nil {
+		return author{}, err
+	}
+	email, err := launcherGitConfig(ctx, "user.email")
+	if err != nil {
+		return author{}, err
+	}
+	return author{name: name, email: email}, nil
+}
+
+func launcherGitConfig(ctx context.Context, key string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "config", "--get", key).Output()
+	var exit *exec.ExitError
+	if err != nil && (!errors.As(err, &exit) || exit.ExitCode() != 1) {
+		return "", fmt.Errorf("git config --get %s: %w", key, err)
+	}
+	value := strings.TrimSuffix(string(out), "\n")
+	if value == "" || strings.ContainsAny(value, "\r\n") {
+		return "", fmt.Errorf("this machine's git config holds no single-line %s, and a remote worker commits under its launcher's identity; set one with git config --global %s", key, key)
+	}
+	return value, nil
 }
 
 func readPrompt(cmd *cobra.Command, path string) (string, error) {
