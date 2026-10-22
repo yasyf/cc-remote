@@ -120,22 +120,22 @@ uncaptured() {
   awk -F= -v list="$tmp_dir/captured" 'BEGIN { while ((getline name < list) > 0) captured[name] } !($1 in captured)'
 }
 
-check_base() {
-  local manifest="$1" drift
+explain_base_drift() {
+  local status="$1" manifest="$2" drift
   {
     jq -r '.debs[].package, .artifacts[].package' "$manifest"
 {{- if $.Apt.Remove}}
     printf '%s\n'{{range $.Apt.Remove}} {{q .}}{{end}}
 {{- end}}
-  } > "$tmp_dir/captured"
-  jq -r '.base[]' "$manifest" | uncaptured > "$tmp_dir/base.payload"
-  base_packages | uncaptured > "$tmp_dir/base.machine"
-  drift="$(LC_ALL=C comm -3 "$tmp_dir/base.payload" "$tmp_dir/base.machine" | sed -e 's/^\t/+/' -e t -e 's/^/-/')"
+  } > "$tmp_dir/captured" || exit
+  jq -r '.base[]' "$manifest" | uncaptured > "$tmp_dir/base.payload" || exit
+  base_packages | uncaptured > "$tmp_dir/base.machine" || exit
+  drift="$(LC_ALL=C comm -3 "$tmp_dir/base.payload" "$tmp_dir/base.machine" | sed -e 's/^\t/+/' -e t -e 's/^/-/')" || exit
   if [ -n "$drift" ]; then
-    echo "cc-remote: the packages on this machine differ from the base its payload captured the resident packages against (-payload +machine), so they cannot install offline; rebuild the payload on this base:" >&2
+    echo "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:" >&2
     printf '%s\n' "$drift" >&2
-    exit 1
   fi
+  exit "$status"
 }
 
 admit_packages() {
@@ -178,7 +178,6 @@ provision_packages() {
     manifest="$deb_dir/debs.json"
     deb_flags=(--no-download -o Dpkg::Options::=--force-unsafe-io)
     admit_packages "$sha256"
-    check_base "$manifest"
     jq -r '.debs[] | "\(.sha256) \(.file)"' "$manifest" > "$tmp_dir/debs"
     install -d -m 0755 "$tmp_dir/apt-archives/partial"
     while read -r digest file; do
@@ -186,7 +185,7 @@ provision_packages() {
       install -m 0644 "$deb_dir/$file" "$tmp_dir/apt-archives/$file"
       captured+=("$deb_dir/$file")
     done < "$tmp_dir/debs"
-    apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null
+    apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || explain_base_drift "$?" "$manifest"
   else
     apt-get update -qq
     mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
