@@ -24,6 +24,8 @@ const (
 	nameLimit  = 55
 	user       = "sprite"
 	pageSize   = 500
+	// fs/read ends every response at 2147479552 bytes, even one whose Content-Range claims more.
+	downloadChunk = 1 << 30
 )
 
 const (
@@ -292,12 +294,36 @@ func (p *Provider) Download(ctx context.Context, id, path string, w io.Writer) e
 	if _, err := p.Get(ctx, id); err != nil {
 		return err
 	}
-	command := p.command(nil, "api", "-o", p.Org, "/v1/sprites/"+id+"/fs/read?path="+url.QueryEscape(path), "--", "-sS", "-f")
-	command.Stdout = w
-	if _, err := providers.Output(ctx, p.Runner, command); err != nil {
+	read := "/v1/sprites/" + id + "/fs/read?path=" + url.QueryEscape(path)
+	probe, err := providers.Output(ctx, p.Runner, p.command(nil, "api", "-o", p.Org, read, "--", "-sS", "-f", "-r", "0-0", "-o", "/dev/null", "-w", "%header{content-range}"))
+	if err != nil {
 		return fmt.Errorf("downloading %s from sprite %s: %w", path, id, err)
 	}
+	_, total, found := strings.Cut(string(probe), "/")
+	size, err := strconv.ParseInt(total, 10, 64)
+	if !found || err != nil {
+		return fmt.Errorf("downloading %s from sprite %s: its first byte answered content-range %q, not bytes 0-0/<size>", path, id, probe)
+	}
+	for start := int64(0); start < size; start += downloadChunk {
+		end := min(start+downloadChunk, size) - 1
+		var got byteCount
+		command := p.command(nil, "api", "-o", p.Org, read, "--", "-sS", "-f", "-r", fmt.Sprintf("%d-%d", start, end))
+		command.Stdout = io.MultiWriter(w, &got)
+		if _, err := providers.Output(ctx, p.Runner, command); err != nil {
+			return fmt.Errorf("downloading %s from sprite %s: %w", path, id, err)
+		}
+		if want := end - start + 1; int64(got) != want {
+			return fmt.Errorf("downloading %s from sprite %s: bytes %d-%d of %d arrived as %d bytes, want %d", path, id, start, end, size, got, want)
+		}
+	}
 	return nil
+}
+
+type byteCount int64
+
+func (c *byteCount) Write(p []byte) (int, error) {
+	*c += byteCount(len(p))
+	return len(p), nil
 }
 
 func (p *Provider) api(ctx context.Context, path string) (int, []byte, error) {
