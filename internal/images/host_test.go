@@ -70,6 +70,9 @@ func TestHostOperations(t *testing.T) {
 		{"fetch packages archive", func(ctx context.Context, exec Exec) error {
 			return scripts.Fetch(ctx, exec, PackagesArtifact, presigned, digest, 52428800)
 		}, call{[]string{"sudo", "bash", "-c", PackagesArtifact.fetchScript(), "fetch-packages", digest, "52428800"}, "url = \"" + presignedURL + "\"\n"}},
+		{"prefetch payload", func(ctx context.Context, exec Exec) error {
+			return scripts.Prefetch(ctx, exec, PayloadArtifact, digest)
+		}, call{[]string{"sudo", "bash", "-c", PayloadArtifact.prefetchScript(), "cache-payload", digest}, ""}},
 		{"stage", func(ctx context.Context, exec Exec) error { return scripts.StagePlugins(ctx, exec, "") }, call{[]string{"sh", "-c", stagePlugins}, "plugins"}},
 		{"stage enabling the payload's plugins", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePlugins(ctx, exec, digest)
@@ -174,6 +177,9 @@ func TestHostOperationsRejectBadInput(t *testing.T) {
 		{"fetch packages archive size", func(ctx context.Context, exec Exec) error {
 			return scripts.Fetch(ctx, exec, PackagesArtifact, PayloadURL{}, digest, -1)
 		}, "fetch packages archive: size -1 is not a byte count"},
+		{"prefetch payload digest", func(ctx context.Context, exec Exec) error {
+			return scripts.Prefetch(ctx, exec, PayloadArtifact, "../"+digest)
+		}, `prefetch payload: "../` + digest + `" is not a sha256 digest`},
 		{"stage plugins payload digest", func(ctx context.Context, exec Exec) error {
 			return scripts.StagePlugins(ctx, exec, "../"+digest)
 		}, `stage plugins.sh: payload "../` + digest + `" is not a sha256 digest`},

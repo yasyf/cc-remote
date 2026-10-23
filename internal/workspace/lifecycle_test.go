@@ -50,6 +50,7 @@ const (
 	mergesPlugins  = "stage-plugins "
 	stagesPayload  = "stage-payload "
 	fetchesPayload = "fetch-payload "
+	cachesPayload  = "cache-payload "
 	stagesDebs     = "stage-packages "
 	fetchesDebs    = "fetch-packages "
 	payloadBytes   = "hsqs squashfs payload bytes"
@@ -2508,6 +2509,72 @@ func TestTheResidentPackagesRunBesideThePayloadMount(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestThePayloadPrefetchStartsAfterTheMountAndRunsBesideTheTools(t *testing.T) {
+	for _, tt := range payloadHarnesses() {
+		t.Run(tt.name, func(t *testing.T) {
+			h := tt.harness(t)
+			var creating sync.WaitGroup
+			t.Cleanup(creating.Wait)
+			mounting, prefetching := h.machine.hold(t, payloadPhase), h.machine.hold(t, cachesPayload)
+			installing, publishing := h.machine.hold(t, installs), h.machine.hold(t, publishes)
+			created := make(chan error, 1)
+			creating.Go(func() {
+				_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+				created <- err
+			})
+			mounting.awaitEntered(t)
+			prefetching.stillParked(t, "while the payload mount was still running")
+			mounting.release <- providers.Result{}
+			prefetching.awaitEntered(t)
+			installing.awaitEntered(t)
+			installing.release <- providers.Result{}
+			publishing.stillParked(t, "while the payload prefetch was still reading")
+			if _, err := os.Stat(h.session.State.SSH("ws-1")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("access was delivered before the payload prefetch finished: %v", err)
+			}
+			prefetching.release <- providers.Result{}
+			publishing.awaitEntered(t)
+			publishing.release <- providers.Result{}
+			if err := <-created; err != nil {
+				t.Fatal(err)
+			}
+			order := h.ordered(0, tt.transfer+sha, payloadPhase+sha+" ", cachesPayload+sha, publishes)
+			if prefetch := h.machine.scripts["ws-1"][order[2]]; !strings.HasPrefix(prefetch, "sudo bash -c ") || !strings.HasSuffix(prefetch, " "+cachesPayload+sha) {
+				t.Errorf("the payload was prefetched by %q", prefetch)
+			}
+			if got := h.machine.stdins["ws-1"][order[2]]; got != "" {
+				t.Errorf("the prefetch read %q on stdin, want nothing", got)
+			}
+			if h.machine.ran("ws-1", cachesPayload) != 1 || h.machine.ready["ws-1"] != h.session.Stamp {
+				t.Errorf("the payload was prefetched %d times and the stamp is %q: %q", h.machine.ran("ws-1", cachesPayload), h.machine.ready["ws-1"], h.machine.scripts["ws-1"])
+			}
+		})
+	}
+}
+
+func TestAFailedPayloadPrefetchFailsTheCreate(t *testing.T) {
+	for _, tt := range payloadHarnesses() {
+		t.Run(tt.name, func(t *testing.T) {
+			h := tt.harness(t)
+			h.machine.hold(t, cachesPayload).release <- providers.Result{Stderr: []byte("dd: error reading the payload: Input/output error\n"), ExitCode: 1}
+			_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+			var phase *PhaseError
+			if !errors.As(err, &phase) || phase.Phase != "payload.prefetch" || !strings.Contains(err.Error(), "exited 1: dd: error reading the payload: Input/output error") {
+				t.Fatalf("Create = %v; want the payload.prefetch phase and dd's own error", err)
+			}
+			if h.machine.ran("ws-1", publishes) != 0 || h.machine.ready["ws-1"] != "" {
+				t.Errorf("the failed create published %d times, stamp %q", h.machine.ran("ws-1", publishes), h.machine.ready["ws-1"])
+			}
+			if _, err := os.Stat(h.session.State.SSH("ws-1")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the failed create delivered access: %v", err)
+			}
+			if _, ok := h.record("ws-1"); ok || !strings.Contains(h.calls(), "destroy ws-1") {
+				t.Errorf("record kept %v, provider calls %s; want the failed create to destroy ws-1 and drop its record", ok, h.calls())
+			}
+		})
 	}
 }
 

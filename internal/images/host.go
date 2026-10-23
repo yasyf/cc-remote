@@ -63,6 +63,7 @@ const (
 	fetchStreams    = 8
 	fetchRange      = 32 << 20
 	stagingBlock    = fetchRange
+	prefetchBlock   = 32 << 20
 )
 
 func (a TransferArtifact) openStaging() string {
@@ -181,6 +182,11 @@ if [ "$got" != "$size" ]; then
   exit 1
 fi
 ` + a.admitStaging()
+}
+
+func (a TransferArtifact) prefetchScript() string {
+	return `store=` + a.Store + `
+exec dd if="$store/$1` + a.Suffix + `" of=/dev/null bs=` + strconv.Itoa(prefetchBlock) + ` status=none`
 }
 
 const enablePayloadPlugins = `settings="$HOME/.claude/settings.json"
@@ -327,6 +333,16 @@ func (s Scripts) Fetch(ctx context.Context, exec Exec, artifact TransferArtifact
 	}
 	if err := exec(ctx, []string{"sudo", "bash", "-c", artifact.fetchScript(), "fetch-" + artifact.Label, digest, strconv.FormatInt(size, 10)}, bytes.NewReader(source.curlConfig())); err != nil {
 		return fmt.Errorf("fetch %s %s: %w", artifact.Name, digest, err)
+	}
+	return nil
+}
+
+func (s Scripts) Prefetch(ctx context.Context, exec Exec, artifact TransferArtifact, digest string) error {
+	if !sha256Pattern.MatchString(digest) {
+		return fmt.Errorf("prefetch %s: %q is not a sha256 digest", artifact.Name, digest)
+	}
+	if err := exec(ctx, []string{"sudo", "bash", "-c", artifact.prefetchScript(), "cache-" + artifact.Label, digest}, nil); err != nil {
+		return fmt.Errorf("prefetch %s %s: %w", artifact.Name, digest, err)
 	}
 	return nil
 }

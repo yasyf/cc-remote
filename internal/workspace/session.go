@@ -501,7 +501,13 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if s.Alongside != nil {
 		run.Go(func(ctx context.Context) error { return s.Alongside(ctx, machine) })
 	}
-	packages, tools := s.installLanes(run, machine, staged)
+	mounted, packages, tools := s.installLanes(run, machine, staged)
+	run.Go(func(ctx context.Context) error {
+		if err := run.after(mounted); err != nil {
+			return err
+		}
+		return s.prefetchPayload(ctx, machine)
+	})
 	tooled := make(chan struct{})
 	loader := run.Go(func(ctx context.Context) error {
 		if err := run.after(packages, tools); err != nil {
@@ -616,8 +622,8 @@ func (s *Session) installTools(ctx context.Context, machine string) error {
 	return s.publish(ctx, machine)
 }
 
-func (s *Session) installLanes(run *lanes, machine string, staged transfers) (packages, tools <-chan struct{}) {
-	mounted := run.Go(func(ctx context.Context) error { return s.mountPayload(ctx, machine, staged.payload) })
+func (s *Session) installLanes(run *lanes, machine string, staged transfers) (mounted, packages, tools <-chan struct{}) {
+	mounted = run.Go(func(ctx context.Context) error { return s.mountPayload(ctx, machine, staged.payload) })
 	packages = run.Go(func(ctx context.Context) error { return s.installPackages(ctx, machine, staged.packages) })
 	tools = run.Go(func(ctx context.Context) error {
 		if err := run.after(mounted); err != nil {
@@ -625,7 +631,7 @@ func (s *Session) installLanes(run *lanes, machine string, staged transfers) (pa
 		}
 		return s.installPlugins(ctx, machine)
 	})
-	return packages, tools
+	return mounted, packages, tools
 }
 
 func (s *Session) adopt(ctx context.Context, machine string) error {
@@ -868,6 +874,19 @@ func (s *Session) mountPayload(ctx context.Context, machine string, stage transf
 		return err
 	}
 	s.Log.Info("mounted the payload", "machine", machine, "sha256", s.payload.SHA256[:12])
+	return nil
+}
+
+func (s *Session) prefetchPayload(ctx context.Context, machine string) error {
+	if s.payload == nil {
+		return nil
+	}
+	if err := s.timed(ctx, lanePrefetch, "payload.prefetch", machine, func() error {
+		return s.Scripts.Prefetch(ctx, s.exec(machine), images.PayloadArtifact, s.payload.SHA256)
+	}); err != nil {
+		return err
+	}
+	s.Log.Info("read the mounted payload into the page cache", "machine", machine, "sha256", s.payload.SHA256[:12])
 	return nil
 }
 
