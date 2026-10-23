@@ -1615,11 +1615,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			for _, entry := range entries {
 				names = append(names, entry.Name())
 			}
-			wantNames := []string{"debs.json"}
-			for _, deb := range want.Debs {
-				wantNames = append(wantNames, deb.File)
-			}
-			if !slices.Equal(names, wantNames) {
+			if wantNames := []string{"debs.json", want.Debs[0].File, want.Debs[1].File, want.Debs[2].File, want.Debs[3].File}; !slices.Equal(names, wantNames) {
 				t.Errorf("the captured debs are %q, want %q", names, wantNames)
 			}
 			for _, deb := range want.Debs {
