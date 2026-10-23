@@ -528,7 +528,7 @@ func assertPackagesStoreHolds(t *testing.T, root string, want ...string) {
 func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 	base := "installed\tbase-files=13\ninstalled\tlibc6=2.42-1\n"
 	install := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
-	drifted := "cc-remote: the packages on this machine differ from the base its payload captured the resident packages against (-payload +machine), so they cannot install offline; rebuild the payload on this base:\n"
+	drifted := "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:\n"
 	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
 		name      string
@@ -547,16 +547,17 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 		{name: "the captured debs install offline", apt: install},
 		{name: "a repeat run over the installed resident packages passes", base: base + "installed\tbubblewrap=0.11.0-2\ninstalled\topenssh-server=1:9.9p1-3\n", apt: install},
 		{name: "packages dpkg only knows or keeps the configuration of are not part of the base", base: base + "config-files\told=1\nnot-installed\tgone=2\n", apt: install},
-		{name: "a drifted base version fails before apt", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", exit: 1, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
-		{name: "an extra base package fails before apt", base: base + "installed\tvim=2\n", exit: 1, wantErr: drifted + "+vim=2\n"},
-		{name: "a missing base package fails before apt", base: "installed\tbase-files=13\n", exit: 1, wantErr: drifted + "-libc6=2.42-1\n"},
+		{name: "a drifted base the captured debs still install on passes", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", apt: install},
+		{name: "a failing install names a drifted base version", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
+		{name: "a failing install names an extra base package", base: base + "installed\tvim=2\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "+vim=2\n"},
+		{name: "a failing install names a missing base package", base: "installed\tbase-files=13\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-libc6=2.42-1\n"},
 		{name: "a corrupted deb fails before apt", corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
 		{name: "an unadmitted packages archive fails before apt", unstaged: true, exit: 1, wantErr: "cc-remote: no packages archive is admitted at "},
 		{name: "an admitted archive that does not extract leaves no tree behind", garbage: true, exit: 2, wantErr: "tar: "},
 		{name: "resident without the archive sha256 is a usage error", args: []string{PackagesResident}, exit: 2, wantErr: "provision: packages resident takes the packages archive sha256"},
 		{name: "a failing apt install propagates its status", env: []string{"APT_FAIL=100"}, apt: install, exit: 100},
 		{name: "a closure package left installed is fatal", installed: "ii \tlibnss3\n", apt: install, exit: 1, wantErr: shadowing + "libnss3 install ok installed 1.0-1\n"},
-		{name: "a failing package listing fails before apt", env: []string{"DPKG_FAIL=1"}, exit: 2},
+		{name: "a failing package listing after the install is fatal", env: []string{"DPKG_FAIL=1"}, apt: install, exit: 1, wantErr: "cc-remote: cannot list the installed packages"},
 		{name: "apt.remove still runs offline and its packages leave the base", remove: true, base: base + "installed\twatchman=2025.1\n", installed: "ii \twatchman\n", apt: install + "remove -y -qq watchman\n"},
 	}
 	for _, tt := range tests {
