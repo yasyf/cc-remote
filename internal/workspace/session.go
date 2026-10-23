@@ -412,16 +412,13 @@ func (s *Session) create(ctx context.Context, name string, source Source, labels
 	if err := s.unbound(name); err != nil {
 		return nil, err
 	}
-	staged, err := s.sources(ctx, name)
-	if err != nil {
-		return nil, err
-	}
 	now := s.Now()
 	record := &Record{Name: name, Provider: s.Kind, Profile: s.Profile, Source: source, Image: s.image, ImageSpec: s.imageSpec, Unverified: true, CreatedAt: now}
 	if err := s.save(record); err != nil {
 		return nil, err
 	}
 	s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
+	sourcing := s.startSources(ctx, name)
 	var machine providers.Machine
 	created := s.timed(ctx, laneMain, "machine.create", name, func() error {
 		var err error
@@ -430,13 +427,19 @@ func (s *Session) create(ctx context.Context, name string, source Source, labels
 	})
 	record.Machine, record.Compute = machine.ID, machine.Compute
 	if created != nil {
+		sourcing.stop()
 		return nil, s.unmade(record, created)
 	}
 	record.Unverified = false
 	if err := s.save(record); err != nil {
+		sourcing.stop()
 		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
 	}
 	s.Log.Info("created", "machine", record.Machine)
+	staged, err := sourcing.wait()
+	if err != nil {
+		return nil, errors.Join(err, s.abandon(context.WithoutCancel(ctx), held, record))
+	}
 	result, err = s.provision(ctx, held, record, staged, afterTools)
 	if err == nil {
 		err = s.save(record)
@@ -739,19 +742,51 @@ type artifactSource struct {
 	source   config.Source
 }
 
+type pendingSources struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	staged transfers
+	err    error
+}
+
+func (s *Session) startSources(ctx context.Context, machine string) *pendingSources {
+	ctx, cancel := context.WithCancel(ctx)
+	pending := &pendingSources{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(pending.done)
+		pending.staged, pending.err = s.sources(ctx, machine)
+	}()
+	return pending
+}
+
+func (p *pendingSources) wait() (transfers, error) {
+	<-p.done
+	p.cancel()
+	return p.staged, p.err
+}
+
+func (p *pendingSources) stop() {
+	p.cancel()
+	<-p.done
+}
+
 func (s *Session) sources(ctx context.Context, machine string) (transfers, error) {
 	if s.payload == nil {
 		return transfers{}, nil
 	}
 	var staged transfers
-	var err error
-	if staged.payload, err = s.source(ctx, machine, artifactSource{images.PayloadArtifact, laneMount, s.payload.Source}); err != nil {
-		return transfers{}, err
+	run := newLanes(ctx)
+	run.Go(func(ctx context.Context) (err error) {
+		staged.payload, err = s.source(ctx, machine, artifactSource{images.PayloadArtifact, laneMount, s.payload.Source})
+		return err
+	})
+	if s.payload.Packages != nil {
+		run.Go(func(ctx context.Context) (err error) {
+			staged.packages, err = s.source(ctx, machine, artifactSource{images.PackagesArtifact, lanePackages, *s.payload.Packages})
+			return err
+		})
 	}
-	if s.payload.Packages == nil {
-		return staged, nil
-	}
-	if staged.packages, err = s.source(ctx, machine, artifactSource{images.PackagesArtifact, lanePackages, *s.payload.Packages}); err != nil {
+	if err := run.Wait(); err != nil {
 		return transfers{}, err
 	}
 	return staged, nil

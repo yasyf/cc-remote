@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A create runs its `url_command`s while the machine is being created.** A
+  direct payload's `url_command` and its packages archive's `url_command` used
+  to run one after the other before `machine.create`, which put 2 to 4 s of
+  presigning in front of every fresh Sprite. They now run side by side and
+  beside the machine create, and keep their `payload.url`, `packages.url`, and
+  `machine.create` phases on the main lane. A failed command now fails the
+  create after the machine exists, and the machine is destroyed the same way a
+  failed provision destroys it. A failed machine create cancels both commands.
 - **A Claude worker's Orca runtime starts beside the create or the warm claim.**
   `orca create` and `orca prepare` used to start the runtime after the whole
   workspace was ready. They now start it once the machine's tools are
