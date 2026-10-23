@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	assets "github.com/yasyf/cc-remote/images"
 )
@@ -235,6 +236,11 @@ if [[ " $* " == *" --no-download "* && " $* " == *" --no-install-recommends "* ]
       *.deb) cmp "$arg" "$archives/$(basename "$arg")" || exit 100 ;;
     esac
   done
+  if [ -e "$TEST_ROOT/var/lib/man-db/auto-update" ]; then
+    echo present >> "$TEST_ROOT/man-db"
+  else
+    echo absent >> "$TEST_ROOT/man-db"
+  fi
 fi
 printf '%s\n' "${logged[*]}" >> "$TEST_ROOT/apt"
 if [ -n "${LD_PRELOAD:-}" ]; then
@@ -555,11 +561,16 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 		corrupt     bool
 		remove      bool
 		noEatmydata bool
+		autoUpdate  bool
 		apt         string
 		exit        int
 		wantErr     string
 	}{
 		{name: "the captured debs install offline", apt: install},
+		{name: "the install runs with man-db's auto-update set aside and puts it back", autoUpdate: true, apt: install},
+		{name: "a failing install still puts man-db's auto-update back", autoUpdate: true, env: []string{"APT_FAIL=100"}, apt: install, exit: 100},
+		{name: "a failing install on a drifted base names the drift and puts man-db's auto-update back", autoUpdate: true, base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
+		{name: "a corrupted deb fails before apt and leaves man-db's auto-update in place", autoUpdate: true, corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
 		{name: "a repeat run over the installed resident packages passes", base: base + "installed\tbubblewrap=0.11.0-2\ninstalled\topenssh-server=1:9.9p1-3\n", apt: install},
 		{name: "packages dpkg only knows or keeps the configuration of are not part of the base", base: base + "config-files\told=1\nnot-installed\tgone=2\n", apt: install},
 		{name: "a drifted base the captured debs still install on passes", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", apt: install},
@@ -626,9 +637,17 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 			}
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"+tt.installed), 0o644)
 			writePluginTestFile(t, filepath.Join(root, "base"), []byte(cmp.Or(tt.base, base)), 0o644)
+			autoUpdate, updated := filepath.Join(root, "var/lib/man-db/auto-update"), time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+			if tt.autoUpdate {
+				writePluginTestFile(t, autoUpdate, nil, 0o640)
+				if err := os.Chtimes(autoUpdate, updated, updated); err != nil {
+					t.Fatal(err)
+				}
+			}
 			provision := strings.NewReplacer(
 				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(filepath.Join(root, "build"))+"\n",
 				"packages_store=/var/lib/cc-remote/packages\n", "packages_store="+quote(filepath.Join(root, "packages"))+"\n",
+				"man_db_auto_update=/var/lib/man-db/auto-update\n", "man_db_auto_update="+quote(autoUpdate)+"\n",
 				"rm -rf /var/lib/apt/lists/*", ":",
 			).Replace(string(scripts.ProvisionScript))
 			args := tt.args
@@ -670,6 +689,22 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 				if _, err := os.Stat(library); !os.IsNotExist(err) {
 					t.Errorf("the extracted library outlived the install: %v", err)
 				}
+			}
+			during, err := os.ReadFile(filepath.Join(root, "man-db"))
+			switch {
+			case tt.apt == "" && !os.IsNotExist(err):
+				t.Errorf("an install that never ran apt saw man-db's auto-update %q, %v", during, err)
+			case tt.apt != "" && (err != nil || string(during) != "absent\n"):
+				t.Errorf("the resident install saw man-db's auto-update %q, %v; want it absent once", during, err)
+			}
+			info, err := os.Lstat(autoUpdate)
+			switch {
+			case !tt.autoUpdate && !os.IsNotExist(err):
+				t.Errorf("the install left a man-db auto-update the base never had: %v", err)
+			case tt.autoUpdate && err != nil:
+				t.Errorf("the install did not put man-db's auto-update back: %v", err)
+			case tt.autoUpdate && (info.Mode() != 0o640 || info.Size() != 0 || !info.ModTime().Equal(updated)):
+				t.Errorf("man-db's auto-update came back as %v, %d bytes, from %v; want the base's empty 0640 file from %v", info.Mode(), info.Size(), info.ModTime(), updated)
 			}
 			if online, err := os.ReadFile(filepath.Join(root, "online")); !os.IsNotExist(err) {
 				t.Errorf("the offline install reached for the network: %q %v", online, err)
@@ -731,6 +766,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 			provision := strings.NewReplacer(
 				"build_dir=/var/lib/cc-remote/build\n", "build_dir="+quote(build)+"\n",
 				"packages_store=/var/lib/cc-remote/packages\n", "packages_store="+quote(filepath.Join(root, "packages"))+"\n",
+				"man_db_auto_update=/var/lib/man-db/auto-update\n", "man_db_auto_update="+quote(filepath.Join(root, "var/lib/man-db/auto-update"))+"\n",
 				"tool_dir=/opt/cc-remote/tools\n", "tool_dir="+quote(tools)+"\n",
 				"bin_dir=/usr/local/bin\n", "bin_dir="+quote(bins)+"\n",
 				"'/opt/Orca/orca-ide'", quote(ide),

@@ -529,9 +529,9 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 	}
 	for _, want := range []string{
 		"closure_packages=('libnss3')\n",
-		"eatmydata_package=libeatmydata1\n",
+		"eatmydata_package=libeatmydata1\nman_db_auto_update=/var/lib/man-db/auto-update\n",
 		"  printf '%s\\n' \"$eatmydata_package\" 'bubblewrap'\n",
-		"    unpack_eatmydata \"$manifest\"\n    LD_PRELOAD=\"$eatmydata\" apt-get install -y -qq \"${deb_flags[@]}\" --no-install-recommends ",
+		"    unpack_eatmydata \"$manifest\"\n    LD_PRELOAD=\"$eatmydata\" without_man_db_auto_update apt-get install -y -qq \"${deb_flags[@]}\" --no-install-recommends ",
 		"    apt-get install -y -qq --no-install-recommends --no-upgrade \"${packages[@]}\" \"$eatmydata_package\" 'bubblewrap' > /dev/null\n",
 		"    deb_seeds=\"$build_dir/seeds\"\n    resident_packages \"${packages[@]}\" > \"$deb_seeds\"\n",
 		"      deb) apt-get install -y -qq \"${deb_flags[@]}\" \"$download\" > /dev/null ;;\n",
