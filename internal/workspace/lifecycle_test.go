@@ -990,6 +990,80 @@ func TestCreateRefusesANameStillBoundToATailnetNodeAndDestroyRevokesIt(t *testin
 	}
 }
 
+func TestDestroyRemovesTheNamesWarmPoolRecord(t *testing.T) {
+	said := "no workspace is recorded, so destroy removed only its warm pool record and touched no machine"
+	tests := []struct {
+		name    string
+		tailnet bool
+		create  bool
+		pooled  bool
+		bound   bool
+		wantErr string
+		said    bool
+	}{
+		{name: "destroying a workspace removes its pool record", create: true, pooled: true},
+		{name: "destroying a workspace without a pool record passes", create: true},
+		{name: "a pool record without a workspace record is removed and reported", pooled: true, said: true},
+		{name: "a pool record and a leftover tailnet binding are both cleared", tailnet: true, pooled: true, bound: true, said: true},
+		{name: "a name with neither record still refuses", wantErr: "no workspace is recorded for ws-1 under "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, tt.tailnet)
+			ctx := context.Background()
+			var logs bytes.Buffer
+			h.session.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+			if tt.create {
+				if _, err := h.session.Create(ctx, "ws-1", Source{Ref: "main"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.bound {
+				h.api.devices = append(h.api.devices, owned("nOLD"))
+				h.bind(tailnet.Binding{NodeID: "nOLD"})
+			}
+			names := []string{"ws-2"}
+			if tt.pooled {
+				names = append(names, "ws-1")
+			}
+			for _, name := range names {
+				if err := state.Save(h.session.State.Pool(name), map[string]any{"schemaVersion": 1, "name": name}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := len(h.fake.Calls())
+			switch err := h.session.Destroy(ctx, "ws-1"); {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Destroy = %v", err)
+			case tt.wantErr != "" && (err == nil || !strings.HasPrefix(err.Error(), tt.wantErr)):
+				t.Fatalf("Destroy = %v, want %q", err, tt.wantErr)
+			}
+			if _, err := os.Stat(h.session.State.Pool("ws-1")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the pool record of ws-1 survived destroy: %v", err)
+			}
+			if _, err := os.Stat(h.session.State.Pool("ws-2")); err != nil {
+				t.Errorf("destroying ws-1 removed the pool record of ws-2: %v", err)
+			}
+			if _, found := h.record("ws-1"); found {
+				t.Error("the workspace record survived destroy")
+			}
+			want := ""
+			if tt.create {
+				want = "destroy ws-1"
+			}
+			if after := strings.Join(h.fake.Calls()[calls:], " "); after != want {
+				t.Errorf("destroy made %q at the provider, want %q", after, want)
+			}
+			if got := strings.Contains(logs.String(), said); got != tt.said {
+				t.Errorf("destroy reported removing only the pool record: %v, want %v:\n%s", got, tt.said, logs.String())
+			}
+			if deleted := h.api.deletedNodes(); tt.bound && (len(deleted) != 1 || deleted[0] != "nOLD" || h.bound() != (tailnet.Binding{})) {
+				t.Errorf("deleted %v, bound %v; want the leftover node revoked", deleted, h.bound())
+			}
+		})
+	}
+}
+
 func TestTheInstallReadsTheTokenOnlyForPrivateMarketplaces(t *testing.T) {
 	h := build(t, false, private, "{}", providers.Traits{})
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
