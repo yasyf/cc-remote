@@ -217,10 +217,15 @@ its Sprite and confirms its absence before returning success. The returned
 With `path`, the Sprite runs
 `sudo bash -c <stage script> stage-payload <sha256>` with the laptop file on the
 provider's exec stdin. The script runs
-`cat | tee <staging file> | openssl dgst -sha256`,
-writing and hashing the bytes in one pass. It checks every pipeline stage's exit
-status and compares the digest to the pin before renaming the staging file to
-`/var/lib/cc-remote/payload/<sha256>.sqfs.admitted` under the store lock (`.lock`).
+`cat | tee /dev/fd/<hash> | dd of=<staging file> oflag=direct`, where `<hash>`
+is a process substitution running `openssl dgst -sha256`, writing and hashing
+the bytes in one pass. `dd` writes 32 MiB blocks with direct I/O, so the file
+reaches the disk as it arrives instead of sitting dirty in the page cache. GNU
+`dd` writes the final short block through the page cache and syncs it. The
+script checks every pipeline stage's exit status, waits for the hash and checks
+its status, and compares the digest to the pin before renaming the staging file
+to `/var/lib/cc-remote/payload/<sha256>.sqfs.admitted` under the store lock
+(`.lock`).
 
 With `url_command`, the machine runs
 `sudo bash -c <fetch script> fetch-payload <sha256> <size>`. The script reads
@@ -229,11 +234,11 @@ It splits the file into 32 MiB ranges and keeps up to eight in flight. Each
 range runs `curl -q --config <pipe> --silent --fail --proto =https --range
 <start>-<end> --max-filesize <length>` with a 30 s connection timeout and a
 600 s transfer timeout, and waits in memory until the ranges before it are
-written. The script
-pipes the ranges in order through `tee` into `openssl dgst -sha256`, writing the
-staging file and hashing the bytes in one pass. The checksum overlaps the
-transfer; the downloaded file is never re-read for admission. The script checks
-every pipeline stage's exit status, requires HTTP `206` for every range, and
+written. The script pipes the ranges in order through the same `tee`, hash,
+and direct-I/O `dd`, writing the staging file and hashing the bytes in one
+pass. The checksum and the disk writes overlap the transfer; the downloaded file
+is never re-read for admission. The script checks every pipeline stage's exit
+status and the hash's, requires HTTP `206` for every range, and
 compares the file's size and SHA-256 with both pins. Only then does it rename
 the staging file to `<sha256>.sqfs.admitted` under the store lock (`.lock`).
 

@@ -62,6 +62,7 @@ const (
 	payloadURLLimit = 8192
 	fetchStreams    = 8
 	fetchRange      = 32 << 20
+	stagingBlock    = fetchRange
 )
 
 func (a TransferArtifact) openStaging() string {
@@ -85,13 +86,22 @@ fi
 ( flock 9; mv -f "$staging" "$store/$digest` + a.Suffix + `.admitted" ) 9> "$store/.lock"`
 }
 
-func (a TransferArtifact) stageScript() string {
-	return a.openStaging() + `set +e
-cat | tee "$staging" | openssl dgst -sha256 -r > "$work/sum"
+func writeStaging(source string) string {
+	return `set +e
+exec {hashing}> >(openssl dgst -sha256 -r > "$work/sum")
+hasher=$!
+` + source + ` | tee /dev/fd/"$hashing" | dd of="$staging" bs=` + strconv.Itoa(stagingBlock) + ` iflag=fullblock oflag=direct status=none
 codes=("${PIPESTATUS[@]}")
+exec {hashing}>&-
+wait "$hasher"
+codes+=("$?")
 set -e
-if [ "${codes[*]}" != "0 0 0" ]; then
-  echo "cc-remote: the ` + a.Name + ` stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, openssl exit ${codes[2]})" >&2
+`
+}
+
+func (a TransferArtifact) stageScript() string {
+	return a.openStaging() + writeStaging("cat") + `if [ "${codes[*]}" != "0 0 0 0" ]; then
+  echo "cc-remote: the ` + a.Name + ` stream failed (cat exit ${codes[0]}, tee exit ${codes[1]}, dd exit ${codes[2]}, openssl exit ${codes[3]})" >&2
   exit 1
 fi
 ` + a.admitStaging()
@@ -151,18 +161,14 @@ fetch_ranges() {
   done
 }
 
-set +e
-fetch_ranges | tee "$staging" | openssl dgst -sha256 -r > "$work/sum"
-codes=("${PIPESTATUS[@]}")
-set -e
-http="$(cat "$work/http")"
+` + writeStaging("fetch_ranges") + `http="$(cat "$work/http")"
 [[ $http =~ ^[0-9]{3}$ ]] || http=none
-if [ "${codes[*]}" != "0 0 0" ]; then
+if [ "${codes[*]}" != "0 0 0 0" ]; then
   hint=""
   if [ "$http" = 403 ]; then
     hint="; a 403 usually means the presigned URL expired"
   fi
-  echo "cc-remote: the ` + a.Name + ` download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, openssl exit ${codes[2]})$hint" >&2
+  echo "cc-remote: the ` + a.Name + ` download failed (curl exit ${codes[0]}, HTTP $http, tee exit ${codes[1]}, dd exit ${codes[2]}, openssl exit ${codes[3]})$hint" >&2
   exit 1
 fi
 if [ "$http" != 206 ]; then

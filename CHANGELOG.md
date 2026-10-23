@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A payload download writes to disk as it arrives.** The fetch and stage
+  scripts wrote the staging file through `tee`, which left the whole download
+  dirty in the page cache. A fresh Sprite has 16 GB of memory and a 20%
+  `vm.dirty_ratio`, so nothing throttled the writer. On a fresh create the
+  2.15 GB payload was in memory 22 s into `payload.fetch`, yet the phase took
+  57 s. The admit's `mv` waited on an ext4 journal commit that first had to
+  write the payload back. The packages lane's man-db and ldconfig triggers
+  stalled for 31 s and 8 s behind the same write-back. The scripts now write
+  the staging file with `dd oflag=direct` in 32 MiB blocks and hash a `tee`
+  copy in a process substitution whose exit status they wait for. Direct writes
+  on that Sprite ran at about 130 MB/s, faster than the download, so the
+  write-back overlaps the transfer and `payload.fetch` should end close to its
+  last byte. A transfer error now names `dd`'s exit status beside `tee`'s and
+  `openssl`'s. The tools fingerprint covers only `provision.sh` and
+  `plugins.sh`, so existing payloads stay valid.
 - **A create runs its `url_command`s while the machine is being created.** A
   direct payload's `url_command` and its packages archive's `url_command` used
   to run one after the other before `machine.create`, which put 2 to 4 s of
