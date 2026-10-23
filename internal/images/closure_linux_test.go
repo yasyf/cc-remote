@@ -102,6 +102,15 @@ done
 exit 1
 `
 	fakeDpkgDeb = `#!/bin/sh
+if [ "$1" = -x ]; then
+  lib="$3/usr/lib/s390x-linux-gnu"
+  mkdir -p "$lib"
+  [ "${DPKG_DEB:-}" = nolib ] && exit 0
+  cat "$2" > "$lib/libeatmydata.so.1.3.0"
+  ln -s libeatmydata.so.1.3.0 "$lib/libeatmydata.so.1"
+  ln -s libeatmydata.so.1 "$lib/libeatmydata.so"
+  exit 0
+fi
 [ "$1" = -f ] && [ "$3" = Package ] || exit 9
 if [ "$#" -gt 3 ]; then
   exec cat "$2.control"
@@ -228,6 +237,9 @@ if [[ " $* " == *" --no-download "* && " $* " == *" --no-install-recommends "* ]
   done
 fi
 printf '%s\n' "${logged[*]}" >> "$TEST_ROOT/apt"
+if [ -n "${LD_PRELOAD:-}" ]; then
+  printf '%s %s\n' "$LD_PRELOAD" "$(< "$LD_PRELOAD")" >> "$TEST_ROOT/preload"
+fi
 if [ "$1" = install ] && [[ " $* " != *" --download-only "* ]]; then
   for arg in "$@"; do
     case "$arg" in
@@ -385,9 +397,9 @@ func (s payloadSandbox) phase(scripts Scripts, sha string) *exec.Cmd {
 }
 
 func TestProvisionPackagesInstallsTheResidentSetForAPayload(t *testing.T) {
-	download := "install -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server\n"
-	full := "update -qq\n" + download + "install -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\n"
-	seeds := "bubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\n"
+	download := "install -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ libeatmydata1 bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server\n"
+	full := "update -qq\n" + download + "install -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 libeatmydata1 bubblewrap\n"
+	seeds := "libeatmydata1\nbubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\n"
 	tests := []struct {
 		name    string
 		mode    []string
@@ -468,6 +480,8 @@ type capturedDebs struct {
 	Debs      []capturedDeb `json:"debs"`
 }
 
+var eatmydataDeb = capturedDeb{Architecture: "amd64", File: "libeatmydata1_131-2_amd64.deb", Package: "libeatmydata1", Version: "131-2"}
+
 func packagesArchive(t *testing.T, files map[string][]byte) []byte {
 	t.Helper()
 	var archive bytes.Buffer
@@ -527,22 +541,23 @@ func assertPackagesStoreHolds(t *testing.T, root string, want ...string) {
 
 func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 	base := "installed\tbase-files=13\ninstalled\tlibc6=2.42-1\n"
-	install := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
+	install := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/libeatmydata1_131-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
 	drifted := "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:\n"
 	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
-		name      string
-		args      []string
-		base      string
-		installed string
-		env       []string
-		unstaged  bool
-		garbage   bool
-		corrupt   bool
-		remove    bool
-		apt       string
-		exit      int
-		wantErr   string
+		name        string
+		args        []string
+		base        string
+		installed   string
+		env         []string
+		unstaged    bool
+		garbage     bool
+		corrupt     bool
+		remove      bool
+		noEatmydata bool
+		apt         string
+		exit        int
+		wantErr     string
 	}{
 		{name: "the captured debs install offline", apt: install},
 		{name: "a repeat run over the installed resident packages passes", base: base + "installed\tbubblewrap=0.11.0-2\ninstalled\topenssh-server=1:9.9p1-3\n", apt: install},
@@ -552,6 +567,8 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 		{name: "a failing install names an extra base package", base: base + "installed\tvim=2\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "+vim=2\n"},
 		{name: "a failing install names a missing base package", base: "installed\tbase-files=13\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-libc6=2.42-1\n"},
 		{name: "a corrupted deb fails before apt", corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
+		{name: "an archive without the libeatmydata1 deb fails before apt", noEatmydata: true, exit: 1, wantErr: "cc-remote: the packages archive captured no libeatmydata1 deb, which the resident install preloads to skip dpkg's syncs; rebuild the payload"},
+		{name: "a libeatmydata1 deb without its library fails before apt", env: []string{"DPKG_DEB=nolib"}, exit: 1, wantErr: "cc-remote: libeatmydata1_131-2_amd64.deb holds 0 libeatmydata.so files, not one"},
 		{name: "an unadmitted packages archive fails before apt", unstaged: true, exit: 1, wantErr: "cc-remote: no packages archive is admitted at "},
 		{name: "an admitted archive that does not extract leaves no tree behind", garbage: true, exit: 2, wantErr: "tar: "},
 		{name: "resident without the archive sha256 is a usage error", args: []string{PackagesResident}, exit: 2, wantErr: "provision: packages resident takes the packages archive sha256"},
@@ -578,8 +595,18 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 				"curl":       fakeOnline,
 				"dpkg-query": fakeStatusQuery,
 				"dpkg":       fakeDpkgStatus,
+				"dpkg-deb":   fakeDpkgDeb,
 			})
-			contents := map[string]string{"bubblewrap_0.11.0-2_amd64.deb": "bubblewrap deb", "openssh-server_1%3a9.9p1-3_amd64.deb": "openssh-server deb"}
+			contents := map[string]string{"bubblewrap_0.11.0-2_amd64.deb": "bubblewrap deb", eatmydataDeb.File: "libeatmydata1 deb", "openssh-server_1%3a9.9p1-3_amd64.deb": "openssh-server deb"}
+			resident := []capturedDeb{
+				{Architecture: "amd64", File: "bubblewrap_0.11.0-2_amd64.deb", Package: "bubblewrap", Version: "0.11.0-2"},
+				eatmydataDeb,
+				{Architecture: "amd64", File: "openssh-server_1%3a9.9p1-3_amd64.deb", Package: "openssh-server", Version: "1:9.9p1-3"},
+			}
+			if tt.noEatmydata {
+				resident = slices.Delete(resident, 1, 2)
+				delete(contents, eatmydataDeb.File)
+			}
 			captured := []string{"base-files=13", "libc6=2.42-1"}
 			if tt.remove {
 				captured = append(captured, "watchman=2024.1")
@@ -591,10 +618,7 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 			debs := writeCapturedPackages(t, root, capturedDebs{
 				Artifacts: []capturedDeb{},
 				Base:      captured,
-				Debs: []capturedDeb{
-					{Architecture: "amd64", File: "bubblewrap_0.11.0-2_amd64.deb", Package: "bubblewrap", Version: "0.11.0-2"},
-					{Architecture: "amd64", File: "openssh-server_1%3a9.9p1-3_amd64.deb", Package: "openssh-server", Version: "1:9.9p1-3"},
-				},
+				Debs:      resident,
 			}, contents, corrupt, !tt.unstaged)
 			admitted := debs + ".tar.admitted"
 			if tt.garbage {
@@ -634,6 +658,19 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 			case want != "" && (aptErr != nil || string(apt) != want):
 				t.Errorf("apt-get calls:\n%s\n%v\nwant:\n%s", apt, aptErr, want)
 			}
+			preload, err := os.ReadFile(filepath.Join(root, "preload"))
+			switch {
+			case tt.apt == "" && !os.IsNotExist(err):
+				t.Errorf("an install that never ran apt preloaded %q, %v", preload, err)
+			case tt.apt != "":
+				library, content, _ := strings.Cut(strings.TrimSuffix(string(preload), "\n"), " ")
+				if err != nil || strings.Count(string(preload), "\n") != 1 || !strings.HasSuffix(library, "/eatmydata/usr/lib/s390x-linux-gnu/libeatmydata.so.1.3.0") || content != "libeatmydata1 deb" {
+					t.Errorf("apt-get ran with LD_PRELOAD %q, %v; want once, the library extracted from the captured libeatmydata1 deb", preload, err)
+				}
+				if _, err := os.Stat(library); !os.IsNotExist(err) {
+					t.Errorf("the extracted library outlived the install: %v", err)
+				}
+			}
 			if online, err := os.ReadFile(filepath.Join(root, "online")); !os.IsNotExist(err) {
 				t.Errorf("the offline install reached for the network: %q %v", online, err)
 			}
@@ -648,8 +685,8 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 	sum := sha512.Sum512([]byte("deb"))
 	inventory := scriptInventory()
 	inventory.System = []Artifact{{Name: "orca", Version: "1.4.215", URL: "https://example.invalid/orca.deb", SHA512: hex.EncodeToString(sum[:]), Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}}}
-	full := "update -qq\ninstall -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
-	resident := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/\n"
+	full := "update -qq\ninstall -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives=@BUILD@/debs/ libeatmydata1 bubblewrap ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server @BUILD@/artifacts/orca-1.4.215.deb\ninstall -y -qq --no-install-recommends --no-upgrade ca-certificates curl git jq openssl python3 unzip xz-utils openssh-server libnss3 libasound2t64 libeatmydata1 bubblewrap\ninstall -y -qq @BUILD@/artifacts/orca-1.4.215.deb\n"
+	resident := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/libeatmydata1_131-2_amd64.deb\n"
 	tests := []struct {
 		name    string
 		args    []string
@@ -661,7 +698,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 		apt     string
 		fetches int
 	}{
-		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "bubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
+		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "libeatmydata1\nbubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
 		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io @DEBS@/orca-1.4.215.deb\n"},
 		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, packagesDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
 		{name: "a deb naming no package is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package", fetches: 1},
@@ -686,8 +723,8 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 			debs := writeCapturedPackages(t, root, capturedDebs{
 				Artifacts: []capturedDeb{{Architecture: "amd64", File: "orca-1.4.215.deb", Package: "orca-ide", Version: "1.4.215"}},
 				Base:      []string{"base-files=13"},
-				Debs:      []capturedDeb{},
-			}, map[string]string{"orca-1.4.215.deb": tt.copy}, "", true)
+				Debs:      []capturedDeb{eatmydataDeb},
+			}, map[string]string{"orca-1.4.215.deb": tt.copy, eatmydataDeb.File: "libeatmydata1 deb"}, "", true)
 			writePluginTestFile(t, ide, []byte("#!/bin/sh\n"), 0o755)
 			writePluginTestFile(t, filepath.Join(root, "installed"), []byte("ii \tbase-files\n"), 0o644)
 			writePluginTestFile(t, filepath.Join(root, "base"), []byte("installed\tbase-files=13\n"), 0o644)
@@ -1064,6 +1101,7 @@ func newCaptureHost(t *testing.T) *captureHost {
 			"xkb-data":            {Version: "2.44-1", Arch: "all", Files: []string{"/usr/share/X11", "/usr/share/X11/xkb", "/usr/share/xkeyboard-config-2", "/usr/share/xkeyboard-config-2/rules", "/usr/share/xkeyboard-config-2/rules/evdev"}},
 			"openssh-server":      {Version: "1:9.9p1-3", Depends: "libwrap0, ssh-sftp-server | openssh-sftp-server", Files: []string{"/usr/sbin/sshd"}},
 			"libwrap0":            {Version: "7.6.q-35", Files: []string{lib + "/libwrap.so.0"}},
+			"libeatmydata1":       {Version: "131-2", Depends: "libc6 (>= 2.34)", Files: []string{lib + "/libeatmydata.so.1.3.0", lib + "/libeatmydata.so.1", lib + "/libeatmydata.so"}},
 			"openssh-sftp-server": {Version: "1:9.9p1-3", Provides: "ssh-sftp-server", Files: []string{"/usr/lib/openssh/sftp-server"}},
 			"base-files":          {Version: "13ubuntu10", Files: []string{"/etc/environment", "/etc"}},
 			"libc6":               {Version: "2.42-1ubuntu1", Files: []string{lib + "/libc.so.6"}},
@@ -1109,10 +1147,10 @@ func newCaptureHost(t *testing.T) *captureHost {
 		}
 	}
 	before := "ii \tbase-files\nii \tlibc6\n"
-	after := before + "ii \tfonts-x\nii \thicolor-icon-theme\nii \tlibfoo1\nii \tlibgtk-3-0t64\nii \tlibwrap0\nii \topenssh-server\nii \topenssh-sftp-server\nii \tshared-mime-info\nii \txkb-data\n"
+	after := before + "ii \tfonts-x\nii \thicolor-icon-theme\nii \tlibeatmydata1\nii \tlibfoo1\nii \tlibgtk-3-0t64\nii \tlibwrap0\nii \topenssh-server\nii \topenssh-sftp-server\nii \tshared-mime-info\nii \txkb-data\n"
 	writePluginTestFile(t, filepath.Join(h.build, "packages.before"), []byte(before), 0o644)
 	writePluginTestFile(t, filepath.Join(h.build, "packages.after"), []byte(after), 0o644)
-	writePluginTestFile(t, filepath.Join(h.build, "seeds"), []byte("ca-certificates\nopenssh-server\nbubblewrap\n"), 0o644)
+	writePluginTestFile(t, filepath.Join(h.build, "seeds"), []byte("libeatmydata1\nca-certificates\nopenssh-server\nbubblewrap\n"), 0o644)
 	writeFakes(t, h.fakes, map[string]string{"dpkg-query": fakeDpkgQuery, "fc-cache": fakeFcCache, "runuser": fakeRunuser, "dpkg-deb": fakeDpkgDeb})
 	return h
 }
@@ -1502,7 +1540,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			h.dpkg.Packages["libnew1"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew.so.1"}}
 			h.record(map[string]string{"packages.after": "ii \tlibnew1\nii \torca-ide\n", "seeds": "orca-ide\n"})
 		}, check: func(t *testing.T, h *captureHost) {
-			if got, want := h.resident(t), []string{"libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca-ide"}; !slices.Equal(got, want) {
+			if got, want := h.resident(t), []string{"libeatmydata1", "libnew1", "libwrap0", "openssh-server", "openssh-sftp-server", "orca-ide"}; !slices.Equal(got, want) {
 				t.Errorf("resident = %v, want %v", got, want)
 			}
 		}},
@@ -1511,7 +1549,7 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			h.dpkg.Packages["libnew2"] = &fakePackage{Version: "1.0-1", Files: []string{lib + "/libnew2.so.2"}}
 			h.record(map[string]string{"packages.before": "ii \tbubblewrap\n", "packages.after": "ii \tbubblewrap\nii \tlibnew2\n"})
 		}, check: func(t *testing.T, h *captureHost) {
-			if got, want := h.resident(t), []string{"libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
+			if got, want := h.resident(t), []string{"libeatmydata1", "libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
 				t.Errorf("resident = %v, want %v", got, want)
 			}
 		}},
@@ -1550,13 +1588,13 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			h.payload.Resident = append(h.payload.Resident, "libnew2")
 			h.record(map[string]string{"packages.before": "ii \tbubblewrap\nii \tlibmiddle1\n", "packages.after": "ii \tbubblewrap\nii \tlibmiddle1\nii \tlibnew2\n", "seeds": "libnew2\n"})
 		}, check: func(t *testing.T, h *captureHost) {
-			if got, want := h.resident(t), []string{"libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
+			if got, want := h.resident(t), []string{"libeatmydata1", "libnew2", "libwrap0", "openssh-server", "openssh-sftp-server"}; !slices.Equal(got, want) {
 				t.Errorf("resident = %v, want %v", got, want)
 			}
 		}},
 		{name: "the resident download is captured beside the closure", check: func(t *testing.T, h *captureHost) {
 			want := capturedDebs{Artifacts: []capturedDeb{}, Base: []string{"base-files=13ubuntu10", "libc6=2.42-1ubuntu1"}}
-			for _, deb := range []capturedDeb{{Package: "libwrap0", Version: "7.6.q-35"}, {Package: "openssh-server", Version: "1:9.9p1-3"}, {Package: "openssh-sftp-server", Version: "1:9.9p1-3"}} {
+			for _, deb := range []capturedDeb{{Package: "libeatmydata1", Version: "131-2"}, {Package: "libwrap0", Version: "7.6.q-35"}, {Package: "openssh-server", Version: "1:9.9p1-3"}, {Package: "openssh-sftp-server", Version: "1:9.9p1-3"}} {
 				deb.Architecture, deb.File = "amd64", deb.Package+"_"+strings.ReplaceAll(deb.Version, ":", "%3a")+"_amd64.deb"
 				sum := sha256.Sum256([]byte("deb " + deb.Package + " " + deb.Version))
 				deb.SHA256 = hex.EncodeToString(sum[:])
@@ -1577,7 +1615,11 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			for _, entry := range entries {
 				names = append(names, entry.Name())
 			}
-			if wantNames := []string{"debs.json", want.Debs[0].File, want.Debs[1].File, want.Debs[2].File}; !slices.Equal(names, wantNames) {
+			wantNames := []string{"debs.json"}
+			for _, deb := range want.Debs {
+				wantNames = append(wantNames, deb.File)
+			}
+			if !slices.Equal(names, wantNames) {
 				t.Errorf("the captured debs are %q, want %q", names, wantNames)
 			}
 			for _, deb := range want.Debs {
@@ -1605,8 +1647,8 @@ func TestCaptureBuildsTheClosure(t *testing.T) {
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatal(err)
 			}
-			if want := []capturedDeb{{Architecture: "amd64", File: "orca-ide_1.4.215_amd64.deb", Package: "orca-ide", Version: "1.4.215"}}; !reflect.DeepEqual(got.Artifacts, want) || len(got.Debs) != 3 {
-				t.Errorf("debs.json artifacts = %+v with %d debs, want %+v with 3", got.Artifacts, len(got.Debs), want)
+			if want := []capturedDeb{{Architecture: "amd64", File: "orca-ide_1.4.215_amd64.deb", Package: "orca-ide", Version: "1.4.215"}}; !reflect.DeepEqual(got.Artifacts, want) || len(got.Debs) != 4 {
+				t.Errorf("debs.json artifacts = %+v with %d debs, want %+v with 4", got.Artifacts, len(got.Debs), want)
 			}
 			if copied, err := os.ReadFile(filepath.Join(h.debs, "orca-ide_1.4.215_amd64.deb")); err != nil || string(copied) != "deb orca-ide 1.4.215" {
 				t.Errorf("the artifact deb was copied as %q, %v", copied, err)
@@ -1808,7 +1850,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	switch {
 	case !reflect.DeepEqual(manifest.Packages, wantPackages):
 		t.Errorf("packages = %v, want %v", manifest.Packages, wantPackages)
-	case !slices.Equal(manifest.Resident, []string{"libwrap0", "openssh-server", "openssh-sftp-server"}):
+	case !slices.Equal(manifest.Resident, []string{"libeatmydata1", "libwrap0", "openssh-server", "openssh-sftp-server"}):
 		t.Errorf("resident = %v", manifest.Resident)
 	case !reflect.DeepEqual(manifest.Consumers, wantConsumers):
 		t.Errorf("consumers = %v, want %v", manifest.Consumers, wantConsumers)
@@ -1864,7 +1906,7 @@ func (h *captureHost) checkCaptured(t *testing.T, out string, before []string) {
 	for _, path := range []string{lib + "/libfoo.so.1.0", lib + "/libalias.so.1", lib + "/gio/modules/libgiofoo.so", "/usr/bin/footool", "/usr/share/doc/libfoo1/copyright", "/usr/share/fonts/truetype/x/X.ttf", "/usr/share/icons/hicolor/index.theme", "/usr/share/icons/hicolor/cursor.theme", "/usr/share/mime/packages/freedesktop.org.xml", lib + "/gtk-3.0/3.0.0/immodules/im-x.so", "/usr/share/glib-2.0/schemas/org.x.gschema.xml", "/usr/share/themes/Default/gtk-3.0/gtk.css", "/usr/share/xkeyboard-config-2/rules/evdev"} {
 		bytes += len(h.contents[path])
 	}
-	if want := fmt.Sprintf("cc-remote: captured 6 packages, 18 files, %d bytes into %s\ncc-remote: captured 3 resident debs into %s\n", bytes, tree, h.debs); out != want {
+	if want := fmt.Sprintf("cc-remote: captured 6 packages, 18 files, %d bytes into %s\ncc-remote: captured 4 resident debs into %s\n", bytes, tree, h.debs); out != want {
 		t.Errorf("output = %q, want %q", out, want)
 	}
 }

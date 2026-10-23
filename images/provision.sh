@@ -22,6 +22,7 @@ build_dir=/var/lib/cc-remote/build
 debs_dir=/var/lib/cc-remote/build/resident
 packages_pack=/var/lib/cc-remote/build/packages.tar
 packages_store=/var/lib/cc-remote/packages
+eatmydata_package=libeatmydata1
 closure_packages=({{range $i, $name := .Closure}}{{if $i}} {{end}}{{q $name}}{{end}})
 {{- end}}
 prerequisites=(ca-certificates curl git jq openssl python3 unzip xz-utils)
@@ -99,9 +100,7 @@ record_deb() {
 
 resident_packages() {
   local package
-{{- if .Resident}}
-  printf '%s\n'{{range .Resident}} {{q .}}{{end}}
-{{- end}}
+  printf '%s\n' "$eatmydata_package"{{range .Resident}} {{q .}}{{end}}
   for package in "$@"; do
     if ! closure_package "$package"; then
       printf '%s\n' "$package"
@@ -138,6 +137,24 @@ explain_base_drift() {
   exit "$status"
 }
 
+unpack_eatmydata() {
+  local manifest="$1" file
+  local -a libraries
+  file="$(jq -r --arg package "$eatmydata_package" '.debs[] | select(.package == $package) | .file' "$manifest")" || exit
+  if [ -z "$file" ]; then
+    echo "cc-remote: the packages archive captured no $eatmydata_package deb, which the resident install preloads to skip dpkg's syncs; rebuild the payload" >&2
+    exit 1
+  fi
+  install -d -m 0755 "$tmp_dir/eatmydata"
+  dpkg-deb -x "$tmp_dir/apt-archives/$file" "$tmp_dir/eatmydata"
+  mapfile -t libraries < <(find "$tmp_dir/eatmydata" -type f -name 'libeatmydata.so*')
+  if [ "${#libraries[@]}" -ne 1 ]; then
+    echo "cc-remote: $file holds ${#libraries[@]} libeatmydata.so files, not one" >&2
+    exit 1
+  fi
+  eatmydata="${libraries[0]}"
+}
+
 admit_packages() {
   local sha256="$1" extracted
   local archive="$packages_store/$sha256.tar"
@@ -157,7 +174,7 @@ admit_packages() {
 }
 
 provision_packages() {
-  local mode="${1:-full}" sha256="${2:-}" listing status package manifest digest file deb_dir
+  local mode="${1:-full}" sha256="${2:-}" listing status package manifest digest file deb_dir eatmydata
   local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=() resident=() staged=() captured=() deb_flags=()
   case "$mode" in
     full) ;;
@@ -185,7 +202,8 @@ provision_packages() {
       install -m 0644 "$deb_dir/$file" "$tmp_dir/apt-archives/$file"
       captured+=("$deb_dir/$file")
     done < "$tmp_dir/debs"
-    apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || explain_base_drift "$?" "$manifest"
+    unpack_eatmydata "$manifest"
+    LD_PRELOAD="$eatmydata" apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || explain_base_drift "$?" "$manifest"
   else
     apt-get update -qq
     mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
@@ -203,7 +221,7 @@ provision_packages() {
 {{- end}}
 {{- end}}
     apt-get install -y -qq --no-install-recommends --no-upgrade --download-only -o Dir::Cache::Archives="$build_dir/debs/" "${resident[@]}" "${staged[@]}" > /dev/null
-    apt-get install -y -qq --no-install-recommends --no-upgrade "${packages[@]}"{{range .Resident}} {{q .}}{{end}} > /dev/null
+    apt-get install -y -qq --no-install-recommends --no-upgrade "${packages[@]}" "$eatmydata_package"{{range .Resident}} {{q .}}{{end}} > /dev/null
   fi
 {{- else}}
 
