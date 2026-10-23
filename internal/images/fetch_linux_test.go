@@ -30,20 +30,24 @@ func TestFetchAdmitsOnlyTheExactBytes(t *testing.T) {
 	sha, wrongSha := hex.EncodeToString(sum[:]), hex.EncodeToString(wrongSum[:])
 	size, half := strconv.Itoa(len(payload)), len(payload)/2
 	const sentinel = "X-Amz-Signature=0123456789abcdef0123456789abcdef"
+	dd, err := exec.LookPath("dd")
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
-		name      string
-		handler   http.HandlerFunc
-		plain     bool
-		hashFails bool
-		wantErr   string
+		name    string
+		handler http.HandlerFunc
+		plain   bool
+		fakes   map[string]string
+		wantErr string
 	}{
 		{name: "the exact bytes are admitted", handler: serveRanges(payload)},
 		{name: "an expired url is refused with a hint", handler: func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "AccessDenied", http.StatusForbidden)
-		}, wantErr: " download failed (curl exit 22, HTTP 403, tee exit 0, openssl exit 0); a 403 usually means the presigned URL expired"},
+		}, wantErr: " download failed (curl exit 22, HTTP 403, tee exit 0, dd exit 0, openssl exit 0); a 403 usually means the presigned URL expired"},
 		{name: "a missing object is refused", handler: func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "NoSuchKey", http.StatusNotFound)
-		}, wantErr: " download failed (curl exit 22, HTTP 404, tee exit 0, openssl exit 0)"},
+		}, wantErr: " download failed (curl exit 22, HTTP 404, tee exit 0, dd exit 0, openssl exit 0)"},
 		{name: "a corrupt body is refused", handler: serveRanges(wrong), wantErr: " has sha256 " + wrongSha + ", want " + sha},
 		{name: "a truncated body is refused", handler: func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Length", size)
@@ -71,7 +75,8 @@ func TestFetchAdmitsOnlyTheExactBytes(t *testing.T) {
 			_, _ = w.Write(payload)
 		}, wantErr: " URL answered HTTP 200, want 206"},
 		{name: "a plain http url is refused before it connects", plain: true, wantErr: " download failed (curl exit 1,"},
-		{name: "a failed digest cannot admit its matching output", handler: serveRanges(payload), hashFails: true, wantErr: " download failed (curl exit 0, HTTP 206, tee exit 0, openssl exit 7)"},
+		{name: "a failed digest cannot admit its matching output", handler: serveRanges(payload), fakes: map[string]string{"openssl": failingHash(sha)}, wantErr: " download failed (curl exit 0, HTTP 206, tee exit 0, dd exit 0, openssl exit 7)"},
+		{name: "a failed write cannot admit a matching digest", handler: serveRanges(payload), fakes: map[string]string{"dd": failingWrite(dd)}, wantErr: " download failed (curl exit 0, HTTP 206, tee exit 0, dd exit 5, openssl exit 0)"},
 	}
 	for _, artifact := range append(slices.Clone(stagedArtifacts), HelperArtifact) {
 		for _, tt := range tests {
@@ -93,9 +98,9 @@ func TestFetchAdmitsOnlyTheExactBytes(t *testing.T) {
 				cmd := exec.Command("bash", "-c", fetch, "fetch-"+artifact.Label, sha, size)
 				cmd.Stdin = bytes.NewReader(PayloadURL{raw: target}.curlConfig())
 				cmd.Env = env
-				if tt.hashFails {
+				if tt.fakes != nil {
 					fakes := t.TempDir()
-					writeFakes(t, fakes, map[string]string{"openssl": "#!/bin/sh\ncat > /dev/null\nprintf '%s  -\\n' " + sha + "\nexit 7\n"})
+					writeFakes(t, fakes, tt.fakes)
 					cmd.Env = append(cmd.Env, "PATH="+fakes+":"+os.Getenv("PATH"))
 				}
 				out, err := cmd.CombinedOutput()
@@ -146,7 +151,7 @@ func TestFetchAdmitsRangesInOrder(t *testing.T) {
 	}{
 		{name: "every range is admitted in order"},
 		{name: "a first range that arrives after a later one is still admitted first", held: "bytes=0-" + strconv.Itoa(span-1)},
-		{name: "one refused range refuses the download", refuse: refused, wantErr: " download failed (curl exit 22, HTTP 403, tee exit 0, openssl exit 0); a 403 usually means the presigned URL expired"},
+		{name: "one refused range refuses the download", refuse: refused, wantErr: " download failed (curl exit 22, HTTP 403, tee exit 0, dd exit 0, openssl exit 0); a 403 usually means the presigned URL expired"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
