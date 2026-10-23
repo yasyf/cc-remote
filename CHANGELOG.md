@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `machine.create` phases on the main lane. A failed command now fails the
   create after the machine exists, and the machine is destroyed the same way a
   failed provision destroys it. A failed machine create cancels both commands.
+- **The resident package install no longer waits on dpkg's syncs.** The
+  offline install of a payload's resident debs took 59 s for 54 packages on a
+  fresh Sprite, and dpkg went quiet for 19 to 36 s at a time while the payload
+  download or the tool install wrote heavily beside it. `--force-unsafe-io`
+  skips the sync after each unpacked file but not the roughly 300 that dpkg
+  makes after each status change. `libeatmydata1` is now always a resident
+  package, so `packages full` installs it and the packages archive captures its
+  deb. Resident mode extracts that deb into its scratch directory and runs the
+  offline `apt-get install` with `LD_PRELOAD` pointing at the extracted
+  `libeatmydata.so`, so dpkg and the maintainer scripts skip every `fsync`.
+  The change moves the tools fingerprint, so every payload is rebuilt for this
+  release anyway. A packages archive without a `libeatmydata1` deb fails the
+  install and names the package.
 - **A Claude worker's Orca runtime starts beside the create or the warm claim.**
   `orca create` and `orca prepare` used to start the runtime after the whole
   workspace was ready. They now start it once the machine's tools are
