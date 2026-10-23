@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed provision destroys it. A failed machine create cancels both commands.
 - **The resident package install no longer waits on dpkg's syncs.** The
   offline install of a payload's resident debs took 59 s for 54 packages on a
-  fresh Sprite, and dpkg went quiet for 19 to 36 s at a time while the payload
+  fresh Sprite. dpkg went quiet for 19 to 36 s at a time while the payload
   download or the tool install wrote heavily beside it. `--force-unsafe-io`
   skips the sync after each unpacked file but not the roughly 300 that dpkg
   makes after each status change. `libeatmydata1` is now always a resident
@@ -94,6 +94,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unconfigured changes nothing.
 
 ### Fixed
+- **`cc-remote destroy` removes the warm pool record of the name it destroys.**
+  Destroy deleted the workspace record and left `pool/<name>.json` behind, so
+  `orca pool status` went on listing machines that were long gone; one state
+  directory listed 17 of them. Destroy now removes the pool record together
+  with the workspace record. For a name that has only a pool record, destroy
+  used to refuse. It now removes the pool record, logs that it touched no
+  machine, and still revokes a tailnet node an earlier attempt left bound.
+  Nothing prunes pool records on its own.
 - **`orca prepare --warm` no longer spends a warm workspace on a helper pin it
   cannot use.** A CLI whose release differed from `orca.bootstrap_helper`
   claimed a ready workspace first and compared the pin afterwards, so the

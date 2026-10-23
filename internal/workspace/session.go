@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1247,7 +1248,7 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	defer held.Release()
 	record, err := s.Recorded(name)
 	if errors.Is(err, errNotRecorded) {
-		return s.forgetBinding(ctx, held, err)
+		return s.forgetUnrecorded(ctx, held, err)
 	}
 	if err != nil {
 		return err
@@ -1263,7 +1264,7 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	if err := s.discard(ctx, record.Machine, name); err != nil {
 		return err
 	}
-	return s.forget(name)
+	return errors.Join(s.forget(name), state.Remove(s.State.Pool(name)))
 }
 
 func (s *Session) Extend(ctx context.Context, name string, by time.Duration) (*Record, error) {
@@ -1289,6 +1290,21 @@ func (s *Session) Extend(ctx context.Context, name string, by time.Duration) (*R
 	}
 	record.Compute.Deadline = deadline
 	return record, s.save(record)
+}
+
+func (s *Session) forgetUnrecorded(ctx context.Context, held *state.Held, missing error) error {
+	pool := s.State.Pool(held.Name)
+	switch _, err := os.Lstat(pool); {
+	case err == nil:
+		if err := state.Remove(pool); err != nil {
+			return err
+		}
+		s.Log.Info("no workspace is recorded, so destroy removed only its warm pool record and touched no machine", "workspace", held.Name, "record", pool)
+		missing = nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+	return s.forgetBinding(ctx, held, missing)
 }
 
 func (s *Session) forgetBinding(ctx context.Context, held *state.Held, missing error) error {

@@ -379,6 +379,12 @@ found the name already taken, which removes it.
 `provisioning`, `ready`, `claimed`, `prepared`, `failed`, `abandoned`, or
 `refused`.
 
+`cc-remote destroy <name>` removes the name's pool record with its workspace
+record. When a name has a pool record but no workspace record, destroy removes
+the pool record, logs that it touched no machine, and exits zero, so a record
+whose machine is long gone can be cleared by name. `status` and `fill` never
+remove a record on their own.
+
 `orca create`, `orca prepare`, and `create` or `resume` with
 `--connection server` each hold the workspace's task lock,
 `<state_dir>/orca/<name>.json.lock`, from before their first effect until they
