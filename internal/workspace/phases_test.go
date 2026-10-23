@@ -310,9 +310,9 @@ var plainLanes = map[string]string{
 func TestEveryCreatePhaseLogsOnceWithItsLaneAndTheSummaryCountsTheExecs(t *testing.T) {
 	plain := plainLanes
 	payload := maps.Clone(plain)
-	payload["payload.stage"], payload["payload.mount"] = laneMount, laneMount
+	payload["payload.stage"], payload["payload.mount"], payload["payload.prefetch"] = laneMount, laneMount, lanePrefetch
 	direct := maps.Clone(plain)
-	direct["payload.url"], direct["payload.fetch"], direct["payload.mount"], direct["loader"], direct["packages.stage"] = laneMain, laneMount, laneMount, laneLoader, lanePackages
+	direct["payload.url"], direct["payload.fetch"], direct["payload.mount"], direct["payload.prefetch"], direct["loader"], direct["packages.stage"] = laneMain, laneMount, laneMount, lanePrefetch, laneLoader, lanePackages
 	closure := maps.Clone(payload)
 	closure["loader"], closure["packages.stage"] = laneLoader, lanePackages
 	directClosure := maps.Clone(closure)
@@ -340,13 +340,13 @@ func TestEveryCreatePhaseLogsOnceWithItsLaneAndTheSummaryCountsTheExecs(t *testi
 		{"direct payload", func(t *testing.T) *harness {
 			h, _ := newDirectPayloadHarness(t, "printf '%s\\n' '"+payloadURL+"'")
 			return h
-		}, 13, direct},
-		{"closure", newPayloadHarness, 13, closure},
+		}, 14, direct},
+		{"closure", newPayloadHarness, 14, closure},
 		{"closure with a direct packages archive", func(t *testing.T) *harness {
 			h, _ := newDirectPackagesHarness(t, "printf '%s\\n' '"+packagesURL+"'")
 			return h
-		}, 13, directClosure},
-		{"closure with a tailnet", newClosureTailnetHarness, 15, enrolled},
+		}, 14, directClosure},
+		{"closure with a tailnet", newClosureTailnetHarness, 16, enrolled},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

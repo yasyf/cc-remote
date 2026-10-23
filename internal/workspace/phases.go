@@ -14,6 +14,7 @@ import (
 const (
 	laneMain      = "main"
 	laneMount     = "mount"
+	lanePrefetch  = "prefetch"
 	lanePackages  = "packages"
 	laneTools     = "tools"
 	laneLoader    = "loader"

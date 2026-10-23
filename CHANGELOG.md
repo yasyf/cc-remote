@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **A create reads the mounted payload into the page cache beside the tools.**
+  The payload download writes its staging file with `dd oflag=direct`, so the
+  2.15 GB image never enters the page cache and every read of the mounted
+  squashfs goes to the Sprite's disk. About one read in ten lands on a slow
+  tier. On a fresh Sprite, 400 random 128 KiB direct reads of the payload file
+  had a p50 of 0.66 ms, a p90 of 709 ms, and a p99 of 1.5 s. The tool install,
+  `plugins.sh configure`, tailscaled, and the Orca runtime all page code in from
+  the squashfs at startup, so they stalled together. On v0.26.12 and v0.26.13
+  fresh creates `tailnet.enroll` took 31.9 s and 38.3 s and `configure` took
+  32.1 s and 40.0 s, against 5.0 s and 4.4 s on v0.26.11, whose buffered write
+  left the image cached. Once `payload.mount` succeeds, a new
+  `payload.prefetch` phase on its own `prefetch` lane reads the image once with
+  `dd bs=32M of=/dev/null` beside the tools lane, and the create joins it with
+  the other lanes before publishing. A cold sequential read of the whole image
+  took 16.1 s, about 134 MB/s, and a warm re-read took 0.8 s. A failed read
+  fails the create the way any failed lane does. The warm pool fills through
+  the same create; a warm claim and a resume's reinstall do not prefetch. The
+  fetch keeps `oflag=direct`, and the tools fingerprint covers only
+  `provision.sh` and `plugins.sh`, so existing payloads stay valid.
 - **The resident package install skips man-db's index update.** After the
   offline install, dpkg runs man-db's trigger, which updates the manual-page
   index that only `apropos` and `whatis` read. The trigger took under 1 s on

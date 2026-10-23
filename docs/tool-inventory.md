@@ -349,10 +349,11 @@ description includes `cc-remote-image=<fingerprint>`.
 
 Installation clears readiness and never writes the stamp. Create first runs
 `prerequisites` on machines provisioned in place. It then runs packages,
-checkout, and tool installation in concurrent lanes. The tools lane includes
-payload mounting when configured. Profile preparation (when nonempty) and
-configuration wait for both installs to succeed; tailnet enrollment follows
-configuration.
+checkout, and tool installation in concurrent lanes. A configured payload is
+mounted on its own lane before the tools install, and a prefetch lane then reads
+the mounted image into the page cache beside them. Profile preparation (when
+nonempty) and configuration wait for both installs to succeed; tailnet
+enrollment follows configuration.
 Only after every lane succeeds does `publish` write the stamp; connection follows.
 
 On resume, tool reinstallation also runs `prerequisites` first on machines
