@@ -161,9 +161,12 @@ HTTPS download by the machine. Exactly one of `path` and `url_command` must be s
 cc-remote appends `sha256` and decimal `size`, in that order, to the configured
 `url_command` arguments. It runs the command in the config file's directory with
 empty stdin and a 60 s timeout. On create, it runs after the name and tailnet
-checks, before saving the workspace record or creating a machine. On a resume
-that needs tool reinstallation because the readiness stamp changed, it runs
-again immediately before the reinstall.
+checks and the workspace record's save, at the same time as the machine create
+and the other archive's `url_command`. A failed machine create cancels the
+command. A failed command fails the create once the machine exists and destroys
+that machine, the same as a failed provision. On a resume that needs tool
+reinstallation because the readiness stamp changed, both commands run again
+side by side, immediately before the reinstall.
 
 The command's output contract is:
 
@@ -171,8 +174,8 @@ The command's output contract is:
 | --- | --- |
 | Stdout | Exactly one absolute `https://` URL with a host and no userinfo, optionally followed by one newline. The URL is at most 8192 bytes of printable ASCII, with no spaces, double quotes (`"`), or backslashes (`\`). |
 | Stderr | Discarded on success, failure, timeout, and kill; never reaches the CLI, Orca, slog, errors, state, or results. The command must never print the URL on stderr. |
-| Exit 0 | Supplies the URL on stdout; malformed output still fails creation before a machine exists. |
-| Nonzero exit | Fails creation before a machine exists, reported only as `payload url_command <argv0>: <exit status or signal>`. A timeout also fails at this point. |
+| Exit 0 | Supplies the URL on stdout; malformed output still fails creation, and the new machine is destroyed. |
+| Nonzero exit | Fails creation and destroys the new machine, reported only as `payload url_command <argv0>: <exit status or signal>`. A timeout fails the same way. |
 
 A site command can use `aws s3api head-object` to confirm the object exists and
 its `ContentLength` equals the supplied `size`, returning exit status `3`

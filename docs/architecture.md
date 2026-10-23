@@ -60,11 +60,14 @@ group or other permissions. The opt-in direct source uses `url_command`,
 byte count. Both sources require an in-place machine with `sprite-env` and cannot
 be combined with `image`.
 
-For a direct source, create acquires the URL after the name and tailnet checks,
-before saving the workspace record or creating a machine. A failed URL command
-stops create before either exists. The URL stays in memory and reaches the
-machine only on the remote fetch command's stdin as a curl configuration. It never
-appears in process arguments or environment, logs, state, result JSON, or errors.
+For a direct source, create acquires the URL after the name and tailnet checks
+and the workspace record's save, while the provider creates the machine. The
+payload and packages archive URLs are acquired side by side. A failed URL
+command fails create once the machine exists and destroys it, the same as a
+failed provision; a failed machine create cancels the URL commands. The URL
+stays in memory and reaches the machine only on the remote fetch command's stdin
+as a curl configuration. It never appears in process arguments or environment,
+logs, state, result JSON, or errors.
 
 The mount lane fetches the direct payload while the checkout lane runs. The
 download writes the file and computes its SHA-256 in one pass; matching size

@@ -331,6 +331,16 @@ type flaky struct {
 	providers.Provider
 	unreachable atomic.Bool
 	onSSH       func()
+	onCreate    func() error
+}
+
+func (f *flaky) Create(ctx context.Context, spec providers.Spec) (providers.Machine, error) {
+	if f.onCreate != nil {
+		if err := f.onCreate(); err != nil {
+			return providers.Machine{}, err
+		}
+	}
+	return f.Provider.Create(ctx, spec)
 }
 
 func (f *flaky) Access(ctx context.Context, id string) (providers.Access, error) {
@@ -370,13 +380,18 @@ func newDirectPayloadHarness(t *testing.T, script string) (*harness, string) {
 	t.Helper()
 	_, archive := closureFiles(t)
 	h := build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { url_command: [./payload-url, --expires-in, \"900\"], sha256: %s, size: %d, packages: { path: %q, sha256: %s } } }", sha, len(payloadBytes), archive, packagesSHA), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+	return h, h.urlCommand("payload-url", script)
+}
+
+func (h *harness) urlCommand(name, script string) string {
+	h.t.Helper()
 	dir := filepath.Dir(h.cfg.Path)
-	recorded := filepath.Join(dir, "recorded")
+	recorded := filepath.Join(dir, "recorded-"+name)
 	command := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + recorded + ".args\nenv > " + recorded + ".env\n" + script + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "payload-url"), []byte(command), 0o700); err != nil {
-		t.Fatal(err)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(command), 0o700); err != nil {
+		h.t.Fatal(err)
 	}
-	return h, recorded
+	return recorded
 }
 
 func closureFiles(t *testing.T) (payload, archive string) {
@@ -401,13 +416,15 @@ func newDirectPackagesHarness(t *testing.T, script string) (*harness, string) {
 	t.Helper()
 	path, _ := closureFiles(t)
 	h := build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { path: %q, sha256: %s, packages: { url_command: [./packages-url], sha256: %s, size: %d } } }", path, sha, packagesSHA, len(packagesBytes)), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
-	dir := filepath.Dir(h.cfg.Path)
-	recorded := filepath.Join(dir, "recorded-packages")
-	command := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + recorded + ".args\nenv > " + recorded + ".env\n" + script + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "packages-url"), []byte(command), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return h, recorded
+	return h, h.urlCommand("packages-url", script)
+}
+
+func newDirectSourcesHarness(t *testing.T, payloadScript, packagesScript string) *harness {
+	t.Helper()
+	h := build(t, false, inventory+closureApt, fmt.Sprintf("{ payload: { url_command: [./payload-url], sha256: %s, size: %d, packages: { url_command: [./packages-url], sha256: %s, size: %d } } }", sha, len(payloadBytes), packagesSHA, len(packagesBytes)), providers.Traits{Supervisor: providers.SupervisorSpriteEnv})
+	h.urlCommand("payload-url", payloadScript)
+	h.urlCommand("packages-url", packagesScript)
+	return h
 }
 
 func build(t *testing.T, withTailnet bool, tools, machineSpec string, facts providers.Traits) *harness {
@@ -1092,7 +1109,7 @@ func TestADirectPayloadIsFetchedOverStdinAndMountedWithoutTheURLLeaking(t *testi
 	}
 }
 
-func TestAFailedURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
+func TestAFailedURLCommandAbandonsTheMachine(t *testing.T) {
 	tests := []struct {
 		name, script, want string
 	}{
@@ -1118,8 +1135,8 @@ func TestAFailedURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
 			if stderr.Len() != 0 {
 				t.Errorf("the url command's stderr reached the CLI: %q", stderr.String())
 			}
-			if len(h.fake.Calls()) != 0 {
-				t.Errorf("a create without a payload URL reached the provider: %q", h.fake.Calls())
+			if got := verbs(h.fake.Calls()); got != "create destroy" {
+				t.Errorf("a create without a payload URL made %q at the provider, want the machine created and destroyed: %q", got, h.fake.Calls())
 			}
 			if _, ok := h.record("ws-1"); ok {
 				t.Error("the failed create kept its record")
@@ -1128,6 +1145,124 @@ func TestAFailedURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
 				if strings.Contains(text, urlSentinel) {
 					t.Errorf("%s carries the payload URL", name)
 				}
+			}
+		})
+	}
+}
+
+func awaitPath(path string) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s never appeared", filepath.Base(path))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func awaitPathScript(path string) string {
+	return "i=0\nwhile [ ! -e '" + path + "' ]; do\n  i=$((i+1))\n  [ \"$i\" -lt 1000 ] || exit 9\n  sleep 0.01\ndone\n"
+}
+
+func TestTheURLCommandsRunBesideEachOtherAndTheMachineCreate(t *testing.T) {
+	dir := t.TempDir()
+	script := func(name, url string) string {
+		return "touch '" + filepath.Join(dir, name+".started") + "'\n" + awaitPathScript(filepath.Join(dir, "created")) + "printf '%s\\n' '" + url + "'"
+	}
+	h := newDirectSourcesHarness(t, script("payload-url", payloadURL), script("packages-url", packagesURL))
+	h.provider.onCreate = func() error {
+		for _, name := range []string{"payload-url", "packages-url"} {
+			if err := awaitPath(filepath.Join(dir, name+".started")); err != nil {
+				return err
+			}
+		}
+		return os.WriteFile(filepath.Join(dir, "created"), nil, 0o600)
+	}
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.machine.ran("ws-1", fetchesPayload) != 1 || h.machine.ran("ws-1", fetchesDebs) != 1 {
+		t.Errorf("the create fetched the payload %d times and the packages %d times, want once each", h.machine.ran("ws-1", fetchesPayload), h.machine.ran("ws-1", fetchesDebs))
+	}
+}
+
+func TestAURLCommandOrMachineCreateFailureUnwindsTheOther(t *testing.T) {
+	dir := t.TempDir()
+	marker := func(name string) string { return filepath.Join(dir, name) }
+	touch := func(name string) func() error { return func() error { return os.WriteFile(marker(name), nil, 0o600) } }
+	succeeds := func(url string) string { return "printf '%s\\n' '" + url + "'" }
+	tests := []struct {
+		name              string
+		payload, packages string
+		onCreate          func() error
+		want              string
+		calls             string
+		kept              bool
+	}{
+		{
+			name:     "the payload url fails before the machine exists",
+			payload:  "touch '" + marker("payload-failing") + "'\nexit 3",
+			packages: succeeds(packagesURL),
+			onCreate: func() error { return awaitPath(marker("payload-failing")) },
+			want:     "payload url_command ./payload-url: exit status 3",
+			calls:    "create destroy",
+		},
+		{
+			name:     "the payload url fails after the machine exists",
+			payload:  awaitPathScript(marker("payload-created")) + "exit 3",
+			packages: succeeds(packagesURL),
+			onCreate: touch("payload-created"),
+			want:     "payload url_command ./payload-url: exit status 3",
+			calls:    "create destroy",
+		},
+		{
+			name:     "the packages url fails after the machine exists",
+			payload:  succeeds(payloadURL),
+			packages: awaitPathScript(marker("packages-created")) + "exit 1",
+			onCreate: touch("packages-created"),
+			want:     "packages archive url_command ./packages-url: exit status 1",
+			calls:    "create destroy",
+		},
+		{
+			name:     "the machine create fails while both urls run",
+			payload:  "touch '" + marker("payload-started") + "'\nexec sleep 30",
+			packages: "touch '" + marker("packages-started") + "'\nexec sleep 30",
+			onCreate: func() error {
+				for _, name := range []string{"payload-started", "packages-started"} {
+					if err := awaitPath(marker(name)); err != nil {
+						return err
+					}
+				}
+				return errors.New("the provider refused the create")
+			},
+			want: "the provider refused the create; the provider returned no machine ID for ws-1, so its record is kept unverified and nothing is destroyed by name",
+			kept: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newDirectSourcesHarness(t, tt.payload, tt.packages)
+			h.provider.onCreate = tt.onCreate
+			start := time.Now()
+			_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+			if err == nil || err.Error() != tt.want {
+				t.Fatalf("Create = %v, want %q", err, tt.want)
+			}
+			if elapsed := time.Since(start); elapsed > 10*time.Second {
+				t.Errorf("Create took %v, want the other side unwound well before a url command's 30 s sleep", elapsed)
+			}
+			if got := verbs(h.fake.Calls()); got != tt.calls {
+				t.Errorf("provider calls %q, want %q", got, tt.calls)
+			}
+			if h.machine.ran("ws-1", fetchesPayload) != 0 || h.machine.ran("ws-1", fetchesDebs) != 0 {
+				t.Errorf("the failed create fetched on the machine: %q", h.machine.scripts["ws-1"])
+			}
+			record, ok := h.record("ws-1")
+			if ok != tt.kept || (ok && !record.Unverified) {
+				t.Errorf("record %+v kept %v, want kept %v and unverified", record, ok, tt.kept)
 			}
 		})
 	}
@@ -2390,7 +2525,7 @@ func TestADirectPackagesArchiveIsFetchedOverStdinWithoutTheURLLeaking(t *testing
 	}
 }
 
-func TestAFailedPackagesURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
+func TestAFailedPackagesURLCommandAbandonsTheMachine(t *testing.T) {
 	h, _ := newDirectPackagesHarness(t, "printf 'aws s3 presign %s failed\\n' '"+packagesURL+"' >&2\nexit 1")
 	var logs, stderr bytes.Buffer
 	h.session.Log = slog.New(slog.NewJSONHandler(&logs, nil))
@@ -2399,8 +2534,8 @@ func TestAFailedPackagesURLCommandFailsTheCreateBeforeTheMachine(t *testing.T) {
 	if want := "packages archive url_command ./packages-url: exit status 1"; err == nil || err.Error() != want {
 		t.Fatalf("Create = %v, want %q", err, want)
 	}
-	if stderr.Len() != 0 || len(h.fake.Calls()) != 0 {
-		t.Errorf("the failed url command reached stderr %q or the provider %q", stderr.String(), h.fake.Calls())
+	if stderr.Len() != 0 || verbs(h.fake.Calls()) != "create destroy" {
+		t.Errorf("the failed url command reached stderr %q or left the provider with %q, want the machine created and destroyed", stderr.String(), h.fake.Calls())
 	}
 	if _, ok := h.record("ws-1"); ok {
 		t.Error("the failed create kept its record")
