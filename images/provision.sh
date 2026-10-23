@@ -23,6 +23,7 @@ debs_dir=/var/lib/cc-remote/build/resident
 packages_pack=/var/lib/cc-remote/build/packages.tar
 packages_store=/var/lib/cc-remote/packages
 eatmydata_package=libeatmydata1
+man_db_auto_update=/var/lib/man-db/auto-update
 closure_packages=({{range $i, $name := .Closure}}{{if $i}} {{end}}{{q $name}}{{end}})
 {{- end}}
 prerequisites=(ca-certificates curl git jq openssl python3 unzip xz-utils)
@@ -155,6 +156,18 @@ unpack_eatmydata() {
   eatmydata="${libraries[0]}"
 }
 
+without_man_db_auto_update() {
+  local held="$tmp_dir/man-db-auto-update" status=0
+  if [ ! -e "$man_db_auto_update" ]; then
+    "$@"
+    return
+  fi
+  mv "$man_db_auto_update" "$held" || exit
+  "$@" || status=$?
+  mv "$held" "$man_db_auto_update" || exit
+  return "$status"
+}
+
 admit_packages() {
   local sha256="$1" extracted
   local archive="$packages_store/$sha256.tar"
@@ -203,7 +216,7 @@ provision_packages() {
       captured+=("$deb_dir/$file")
     done < "$tmp_dir/debs"
     unpack_eatmydata "$manifest"
-    LD_PRELOAD="$eatmydata" apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || explain_base_drift "$?" "$manifest"
+    LD_PRELOAD="$eatmydata" without_man_db_auto_update apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || explain_base_drift "$?" "$manifest"
   else
     apt-get update -qq
     mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})

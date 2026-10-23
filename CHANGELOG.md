@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **The resident package install skips man-db's index update.** After the
+  offline install, dpkg runs man-db's trigger, which updates the manual-page
+  index that only `apropos` and `whatis` read. The trigger took under 1 s on
+  v0.26.10 creates, 31 s on a v0.26.11 fresh create, and 53 s on a v0.26.12
+  warm spare whose payload had finished writing to disk 2 s before the trigger
+  started. The packages lane sits on a fresh create's critical path. man-db's
+  trigger returns without touching the index when `/var/lib/man-db/auto-update`
+  is absent, so resident mode now moves that flag aside before the install and
+  puts it back once apt returns, whether the install succeeded or failed. The
+  workload's later apt runs update the index as the base does, and `man <page>`
+  still finds every page. Full mode and the payload build are unchanged. The
+  change moves the tools fingerprint, so every payload is rebuilt for this
+  release.
 - **A payload download writes to disk as it arrives.** The fetch and stage
   scripts wrote the staging file through `tee`, which left the whole download
   dirty in the page cache. A fresh Sprite has 16 GB of memory and a 20%
