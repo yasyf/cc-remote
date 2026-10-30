@@ -1343,9 +1343,14 @@ func TestExistingPrepareRefusesAForeignCheckoutOrRuntimeBeforeTheKey(t *testing.
 	}
 }
 
-func TestPrepareSendsTheLaunchersGitIdentityOnlyDownTheKeyPipe(t *testing.T) {
+func TestPrepareSendsTheLaunchersIdentityAndTrunkKeyOnlyDownTheKeyPipe(t *testing.T) {
 	w := newFirstWorker(t, nil, false)
 	pipe := filepath.Join(t.TempDir(), "pipe")
+	trunk := filepath.Join(t.TempDir(), "trunk")
+	if err := os.WriteFile(trunk, []byte("#!/bin/sh\nprintf '%s\\n' trunk-private-sentinel\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.session.Config.Orca.Keys[config.KeyTrunk] = []string{trunk}
 	t.Setenv("KEY_PIPE", pipe)
 	var logged bytes.Buffer
 	original := slog.Default()
@@ -1359,14 +1364,14 @@ func TestPrepareSendsTheLaunchersGitIdentityOnlyDownTheKeyPipe(t *testing.T) {
 	}
 	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
 	w.prepared(out.Bytes())
-	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n" {
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n" {
 		t.Errorf("key pipe = %q, %v", sent, err)
 	}
 	kept := w.effects()
 	places := map[string]string{"stdout": out.String(), "task record": kept.task, "workspace record": kept.record, "log": logged.String(), "Orca CLI calls": strings.Join(native.calls, "\n")}
 	for place, text := range places {
-		if strings.Contains(text, "Ada O") || strings.Contains(text, firstAuthor.email) {
-			t.Errorf("the %s carries the launcher's identity: %s", place, text)
+		if strings.Contains(text, "Ada O") || strings.Contains(text, firstAuthor.email) || strings.Contains(text, "trunk-private-sentinel") {
+			t.Errorf("the %s carries the launcher's identity or Trunk key: %s", place, text)
 		}
 	}
 	if kept.task == "" || logged.Len() == 0 {
