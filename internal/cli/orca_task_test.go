@@ -147,7 +147,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
-			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n"
+			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n"
 			if payload := string(got.payload(firstAuthor)); payload != want {
 				t.Errorf("payload = %q, want %q", payload, want)
 			}
@@ -175,6 +175,49 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 		got, err = captureKeys(t.Context(), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "github key command") || got.key != nil || got.github != nil {
 			t.Errorf("%s captureKeys with a failing GitHub token = %q, %q, %v", agent.Kind, got.key, got.github, err)
+		}
+	}
+}
+
+func TestCaptureKeysDeliversAndClearsTheOptionalTrunkKey(t *testing.T) {
+	dir := t.TempDir()
+	script := func(name, line string) []string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+line+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return []string{path}
+	}
+	for _, kind := range []string{orca.AgentClaude, orca.AgentCodex} {
+		agent := orca.Agent{Kind: kind}
+		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel")}
+		got, err := captureKeys(t.Context(), keys, agent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got.trunk) != "trunk-sentinel" {
+			t.Fatalf("Trunk key = %q", got.trunk)
+		}
+		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\n"
+		if payload := string(got.payload(firstAuthor)); payload != want {
+			t.Errorf("payload = %q, want %q", payload, want)
+		}
+		token := got.trunk
+		got.clear()
+		if bytes.Count(token, []byte{0}) != len(token) {
+			t.Error("Trunk key bytes survived clear")
+		}
+		failing := filepath.Join(dir, "failing")
+		if err := os.WriteFile(failing, []byte("#!/bin/sh\necho trunk-leaked-sentinel; exit 3\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		keys[config.KeyTrunk] = []string{failing}
+		got, err = captureKeys(t.Context(), keys, agent)
+		if err == nil || !strings.HasPrefix(err.Error(), "trunk key command") || got.key != nil || got.trunk != nil {
+			t.Errorf("failed Trunk capture = %+v, %v", got, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "sentinel") {
+			t.Errorf("Trunk capture error leaks key: %v", err)
 		}
 	}
 }
@@ -1300,9 +1343,14 @@ func TestExistingPrepareRefusesAForeignCheckoutOrRuntimeBeforeTheKey(t *testing.
 	}
 }
 
-func TestPrepareSendsTheLaunchersGitIdentityOnlyDownTheKeyPipe(t *testing.T) {
+func TestPrepareSendsTheLaunchersIdentityAndTrunkKeyOnlyDownTheKeyPipe(t *testing.T) {
 	w := newFirstWorker(t, nil, false)
 	pipe := filepath.Join(t.TempDir(), "pipe")
+	trunk := filepath.Join(t.TempDir(), "trunk")
+	if err := os.WriteFile(trunk, []byte("#!/bin/sh\nprintf '%s\\n' trunk-private-sentinel\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.session.Config.Orca.Keys[config.KeyTrunk] = []string{trunk}
 	t.Setenv("KEY_PIPE", pipe)
 	var logged bytes.Buffer
 	original := slog.Default()
@@ -1316,14 +1364,14 @@ func TestPrepareSendsTheLaunchersGitIdentityOnlyDownTheKeyPipe(t *testing.T) {
 	}
 	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
 	w.prepared(out.Bytes())
-	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n" {
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n" {
 		t.Errorf("key pipe = %q, %v", sent, err)
 	}
 	kept := w.effects()
 	places := map[string]string{"stdout": out.String(), "task record": kept.task, "workspace record": kept.record, "log": logged.String(), "Orca CLI calls": strings.Join(native.calls, "\n")}
 	for place, text := range places {
-		if strings.Contains(text, "Ada O") || strings.Contains(text, firstAuthor.email) {
-			t.Errorf("the %s carries the launcher's identity: %s", place, text)
+		if strings.Contains(text, "Ada O") || strings.Contains(text, firstAuthor.email) || strings.Contains(text, "trunk-private-sentinel") {
+			t.Errorf("the %s carries the launcher's identity or Trunk key: %s", place, text)
 		}
 	}
 	if kept.task == "" || logged.Len() == 0 {
