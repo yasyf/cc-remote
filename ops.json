@@ -1,1 +1,1 @@
-{"v":1,"lamport":3,"ops":[{"kind":"add_comment","body":"Root and independent proposal APPROVE at d0a6031. Bounded six-file optional field/FIFO implementation prepared in isolated jj workspace trunk-worker-key. Final source security review and current-head CI remain required. No local tests, actual key reads, image writes, service commands, or existing-worker changes."}]}
+{"v":1,"lamport":4,"ops":[{"kind":"set_branch","branch":"trunk-worker-key-ship"}]}
