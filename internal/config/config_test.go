@@ -290,6 +290,16 @@ func TestParseRefusesAnUnboundBootstrapHelper(t *testing.T) {
 	}
 }
 
+func TestParsePreservesTheOptionalTrunkKeyCommand(t *testing.T) {
+	cfg, err := Parse([]byte(minimal + "orca:\n  keys:\n    trunk: [pass, show, trunk]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Orca.Keys[KeyTrunk]; !slices.Equal(got, []string{"pass", "show", "trunk"}) {
+		t.Errorf("Trunk command = %q", got)
+	}
+}
+
 func TestParseRefusesWhatCannotRun(t *testing.T) {
 	tests := []struct {
 		name string
