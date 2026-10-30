@@ -1,1 +1,1 @@
-{"v":1,"lamport":9,"ops":[{"kind":"add_comment","body":"Official cc-remote0.26.15 released at3313a151; all4archive checksums match GitHub digests, actual Linux archive/raw binary verified. Canonical launcher pin PR45743 owned cc_skills. Corrected safe ccx release, coherent real Sprite inventory/payload build/acceptance and no-LLM fresh tool proof remain OPEN. Execution planning artifact sprite-build-and-probe-execution-plan.json; no runtime secrets/resources used."}]}
+{"v":1,"lamport":10,"ops":[{"kind":"renew"}]}
