@@ -133,6 +133,17 @@ fi
 exec %s "$@"
 `, quote(curl))
 			writePluginTestFile(t, filepath.Join(h.fakes, "curl"), []byte(curlWrapper), 0o700)
+			tar, err := exec.LookPath("tar")
+			if err != nil {
+				t.Fatal(err)
+			}
+			writePluginTestFile(t, filepath.Join(h.fakes, "tar"), []byte(fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+if [ "$1" = -xJf ]; then
+ case "$4" in "$HOME"/*) exit 96 ;; esac
+fi
+exec %s "$@"
+`, quote(tar))), 0o700)
 			realGit, err := exec.LookPath("git")
 			if err != nil {
 				t.Fatal(err)

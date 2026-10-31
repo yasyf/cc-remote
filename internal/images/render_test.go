@@ -793,13 +793,15 @@ create_service() {
 					`queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream`, `queue_artifact create_service "$name" "${needs[@]}"`,
 					"    fetch \"$url\" \"$download\" \"$algorithm\" \"$digest\"\n    rm -rf \"$dir\"\n", "    if [ \"$format\" = deb ]; then\n      download=\"$tmp_dir/$name-$version.deb\"\n    fi\n    fetch \"$url\" \"$download\" \"$algorithm\" \"$digest\"\n    rm -rf \"$dir\"\n",
 					"      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n", "      deb) deb_artifacts+=(\"$download\") ;;\n",
+					"download=\"$tmp_dir/codex-runtime.tar.xz\" plugin\n", "download=\"$tmp_dir/codex-runtime.tar.xz\" staging=\"$tmp_dir/codex-runtime\" plugin\n",
+					"    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    tar -xJf \"$download\" -C \"$(dirname \"$codex_runtime_root\")\"\n    rm -f \"$download\"\n", "    mkdir \"$staging\"\n    tar -xJf \"$download\" -C \"$staging\"\n    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    mv \"$staging/$(basename \"$codex_runtime_root\")\" \"$codex_runtime_root\"\n    rm -rf \"$staging\" \"$download\"\n",
 				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report and the single Debian transaction for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction and the staged Codex runtime for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})

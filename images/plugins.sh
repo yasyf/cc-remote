@@ -422,14 +422,16 @@ verify_uv_launcher() {
 codex_runtime_root="$HOME/.cache/codex-runtimes/codex-primary-runtime"
 
 install_codex_runtime() {
-  local version="$1" url="$2" digest="$3" config="$HOME/.codex/config.toml" download="$tmp_dir/codex-runtime.tar.xz" plugin
+  local version="$1" url="$2" digest="$3" config="$HOME/.codex/config.toml" download="$tmp_dir/codex-runtime.tar.xz" staging="$tmp_dir/codex-runtime" plugin
   shift 3
   if [ "$(cat "$codex_runtime_root/.cc-remote-digest" 2> /dev/null)" != "$digest" ]; then
     fetch "$url" "$download" sha256 "$digest"
+    mkdir "$staging"
+    tar -xJf "$download" -C "$staging"
     rm -rf "$codex_runtime_root"
     mkdir -p "$(dirname "$codex_runtime_root")"
-    tar -xJf "$download" -C "$(dirname "$codex_runtime_root")"
-    rm -f "$download"
+    mv "$staging/$(basename "$codex_runtime_root")" "$codex_runtime_root"
+    rm -rf "$staging" "$download"
     printf '%s\n' "$digest" > "$codex_runtime_root/.cc-remote-digest"
   fi
   mkdir -p "$HOME/.codex"
