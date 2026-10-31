@@ -116,6 +116,7 @@ type fakeNamespace struct {
 	readyAfter   time.Duration
 	ownAfter     time.Duration
 	stall        string
+	unanswered   int
 	page         int
 	uid, gid     string
 	chownExit    int
@@ -498,8 +499,14 @@ func (f *fakeNamespace) Run(ctx context.Context, cmd providers.Command) (provide
 	}
 	uid, gid, chownExit, readonly, stall := f.uid, f.gid, f.chownExit, f.readonly, f.stall
 	nativeExit, nativeStderr := f.nativeExit, f.nativeStderr
+	unanswered := container != "" && script == "id -u" && f.unanswered > 0
+	if unanswered {
+		f.unanswered--
+	}
 	f.mu.Unlock()
 	switch {
+	case unanswered:
+		return providers.Result{Stderr: []byte("Connection closed by " + host + " port " + port + "\n"), ExitCode: 255}, nil
 	case script == stall:
 		<-ctx.Done()
 		return providers.Result{}, fmt.Errorf("%s: %w", cmd.Name, ctx.Err())

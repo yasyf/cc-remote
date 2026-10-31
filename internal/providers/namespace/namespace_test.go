@@ -97,7 +97,7 @@ func TestCreateSendsTheTypedRequestAndRecordsTheReturnedInstance(t *testing.T) {
 	if machine.ID != "inst1" || machine.Provider != Name || machine.State != providers.StateRunning || machine.Compute == nil || *machine.Compute != compute {
 		t.Errorf("machine = %+v, compute %+v; want %+v", machine, machine.Compute, compute)
 	}
-	if got := fake.Calls(); !slices.Equal(got, []string{"create", "wait inst1 agent", "describe inst1"}) {
+	if got := fake.Calls(); !slices.Equal(got, []string{"create", "wait inst1 ", "describe inst1"}) {
 		t.Errorf("calls = %q", got)
 	}
 	raw, err := os.ReadFile(p.recordPath("inst1"))
@@ -1177,6 +1177,50 @@ func TestCreateKeepsTheInstanceWhenItsKeeperCannotStart(t *testing.T) {
 	}
 	if got := fake.Calls(); !slices.Equal(got, []string{"create"}) || len(fake.Commands()) != 0 {
 		t.Errorf("calls = %q and ssh %q; want no readiness, ownership, or destroy after the keeper failed", got, fake.Commands())
+	}
+}
+
+func TestCreateWaitsForTheContainerToAnswerSSH(t *testing.T) {
+	p, fake, _ := newProvider(t)
+	fake.unanswered = 2
+	var polls []time.Duration
+	p.After = func(d time.Duration) <-chan time.Time {
+		polls = append(polls, d)
+		fired := make(chan time.Time, 1)
+		fired <- time.Time{}
+		return fired
+	}
+	machine, err := p.Create(t.Context(), spec("alpha", nil))
+	if err != nil || machine.State != providers.StateRunning {
+		t.Fatalf("Create = %+v, %v; want the running machine once its container answers", machine, err)
+	}
+	if !slices.Equal(polls, []time.Duration{readyPoll, readyPoll}) {
+		t.Errorf("polls = %v, want one per unanswered ssh session", polls)
+	}
+	var probes int
+	for _, ran := range fake.Commands() {
+		if ran.container == "agent" && ran.script == "id -u" {
+			probes++
+		}
+	}
+	if probes != 3 {
+		t.Errorf("uid probes = %d, want two unanswered and one answered: %q", probes, fake.Commands())
+	}
+}
+
+func TestCreateGivesUpOnAContainerThatNeverAnswersSSH(t *testing.T) {
+	p, fake, _ := newProvider(t)
+	p.ReadyTimeout = 50 * time.Millisecond
+	fake.unanswered = 1 << 30
+	p.After = time.After
+	_, err := p.Create(t.Context(), spec("alpha", nil))
+	if !errors.Is(err, providers.ErrAmbiguous) || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container agent answered no ssh session") || !strings.Contains(err.Error(), "ssh exited 255: Connection closed by") {
+		t.Errorf("Create = %v, want readyTimeout reached with the last unanswered ssh session", err)
+	}
+	for _, ran := range fake.Commands() {
+		if ran.container == "" {
+			t.Errorf("the host chown ran before the container answered: %q", ran)
+		}
 	}
 }
 

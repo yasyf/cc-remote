@@ -32,6 +32,7 @@ const (
 	sshDefaultPort        = 22
 	connectTimeoutSeconds = 10
 	connectionAttempts    = 6
+	sshUnreachable        = 255
 )
 
 const frameWrapper = `import os, selectors, struct, subprocess, sys
