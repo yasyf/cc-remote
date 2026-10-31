@@ -418,7 +418,7 @@ elif $first || $second; then
   exit 92
 fi
 `
-	for name, content := range map[string]string{"id": "#!/bin/sh\necho 0\n", "apt-get": fakeApt, "apt-cache": "#!/bin/sh\nexit 1\n"} {
+	for name, content := range map[string]string{"id": "#!/bin/sh\necho 0\n", "apt-get": fakeApt, "apt-cache": "#!/bin/sh\nexit 1\n", "dpkg-query": "#!/bin/sh\nprintf 'ii \\tgit\\n'\n"} {
 		if err := os.WriteFile(filepath.Join(fakes, name), []byte(content), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -441,6 +441,44 @@ fi
 	}
 	if got, want := strings.Join(slices.Concat(events[:2], slices.Sorted(slices.Values(events[2:]))), ","), "/first.deb,/second.deb,/first,/second,/third"; got != want {
 		t.Errorf("download order = %s, want %s", got, want)
+	}
+}
+
+func TestProvisionFailsWhenTheDebianTransactionRemovesAnInstalledPackage(t *testing.T) {
+	root, fakes := t.TempDir(), t.TempDir()
+	payload := "deb"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := fmt.Fprint(w, payload); err != nil {
+			t.Errorf("write download: %v", err)
+		}
+	}))
+	defer server.Close()
+	artifact := binaryArtifact("git-man", server.URL+"/git-man.deb", payload)
+	artifact.Format = Deb
+	scripts, err := Render(Inventory{Version: SchemaVersion, System: []Artifact{artifact}}, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeApt := `#!/bin/sh
+case " $* " in
+  *.deb\ *) printf 'ii \tgit-man\n' > "$TEST_ROOT/installed" ;;
+esac
+`
+	fakeQuery := "#!/bin/sh\ncat \"$TEST_ROOT/installed\"\n"
+	for name, content := range map[string]string{"id": "#!/bin/sh\necho 0\n", "apt-get": fakeApt, "apt-cache": "#!/bin/sh\nexit 1\n", "dpkg-query": fakeQuery} {
+		if err := os.WriteFile(filepath.Join(fakes, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "installed"), []byte("ii \tgit\nii \tgit-lfs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provision := strings.NewReplacer("tool_dir=/opt/cc-remote/tools", "tool_dir="+quote(filepath.Join(root, "tools")), "bin_dir=/usr/local/bin", "bin_dir="+quote(filepath.Join(root, "bin"))).Replace(string(scripts.ProvisionScript))
+	cmd := exec.Command("bash", "-c", provision, "provision.sh", PhasePackages)
+	cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
+	out, err := cmd.CombinedOutput()
+	if want := "cc-remote: installing the pinned system debs removed installed packages; pin debs that keep them:\ngit\ngit-lfs\n"; exitCode(err) != 1 || !strings.HasSuffix(string(out), want) {
+		t.Errorf("provision packages = %v\n%s\nwant exit 1 ending %q", err, out, want)
 	}
 }
 
