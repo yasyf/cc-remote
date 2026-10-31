@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **A system `.deb` can be a dependency with no `bins`.** It installs before
-  the package that needs it and links nothing, so an inventory can pin a
-  backported `git` together with the matching `git-man` its `Depends` names.
+- **A system `.deb` can be a dependency with no `bins`.** It links nothing, so
+  an inventory can pin a backported `git` together with the matching `git-man`
+  its `Depends` names.
+
+### Fixed
+- **Every system `.deb` installs in one apt transaction.** Installing them one
+  at a time let apt resolve a `git-man` upgrade by removing the installed
+  `git`, and with it `git-lfs`, before the pinned `git` arrived.
 
 ### Changed
 - **A create reads the mounted payload into the page cache beside the tools.**
