@@ -55,7 +55,7 @@ target platform, so changes limited to image inputs can leave `tools` unchanged.
 | `sha256`, `sha512` | Exactly one is required, as lowercase hex of the appropriate length. |
 | `format` | `binary`, `gzip`, `tar.gz`, `tar.xz`, `zip`, or `deb`. A `deb` belongs under `system`. |
 | `dest` | Optional user destination relative to `$HOME`. It must be a clean path and may not overlap another artifact or managed state directory. |
-| `bins` | Map of executable names to extracted paths. Archives require relative member paths; Debian packages require absolute paths. For a binary or gzip, the extracted file is `name`. A Debian package without `bins` links nothing, for a dependency such as `git-man` that another pinned `.deb` needs. Every system `.deb` installs in one `apt-get install` after all of them are fetched, so a package and the matching dependency it pins upgrade together. |
+| `bins` | Map of executable names to extracted paths. Archives require relative member paths; Debian packages require absolute paths. For a binary or gzip, the extracted file is `name`. A Debian package without `bins` links nothing, for a dependency such as `git-man` that another pinned `.deb` needs. Every system `.deb` installs in one transaction after all of them are fetched, so a package and the matching dependency it pins upgrade together: `apt-get install` on a build or image machine, and `dpkg -i` on a payload machine's offline resident install. |
 | `verify` | Arguments used to check the linked executable, such as `[--version]`. |
 
 Non-Debian artifacts install with at most four concurrent jobs per phase. Each

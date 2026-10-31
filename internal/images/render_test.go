@@ -545,7 +545,7 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		"    apt-get install -y -qq --no-install-recommends --no-upgrade \"${packages[@]}\" \"$eatmydata_package\" 'bubblewrap' > /dev/null\n",
 		"    deb_seeds=\"$build_dir/seeds\"\n    resident_packages \"${packages[@]}\" > \"$deb_seeds\"\n",
 		"      deb) deb_artifacts+=(\"$download\") ;;\n",
-		"  apt-get install -y -qq \"${deb_flags[@]}\" \"${deb_artifacts[@]}\" > /dev/null\n",
+		"  if [ \"$mode\" = resident ]; then\n    without_man_db_auto_update dpkg --force-unsafe-io -i \"${deb_artifacts[@]}\" > /dev/null\n  else\n    apt-get install -y -qq \"${deb_artifacts[@]}\" > /dev/null\n  fi\n",
 		"record_deb() {\n  local package\n  package=\"$(dpkg-deb -f \"$1\" Package)\" || exit\n",
 		"  if [ \"$mode\" = full ]; then\n    installed_packages > \"$build_dir/packages.after\"\n  else\n    listing=\"$(installed_packages)\" || {\n",
 		"  local link_check=spelling\n  verify_pin \"$tool_dir/\"'uv-0.1.0' ",
