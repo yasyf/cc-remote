@@ -386,6 +386,24 @@ steps share that `RUN`, so cleanup precedes the layer commit.
 3. `finalize.sh` removes installer-created identity, auth, session, and runtime state, then fails the build if any remains.
 4. `install` writes the manifest to `/opt/cc-remote/baked.json`.
 
+That `RUN` builds the home in a `home` stage, and the final stage copies it
+back in several layers. A `rest` stage removes the large trees, so the
+remaining home and the manifest arrive in the first copy. Each large tree then
+arrives in its own layer.
+
+| Tree | Its own layer when |
+| --- | --- |
+| `~/.cache/codex-runtimes` | the inventory pins a Codex runtime |
+| `~/.local/share/cc-remote/tools` | a user tool installs there |
+
+Namespace cancels a container's first image pull at two minutes. With smaller
+layers, containerd unpacks each layer while the next one downloads, so the
+pull finishes before that cancel. An image with none of these trees keeps a
+single stage. The uv cache stays with the rest of the home, because uv
+hardlinks the installed Python tools to it, and a copy into another layer
+stores every linked file twice. The copied trees are given to the image
+user, since a copy creates its destination directory as root.
+
 The finalizer removes Claude's `~/.claude.json` identity file,
 `~/.claude/backups` directory, hook and grant state in `~/.claude/state`, and
 session, project, telemetry, and debug state. It also removes Codex auth and
