@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **The Codex runtime extracts outside the home, then moves into place.** On a
+  Sprite the home is an overlay filesystem. Under concurrent extraction it
+  reported a new inode for the runtime's `share/man/man1` directory, and GNU tar
+  failed the payload build with `Directory renamed before its status could be
+  extracted`. That directory holds an absolute symlink, so tar sets its status
+  last. On a fresh Sprite, four concurrent extractions into the home failed 7
+  times in 8, and the same runs into `/tmp`, an ext4 disk, never failed. The
+  archive now extracts under the install's temporary directory, and the
+  runtime directory is moved into the home.
 - **A Namespace create is ready once its container answers ssh.** Create waited
   with `WaitInstanceSync` on the container, and Namespace leaves that status at
   `pulled` when it retries an image pull it cancelled at two minutes. On a 3 GiB
