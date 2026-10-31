@@ -68,6 +68,12 @@ provision_prerequisites() {
   apt-get update -qq
   apt-get install -y -qq --no-install-recommends "${prerequisites[@]}" > /dev/null
 }
+{{- if debs .System}}
+
+installed_debian_packages() {
+  dpkg-query -W -f '${db:Status-Abbrev}\t${binary:Package}\n' | sed -n 's/^ii \t//p' | LC_ALL=C sort
+}
+{{- end}}
 
 {{- with .Closure}}
 
@@ -259,6 +265,7 @@ provision_packages() {
 {{- end}}
 {{- end}}
 {{- if debs .System}}
+  installed_debian_packages > "$tmp_dir/packages.before-debs"
 {{- if .Closure}}
   if [ "$mode" = resident ]; then
     without_man_db_auto_update dpkg --force-unsafe-io -i "${deb_artifacts[@]}" > /dev/null
@@ -268,6 +275,12 @@ provision_packages() {
 {{- else}}
   apt-get install -y -qq "${deb_artifacts[@]}" > /dev/null
 {{- end}}
+  installed_debian_packages | LC_ALL=C comm -23 "$tmp_dir/packages.before-debs" - > "$tmp_dir/packages.removed-by-debs"
+  if [ -s "$tmp_dir/packages.removed-by-debs" ]; then
+    echo "cc-remote: installing the pinned system debs removed installed packages; pin debs that keep them:" >&2
+    cat "$tmp_dir/packages.removed-by-debs" >&2
+    exit 1
+  fi
 {{- end}}
 {{- range .System}}
 {{- if eq .Format "deb"}}

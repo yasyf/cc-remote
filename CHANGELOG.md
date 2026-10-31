@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A build fails when installing the pinned `.deb` artifacts removes an
+  installed package.** `provision.sh packages` lists the installed packages
+  before and after the deb transaction and names every one that went missing.
+  An image build had no check after the install, so a Namespace image could
+  ship without `git-lfs`.
 - **A fresh machine installs its pinned `.deb` artifacts with `dpkg -i`.**
   `apt-get install --no-download` on local `.deb` files fails with `Internal
   Error, Pathname to install is not absolute`, so a payload that pins a system
