@@ -408,10 +408,13 @@ func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, 
 		return quote(pkg+" @ git+file://") + `"$marketplace_dir"` + quote("/"+tool.Marketplace+"@"+refs[tool.Marketplace])
 	}
 	t, err := template.New("").Funcs(template.FuncMap{
-		"q":          quote,
-		"json":       indentJSON,
-		"install":    installCall,
-		"stage":      stageCall,
+		"q":       quote,
+		"json":    indentJSON,
+		"install": installCall,
+		"stage":   stageCall,
+		"debs": func(artifacts []Artifact) bool {
+			return slices.ContainsFunc(artifacts, func(a Artifact) bool { return a.Format == Deb })
+		},
 		"verify":     verifyCalls,
 		"probed":     probedCalls,
 		"expand":     expand,

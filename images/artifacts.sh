@@ -31,6 +31,9 @@ install_artifact() {
       fetch "$url" "$download" "$algorithm" "$digest"
     fi
 {{- else}}
+    if [ "$format" = deb ]; then
+      download="$tmp_dir/$name-$version.deb"
+    fi
     fetch "$url" "$download" "$algorithm" "$digest"
 {{- end}}
     rm -rf "$dir"
@@ -44,7 +47,7 @@ install_artifact() {
       tar.gz) tar -xzf "$download" -C "$dir" ;;
       tar.xz) tar -xJf "$download" -C "$dir" ;;
       zip) unzip -q "$download" -d "$dir" ;;
-      deb) apt-get install -y -qq{{if and . .Closure}} "${deb_flags[@]}"{{end}} "$download" > /dev/null ;;
+      deb) deb_artifacts+=("$download") ;;
     esac
     rm -rf "$staging"
     printf '%s\n' "$digest" > "$dir/.cc-remote-digest"

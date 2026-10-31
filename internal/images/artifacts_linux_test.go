@@ -358,7 +358,7 @@ func finishArtifactScript(t *testing.T, done <-chan artifactScriptResult, wantFa
 	}
 }
 
-func TestProvisionDrainsArtifactsAtDebianBarriers(t *testing.T) {
+func TestProvisionInstallsEveryDebianArtifactInOneAptTransaction(t *testing.T) {
 	root := t.TempDir()
 	payload := "#!/bin/sh\n"
 	var lock sync.Mutex
@@ -371,12 +371,12 @@ func TestProvisionDrainsArtifactsAtDebianBarriers(t *testing.T) {
 			t.Errorf("artifact fetch overlapped apt: %v", err)
 		}
 		switch r.URL.Path {
-		case "/second.deb":
-			if _, err := os.Stat(filepath.Join(root, "first-apt")); err != nil {
-				t.Errorf("second Debian fetch overlapped the first apt install: %v", err)
+		case "/first.deb", "/second.deb":
+			if _, err := os.Stat(filepath.Join(root, "debs-apt")); !os.IsNotExist(err) {
+				t.Errorf("Debian fetch %s came after the apt install of the debs: %v", r.URL.Path, err)
 			}
 		case "/first", "/second", "/third":
-			if _, err := os.Stat(filepath.Join(root, "second-apt")); err != nil {
+			if _, err := os.Stat(filepath.Join(root, "debs-apt")); err != nil {
 				t.Errorf("tools fetched %s before the packages phase finished: %v", r.URL.Path, err)
 			}
 		}
@@ -405,12 +405,18 @@ if ! mkdir "$TEST_ROOT/apt-active"; then
   exit 91
 fi
 trap 'rmdir "$TEST_ROOT/apt-active"' EXIT
+first=false second=false
 for arg in "$@"; do
   case "$arg" in
-    */first.deb-1.0.deb) touch "$TEST_ROOT/first-apt" ;;
-    */second.deb-1.0.deb) touch "$TEST_ROOT/second-apt" ;;
+    */first.deb-1.0.deb) first=true ;;
+    */second.deb-1.0.deb) second=true ;;
   esac
 done
+if $first && $second; then
+  touch "$TEST_ROOT/debs-apt"
+elif $first || $second; then
+  exit 92
+fi
 `
 	for name, content := range map[string]string{"id": "#!/bin/sh\necho 0\n", "apt-get": fakeApt, "apt-cache": "#!/bin/sh\nexit 1\n"} {
 		if err := os.WriteFile(filepath.Join(fakes, name), []byte(content), 0o700); err != nil {
@@ -420,7 +426,7 @@ done
 	if err := os.WriteFile(filepath.Join(root, "deb-target"), []byte(payload), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	provision := strings.NewReplacer("tool_dir=/opt/cc-remote/tools", "tool_dir="+quote(filepath.Join(root, "tools")), "bin_dir=/usr/local/bin", "bin_dir="+quote(filepath.Join(root, "bin")), "rm -rf /var/lib/apt/lists/*", "test -f "+quote(filepath.Join(root, "second-apt"))).Replace(string(scripts.ProvisionScript))
+	provision := strings.NewReplacer("tool_dir=/opt/cc-remote/tools", "tool_dir="+quote(filepath.Join(root, "tools")), "bin_dir=/usr/local/bin", "bin_dir="+quote(filepath.Join(root, "bin")), "rm -rf /var/lib/apt/lists/*", "test -f "+quote(filepath.Join(root, "debs-apt"))).Replace(string(scripts.ProvisionScript))
 	for _, phase := range []string{PhasePackages, PhaseTools} {
 		cmd := exec.Command("bash", "-c", provision, "provision.sh", phase)
 		cmd.Env = append(os.Environ(), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root)
