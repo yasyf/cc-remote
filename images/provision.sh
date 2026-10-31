@@ -259,7 +259,15 @@ provision_packages() {
 {{- end}}
 {{- end}}
 {{- if debs .System}}
-  apt-get install -y -qq{{with .Closure}} "${deb_flags[@]}"{{end}} "${deb_artifacts[@]}" > /dev/null
+{{- if .Closure}}
+  if [ "$mode" = resident ]; then
+    without_man_db_auto_update dpkg --force-unsafe-io -i "${deb_artifacts[@]}" > /dev/null
+  else
+    apt-get install -y -qq "${deb_artifacts[@]}" > /dev/null
+  fi
+{{- else}}
+  apt-get install -y -qq "${deb_artifacts[@]}" > /dev/null
+{{- end}}
 {{- end}}
 {{- range .System}}
 {{- if eq .Format "deb"}}

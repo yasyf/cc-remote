@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A fresh machine installs its pinned `.deb` artifacts with `dpkg -i`.**
+  `apt-get install --no-download` on local `.deb` files fails with `Internal
+  Error, Pathname to install is not absolute`, so a payload that pins a system
+  `.deb` could not create a machine. The resident install's packages are
+  already in place, so `dpkg` installs the pinned debs offline in one call.
 - **Every system `.deb` installs in one apt transaction.** Installing them one
   at a time let apt resolve a `git-man` upgrade by removing the installed
   `git`, and with it `git-lfs`, before the pinned `git` arrived.

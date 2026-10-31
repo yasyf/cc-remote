@@ -734,7 +734,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 		fetches int
 	}{
 		{name: "full mode fetches the deb once, downloads with it, and seeds the package it declares", args: []string{PackagesFull}, seeds: "libeatmydata1\nbubblewrap\nca-certificates\ncurl\ngit\njq\nopenssl\npython3\nunzip\nxz-utils\nopenssh-server\norca-ide\n", apt: full, fetches: 1},
-		{name: "resident mode installs the captured deb offline", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io @DEBS@/orca-1.4.215.deb\n"},
+		{name: "resident mode installs the captured deb offline with dpkg", args: []string{PackagesResident, packagesDigest}, copy: "deb", apt: resident + "dpkg --force-unsafe-io -i @DEBS@/orca-1.4.215.deb\n"},
 		{name: "a captured deb off its pin fails before apt installs it", args: []string{PackagesResident, packagesDigest}, copy: "tampered", apt: resident, exit: 1, wantErr: "@DEBS@/orca-1.4.215.deb does not match its pinned sha512 "},
 		{name: "a deb naming no package is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=empty"}, exit: 1, wantErr: "orca-1.4.215.deb names no Package", fetches: 1},
 		{name: "a failing dpkg-deb is fatal", args: []string{PackagesFull}, env: []string{"DPKG_DEB=fail"}, exit: 2, wantErr: "dpkg-deb: error: cannot read", fetches: 1},
@@ -754,6 +754,7 @@ func TestProvisionPackagesSeedsTheDebPackage(t *testing.T) {
 				"dpkg-query": fakeStatusQuery,
 				"curl":       "#!/bin/sh\nprintf 'curl\\n' >> \"$TEST_ROOT/fetches\"\n" + strings.TrimPrefix(fakeCurl, "#!/bin/sh\n"),
 				"dpkg-deb":   fakeDpkgDeb,
+				"dpkg":       "#!/bin/sh\nprintf '%s\\n' \"dpkg $*\" >> \"$TEST_ROOT/apt\"\n",
 			})
 			debs := writeCapturedPackages(t, root, capturedDebs{
 				Artifacts: []capturedDeb{{Architecture: "amd64", File: "orca-1.4.215.deb", Package: "orca-ide", Version: "1.4.215"}},
