@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A Namespace create is ready once its container answers ssh.** Create waited
+  with `WaitInstanceSync` on the container, and Namespace leaves that status at
+  `pulled` when it retries an image pull it cancelled at two minutes. On a 3 GiB
+  image every create then failed at 300 s, though the container was running
+  from 2:46. Create now waits on the instance alone, which returns as soon as it
+  boots, and retries the ownership setup's first container exec until the
+  container answers, within `readyTimeout`.
 - **A build fails when installing the pinned `.deb` artifacts removes an
   installed package.** `provision.sh packages` lists the installed packages
   before and after the deb transaction and names every one that went missing.

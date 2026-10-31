@@ -409,7 +409,7 @@ func (p *Provider) wait(ctx context.Context, saved *instance) error {
 	if err != nil {
 		return err
 	}
-	_, err = compute.WaitInstanceSync(ctx, &computev1beta.WaitInstanceRequest{InstanceId: saved.Instance.InstanceID, ContainerName: saved.Instance.Container})
+	_, err = compute.WaitInstanceSync(ctx, &computev1beta.WaitInstanceRequest{InstanceId: saved.Instance.InstanceID})
 	return errors.Join(err, closer.Close())
 }
 
@@ -454,7 +454,7 @@ func (p *Provider) own(ctx context.Context, compute providers.ComputeInstance) e
 }
 
 func (p *Provider) initialize(ctx context.Context, compute providers.ComputeInstance) error {
-	uid, err := p.number(ctx, compute, "-u")
+	uid, err := p.answered(ctx, compute)
 	if err != nil {
 		return err
 	}
@@ -480,11 +480,36 @@ func (p *Provider) initialize(ctx context.Context, compute providers.ComputeInst
 	return nil
 }
 
+func (p *Provider) answered(ctx context.Context, compute providers.ComputeInstance) (int, error) {
+	for {
+		attempt, stop := context.WithTimeout(ctx, p.CallTimeout)
+		result, err := p.ssh(attempt, compute, compute.Container, providers.ShellQuote("id", "-u"), nil)
+		stop()
+		switch {
+		case err == nil && result.ExitCode != sshUnreachable:
+			return id(compute, "-u", result)
+		case err == nil:
+			err = fmt.Errorf("ssh exited %d: %s", result.ExitCode, bytes.TrimSpace(result.Stderr))
+		case ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded):
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("container %s answered no ssh session: %w", compute.Container, errors.Join(ctx.Err(), err))
+		case <-p.After(readyPoll):
+		}
+	}
+}
+
 func (p *Provider) number(ctx context.Context, compute providers.ComputeInstance, flag string) (int, error) {
 	result, err := p.ssh(ctx, compute, compute.Container, providers.ShellQuote("id", flag), nil)
 	if err != nil {
 		return 0, err
 	}
+	return id(compute, flag, result)
+}
+
+func id(compute providers.ComputeInstance, flag string, result providers.Result) (int, error) {
 	value, parseErr := strconv.Atoi(strings.TrimSpace(string(result.Stdout)))
 	switch {
 	case result.ExitCode != 0:
