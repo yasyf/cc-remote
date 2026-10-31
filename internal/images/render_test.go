@@ -62,6 +62,11 @@ func TestInstallCall(t *testing.T) {
 			Artifact{Name: "orca", Version: "1.4.215", URL: "https://example.com/orca.deb", SHA512: digest + digest, Format: Deb, Bins: map[string]string{"orca": "/opt/Orca/orca-ide"}},
 			`install_artifact 'orca' '1.4.215' 'https://example.com/orca.deb' sha512 '` + digest + digest + `' deb "$tool_dir/"'orca-1.4.215' "$bin_dir" 'orca' '/opt/Orca/orca-ide'`,
 		},
+		{
+			"deb dependency without bins",
+			Artifact{Name: "git-man", Version: "2.56.0", URL: "https://example.com/git-man.deb", SHA256: digest, Format: Deb},
+			`install_artifact 'git-man' '2.56.0' 'https://example.com/git-man.deb' sha256 '` + digest + `' deb "$tool_dir/"'git-man-2.56.0' "$bin_dir"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -109,6 +114,11 @@ func TestProbedCalls(t *testing.T) {
 				`verify_link "$system_bin_dir/"'orca' '/opt/Orca/orca-ide'`,
 				`probe "$system_bin_dir/"'orca'`,
 			},
+		},
+		{
+			name:     "deb dependency without bins",
+			artifact: Artifact{Name: "git-man", Version: "2.56.0", URL: "https://example.com/git-man.deb", SHA256: digest, Format: Deb},
+			want:     []string{`verify_pin "$system_tool_dir/"'git-man-2.56.0' '` + digest + `'`},
 		},
 	}
 	for _, tt := range tests {

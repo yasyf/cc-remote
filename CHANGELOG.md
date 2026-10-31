@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A system `.deb` can be a dependency with no `bins`.** It installs before
+  the package that needs it and links nothing, so an inventory can pin a
+  backported `git` together with the matching `git-man` its `Depends` names.
+
 ### Changed
 - **A create reads the mounted payload into the page cache beside the tools.**
   The payload download writes its staging file with `dd oflag=direct`, so the
