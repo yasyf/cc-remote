@@ -663,7 +663,7 @@ func TestRenderImageDockerfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderImage: %v", err)
 	}
-	want := "FROM ubuntu:24.04@sha256:" + digest + `
+	want := "FROM ubuntu:24.04@sha256:" + digest + ` AS system
 
 RUN useradd -m -s /bin/bash agent
 COPY provision.sh start.sh plugins.sh finalize.sh baked.json /tmp/cc-remote/
@@ -673,6 +673,8 @@ RUN bash /tmp/cc-remote/provision.sh packages \
     && rm -f /etc/ssh/ssh_host_* \
     && bash /tmp/cc-remote/finalize.sh system /
 ENV LANG=C.UTF-8
+
+FROM system AS home
 RUN install -d -o agent -g agent -m 0700 /home/agent/.cc-remote \
     && install -o agent -g agent -m 0600 /tmp/cc-remote/plugins.sh /home/agent/.cc-remote/plugins.sh \
     && { echo; } | runuser -u agent -- env HOME=/home/agent bash /home/agent/.cc-remote/plugins.sh install \
@@ -680,6 +682,16 @@ RUN install -d -o agent -g agent -m 0700 /home/agent/.cc-remote \
     && bash /tmp/cc-remote/finalize.sh home /home/agent \
     && install -D -m 0644 /tmp/cc-remote/baked.json /opt/cc-remote/baked.json \
     && rm -rf /tmp/cc-remote
+
+FROM home AS rest
+RUN rm -rf /home/agent/.cache/codex-runtimes /home/agent/.local/share/cc-remote/tools
+
+FROM system
+RUN rm -rf /tmp/cc-remote
+COPY --from=rest /home/agent /home/agent
+COPY --from=rest /opt/cc-remote/baked.json /opt/cc-remote/baked.json
+COPY --from=home --chown=agent:agent /home/agent/.cache/codex-runtimes /home/agent/.cache/codex-runtimes
+COPY --from=home --chown=agent:agent /home/agent/.local/share/cc-remote/tools /home/agent/.local/share/cc-remote/tools
 
 USER agent
 ENV PATH=/home/agent/.local/bin:${PATH}
@@ -827,6 +839,25 @@ func dockerInstructions(dockerfile []byte) []string {
 		current.Reset()
 	}
 	return instructions
+}
+
+func TestAnImageWithoutHeavyHomeTreesKeepsOneStage(t *testing.T) {
+	inventory := validInventory()
+	inventory.CodexRuntime, inventory.Tools = nil, nil
+	context, err := RenderImage(inventory, "agents", DefaultPlatform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(context.Dockerfile), "FROM "); got != 1 || strings.Contains(string(context.Dockerfile), "COPY --from") {
+		t.Errorf("Dockerfile has %d stages:\n%s\nwant one stage that builds the home in place", got, context.Dockerfile)
+	}
+	stack, err := RenderImage(validInventory(), "stack", DefaultPlatform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stack.Dockerfile), "\nCOPY --from=home --chown=agent:agent /home/agent/.local/share/cc-remote/tools /home/agent/.local/share/cc-remote/tools\n") {
+		t.Errorf("the stack profile's tools get no layer of their own:\n%s", stack.Dockerfile)
+	}
 }
 
 func TestFirstPackageRunRemovesSSHHostKeysBeforeItsLayerCommits(t *testing.T) {

@@ -56,6 +56,7 @@ type dockerfileView struct {
 	Home     string
 	Private  bool
 	Manifest string
+	Layers   []string
 }
 
 type exposure string
@@ -220,6 +221,17 @@ func homeTrees(inv Inventory, tools []Artifact) []tree {
 	return trees
 }
 
+func homeLayers(inv Inventory, tools []Artifact) []string {
+	var layers []string
+	if inv.CodexRuntime != nil {
+		layers = append(layers, ".cache/codex-runtimes")
+	}
+	if slices.ContainsFunc(tools, func(a Artifact) bool { return a.Dest == "" }) {
+		layers = append(layers, ".local/share/cc-remote/tools")
+	}
+	return layers
+}
+
 func pluginCacheDir(plugin Plugin) string {
 	name, marketplace, _ := strings.Cut(plugin.ID, "@")
 	return ".claude/plugins/cache/" + marketplace + "/" + name + "/" + plugin.Version
@@ -300,7 +312,7 @@ func renderImage(fsys fs.FS, inv Inventory, profile, platform string) (Context, 
 	}
 	home := "/home/" + inv.Image.User
 	private := slices.ContainsFunc(inv.Claude.Marketplaces, func(m Marketplace) bool { return m.Private })
-	dockerfile, err := execute(bound, "Dockerfile", dockerfileView{Image: *inv.Image, Home: home, Private: private, Manifest: ManifestPath})
+	dockerfile, err := execute(bound, "Dockerfile", dockerfileView{Image: *inv.Image, Home: home, Private: private, Manifest: ManifestPath, Layers: homeLayers(inv, slices.Concat(inv.Tools, inv.Profiles[profile].Tools))})
 	if err != nil {
 		return Context{}, err
 	}

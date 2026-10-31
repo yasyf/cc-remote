@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git`, and with it `git-lfs`, before the pinned `git` arrived.
 
 ### Changed
+- **A Namespace image carries its home in several layers.** The home used to
+  be one 1.9 GiB compressed layer, 4.6 GiB unpacked. Namespace's first image
+  pull ran past its two-minute cancel partway through unpacking it. The Codex
+  runtime and the user tools now each get their own layer, copied from a build
+  stage, so each layer unpacks while the next downloads.
 - **A create reads the mounted payload into the page cache beside the tools.**
   The payload download writes its staging file with `dd oflag=direct`, so the
   2.15 GB image never enters the page cache and every read of the mounted
