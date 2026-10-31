@@ -489,9 +489,6 @@ func (a Artifact) validate(where string, system bool) error {
 			}
 		}
 	case Deb:
-		if len(a.Bins) == 0 {
-			return fmt.Errorf("%s: a deb needs bins naming the absolute paths to link", where)
-		}
 		for bin, target := range a.Bins {
 			if !path.IsAbs(target) || path.Clean(target) != target {
 				return fmt.Errorf("%s: bin %q target %q is not a clean absolute path", where, bin, target)
@@ -504,14 +501,14 @@ func (a Artifact) validate(where string, system bool) error {
 }
 
 func (a Artifact) links() []string {
-	if len(a.Bins) == 0 {
+	if len(a.Bins) == 0 && a.Format != Deb {
 		return []string{a.Name}
 	}
 	return slices.Sorted(maps.Keys(a.Bins))
 }
 
 func (a Artifact) bins() map[string]string {
-	if len(a.Bins) == 0 {
+	if len(a.Bins) == 0 && a.Format != Deb {
 		return map[string]string{a.Name: a.Name}
 	}
 	return a.Bins
