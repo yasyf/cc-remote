@@ -188,7 +188,7 @@ admit_packages() {
 
 provision_packages() {
   local mode="${1:-full}" sha256="${2:-}" listing status package manifest digest file deb_dir eatmydata
-  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=() resident=() staged=() captured=() deb_flags=() deb_artifacts=()
+  local -a packages=("${prerequisites[@]}"{{range $.Apt.Install}} {{q .}}{{end}}) t64_packages shadowed=() resident=() staged=() captured=() deb_flags=(){{if debs $.System}} deb_artifacts=(){{end}}
   case "$mode" in
     full) ;;
     resident)
@@ -239,7 +239,7 @@ provision_packages() {
 {{- else}}
 
 provision_packages() {
-  local -a t64_packages deb_artifacts=()
+  local -a t64_packages{{if debs .System}} deb_artifacts=(){{end}}
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
   mapfile -t t64_packages < <(t64{{range .Apt.T64}} {{q .}}{{end}})
@@ -258,9 +258,9 @@ provision_packages() {
   {{install . "tool_dir" "bin_dir"}}
 {{- end}}
 {{- end}}
-  if [ "${#deb_artifacts[@]}" -gt 0 ]; then
-    apt-get install -y -qq{{with .Closure}} "${deb_flags[@]}"{{end}} "${deb_artifacts[@]}" > /dev/null
-  fi
+{{- if debs .System}}
+  apt-get install -y -qq{{with .Closure}} "${deb_flags[@]}"{{end}} "${deb_artifacts[@]}" > /dev/null
+{{- end}}
 {{- range .System}}
 {{- if eq .Format "deb"}}
 {{- range verify . "tool_dir" "bin_dir"}}

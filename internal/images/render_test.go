@@ -527,7 +527,7 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 				t.Errorf("an inventory without apt.payload deferred its executable probes")
 			}
 			for _, rendered := range [][]byte{scripts.ProvisionScript, scripts.Plugins, context.Provision} {
-				if !bytes.Contains(rendered, []byte("      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n")) || bytes.Contains(rendered, []byte("record_deb")) {
+				if !bytes.Contains(rendered, []byte("      deb) deb_artifacts+=(\"$download\") ;;\n")) || bytes.Contains(rendered, []byte("record_deb")) {
 					t.Errorf("an inventory without apt.payload records deb packages")
 				}
 			}
@@ -544,7 +544,8 @@ func TestOnlyAnAptPayloadRendersTheClosure(t *testing.T) {
 		"    unpack_eatmydata \"$manifest\"\n    LD_PRELOAD=\"$eatmydata\" without_man_db_auto_update apt-get install -y -qq \"${deb_flags[@]}\" --no-install-recommends ",
 		"    apt-get install -y -qq --no-install-recommends --no-upgrade \"${packages[@]}\" \"$eatmydata_package\" 'bubblewrap' > /dev/null\n",
 		"    deb_seeds=\"$build_dir/seeds\"\n    resident_packages \"${packages[@]}\" > \"$deb_seeds\"\n",
-		"      deb) apt-get install -y -qq \"${deb_flags[@]}\" \"$download\" > /dev/null ;;\n",
+		"      deb) deb_artifacts+=(\"$download\") ;;\n",
+		"  apt-get install -y -qq \"${deb_flags[@]}\" \"${deb_artifacts[@]}\" > /dev/null\n",
 		"record_deb() {\n  local package\n  package=\"$(dpkg-deb -f \"$1\" Package)\" || exit\n",
 		"  if [ \"$mode\" = full ]; then\n    installed_packages > \"$build_dir/packages.after\"\n  else\n    listing=\"$(installed_packages)\" || {\n",
 		"  local link_check=spelling\n  verify_pin \"$tool_dir/\"'uv-0.1.0' ",
@@ -778,13 +779,15 @@ create_service() {
 					"for bin in curl git jq python3 unzip xz; do", "for bin in curl git jq openssl python3 unzip xz; do",
 					"\nstart_services() {\n", "\n"+serviceCreate+"\n\nstart_services() {\n",
 					`queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream`, `queue_artifact create_service "$name" "${needs[@]}"`,
+					"    fetch \"$url\" \"$download\" \"$algorithm\" \"$digest\"\n    rm -rf \"$dir\"\n", "    if [ \"$format\" = deb ]; then\n      download=\"$tmp_dir/$name-$version.deb\"\n    fi\n    fetch \"$url\" \"$download\" \"$algorithm\" \"$digest\"\n    rm -rf \"$dir\"\n",
+					"      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n", "      deb) deb_artifacts+=(\"$download\") ;;\n",
 				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite and the service create report for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report and the single Debian transaction for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})
