@@ -132,7 +132,7 @@ func (d Daemon) UpScript(hostname string) string {
 		`keyfile="$(mktemp)"`,
 		`trap 'rm -f "$keyfile"' EXIT`,
 		`printf '%s\n' "$key" > "$keyfile"`,
-		d.cli()+` up --auth-key="file:$keyfile" --hostname=`+hostname+" --ssh --timeout=90s"+d.upFlags()+" >&2",
+		d.cli()+` up --auth-key="file:$keyfile" --hostname=`+hostname+" --force-reauth --ssh --timeout=90s"+d.upFlags()+" >&2",
 		d.cli()+" status --json",
 	)
 }
