@@ -26,6 +26,9 @@ client ownership.
 The [tool inventory reference](docs/tool-inventory.md) lists image, tool, plugin,
 and service fields and the available image commands.
 
+[Job machines](docs/job-machines.md) keeps reusable machines ready for builds,
+rebases, and test packs, with a one-line claim and release.
+
 ## Install
 
 ```bash

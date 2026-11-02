@@ -94,6 +94,22 @@ func (d Dir) PoolFill(key string) string {
 	return filepath.Join(string(d), "pool", "fill-"+key+".lock")
 }
 
+func (d Dir) Job(name string) string {
+	return filepath.Join(string(d), "jobs", name+".json")
+}
+
+func (d Dir) JobLog(name string) string {
+	return filepath.Join(string(d), "jobs", name+".log")
+}
+
+func (d Dir) JobsState() string {
+	return filepath.Join(string(d), "jobs", "state.lock")
+}
+
+func (d Dir) JobsKeep() string {
+	return filepath.Join(string(d), "jobs", "keep.lock")
+}
+
 func (d Dir) PoolState(key string) string {
 	return filepath.Join(string(d), "pool", "state-"+key+".lock")
 }

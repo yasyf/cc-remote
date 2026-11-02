@@ -54,6 +54,7 @@ type Config struct {
 	Tailnet    *Tailnet             `yaml:"tailnet"`
 	Git        Git                  `yaml:"git"`
 	Orca       Orca                 `yaml:"orca"`
+	Jobs       Jobs                 `yaml:"jobs"`
 
 	Path string `yaml:"-"`
 }
@@ -108,6 +109,13 @@ type Orca struct {
 	Pool    Pool                `yaml:"pool"`
 
 	BootstrapHelper *BootstrapHelper `yaml:"bootstrap_helper"`
+}
+
+type Jobs struct {
+	Ready     int      `yaml:"ready"`
+	Prefix    string   `yaml:"prefix"`
+	Provision []string `yaml:"provision"`
+	Reset     []string `yaml:"reset"`
 }
 
 type BootstrapHelper struct {
@@ -244,6 +252,18 @@ func (o Orca) validate() error {
 	return nil
 }
 
+func (j Jobs) validate() error {
+	switch {
+	case j.Ready < 0:
+		return fmt.Errorf("jobs.ready %d must count the idle job machines to keep, 0 or more", j.Ready)
+	case j.Ready > 0 && (len(j.Provision) == 0 || j.Provision[0] == ""):
+		return errors.New("jobs.provision names the command that creates and prepares a job machine, given its name as the last argument")
+	case j.Ready > 0 && !Identifier.MatchString(j.Prefix):
+		return fmt.Errorf("jobs.prefix %q: use up to 20 lowercase letters, digits and dashes; new job machines are named <prefix>-<id>", j.Prefix)
+	}
+	return nil
+}
+
 func (h BootstrapHelper) validate() error {
 	switch {
 	case h.Path != "" || len(h.URLCommand) == 0:
@@ -318,6 +338,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("tailnet.tag %q must name the tag workspace nodes join under, like tag:cc-remote", c.Tailnet.Tag)
 	}
 	if err := c.Orca.validate(); err != nil {
+		return err
+	}
+	if err := c.Jobs.validate(); err != nil {
 		return err
 	}
 	labels := map[string]bool{}
