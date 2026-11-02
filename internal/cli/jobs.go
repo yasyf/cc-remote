@@ -348,7 +348,7 @@ func (p *jobPool) provision(ctx context.Context, name string) error {
 	if err != nil {
 		return errors.Join(err, p.change(name, jobProvisioning, failed(err.Error())))
 	}
-	defer output.Close()
+	defer func() { _ = output.Close() }()
 	argv := append(slices.Clone(p.cfg.Jobs.Provision), name)
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Dir, command.Stdout, command.Stderr = filepath.Dir(p.cfg.Path), output, output
