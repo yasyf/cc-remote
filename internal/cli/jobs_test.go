@@ -39,6 +39,13 @@ func (m *jobMachines) Exec(_ context.Context, id string, cmd []string, stdin io.
 	return providers.Result{ExitCode: m.exitOn[id+" "+cmd[0]]}, nil
 }
 
+func (m *jobMachines) Destroy(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, "destroy "+id)
+	return nil
+}
+
 type jobsWorld struct {
 	pool     *jobPool
 	machines *jobMachines
@@ -215,6 +222,9 @@ func TestJobsKeepProvisionsTheShortfallAndRefreshesStaleTokens(t *testing.T) {
 	}
 	if member := w.member(t, "job-bad00001"); member.State != jobFailed || !strings.Contains(member.Reason, w.pool.dir.JobLog("job-bad00001")) {
 		t.Fatalf("failed record = %+v, want its log named", member)
+	}
+	if !slices.Contains(w.machines.calls, "destroy job-bad00001") || slices.Contains(w.machines.calls, "destroy job-good0002") {
+		t.Fatalf("calls = %q, want only the failed machine destroyed", w.machines.calls)
 	}
 	if member := w.member(t, "fleet-a"); !member.TokenAt.Equal(w.clock) {
 		t.Fatalf("held record = %+v, want a refreshed token", member)

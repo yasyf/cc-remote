@@ -10,7 +10,7 @@ jobs:
   reset: [sh, -c, "git -C ~/repo worktree prune"]
 ```
 
-`keep` provisions machines named `job-<id>` until `ready` of them are idle. It runs `provision` from the config file's directory with the new name as the last argument. `adopt` records machines you provisioned another way, and returns a failed machine you repaired to ready. Run `keep` on a timer.
+`keep` provisions machines named `job-<id>` until `ready` of them are idle. It runs `provision` from the config file's directory with the new name as the last argument, and destroys the machine when that command fails, keeping its output in the machine's log. `adopt` records machines you provisioned another way, and returns a failed machine you repaired to ready. Run `keep` on a timer.
 
 ```sh
 cc-remote jobs keep

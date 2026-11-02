@@ -355,7 +355,11 @@ func (p *jobPool) provision(ctx context.Context, name string) error {
 	command.Dir, command.Stdout, command.Stderr = filepath.Dir(p.cfg.Path), output, output
 	if err := command.Run(); err != nil {
 		reason := fmt.Sprintf("provision failed (%v); its output is in %s", err, logPath)
-		return errors.Join(fmt.Errorf("%s: %s", name, reason), p.change(name, jobProvisioning, failed(reason)))
+		destroyed := p.provider.Destroy(ctx, name)
+		if errors.Is(destroyed, providers.ErrNotFound) {
+			destroyed = nil
+		}
+		return errors.Join(fmt.Errorf("%s: %s", name, reason), destroyed, p.change(name, jobProvisioning, failed(reason)))
 	}
 	p.log.Info("provisioned a job machine", "machine", name)
 	return p.change(name, jobProvisioning, func(member *jobMember) { member.State = jobReady })
