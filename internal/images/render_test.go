@@ -765,6 +765,20 @@ create_service() {
     return "$status"
   fi
 }`
+	const homeGoCaches = `home_go_cache() {
+  case "$(go env "$1")" in
+    "$HOME"/*) ;;
+    *) go env -w "$1=$2" ;;
+  esac
+}
+
+home_go_caches() {
+  if ! command -v go > /dev/null; then
+    return
+  fi
+  home_go_cache GOMODCACHE "$HOME/.cache/go-mod"
+  home_go_cache GOCACHE "$HOME/.cache/go-build"
+}`
 	before := os.DirFS("testdata/ddfe484")
 	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
 	for name, inv := range map[string]Inventory{"full": validInventory(), "bare": {Version: SchemaVersion}} {
@@ -795,13 +809,15 @@ create_service() {
 					"      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n", "      deb) deb_artifacts+=(\"$download\") ;;\n",
 					"download=\"$tmp_dir/codex-runtime.tar.xz\" plugin\n", "download=\"$tmp_dir/codex-runtime.tar.xz\" staging=\"$tmp_dir/codex-runtime\" plugin\n",
 					"    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    tar -xJf \"$download\" -C \"$(dirname \"$codex_runtime_root\")\"\n    rm -f \"$download\"\n", "    mkdir \"$staging\"\n    tar -xJf \"$download\" -C \"$staging\"\n    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    mv \"$staging/$(basename \"$codex_runtime_root\")\" \"$codex_runtime_root\"\n    rm -rf \"$staging\" \"$download\"\n",
+					"\nclaude_env() {\n", "\n"+homeGoCaches+"\n\nclaude_env() {\n",
+					"  mkdir -p \"$bin_dir\"\n", "  mkdir -p \"$bin_dir\"\n  home_go_caches\n",
 				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction and the staged Codex runtime for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction, the staged Codex runtime and the home Go caches for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})

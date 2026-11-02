@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **Go's caches stay in the home.** A Sprite's Go puts its module cache under
+  `/.sprite/languages/go/workspace/pkg/mod`, outside the home volume, and that
+  cache served empty files. Builds failed with `expected 'package', found
+  'EOF'` and `go.sum` checksum mismatches, even after `go clean -modcache`. The
+  tool install now moves a `GOMODCACHE` or `GOCACHE` outside `$HOME` to
+  `$HOME/.cache/go-mod` or `$HOME/.cache/go-build` with `go env -w`. A runtime
+  the Sprite image ships in `/.sprite/bin`, such as `bun`, is pinned as an
+  inventory `tools` entry, since `$HOME/.local/bin` comes first on `PATH`.
 - **The Codex runtime extracts outside the home, then moves into place.** On a
   Sprite the home is an overlay filesystem. Under concurrent extraction it
   reported a new inode for the runtime's `share/man/man1` directory, and GNU tar

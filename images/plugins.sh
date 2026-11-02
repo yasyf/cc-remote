@@ -543,6 +543,21 @@ edit_settings() (
   mv "$edited" "$settings"
 )
 
+home_go_cache() {
+  case "$(go env "$1")" in
+    "$HOME"/*) ;;
+    *) go env -w "$1=$2" ;;
+  esac
+}
+
+home_go_caches() {
+  if ! command -v go > /dev/null; then
+    return
+  fi
+  home_go_cache GOMODCACHE "$HOME/.cache/go-mod"
+  home_go_cache GOCACHE "$HOME/.cache/go-build"
+}
+
 claude_env() {
   edit_settings --arg key "$1" --arg value "$2" ".env[\$key] = \$value"
 }
@@ -694,6 +709,7 @@ run_install() {
   fi
   IFS= read -r github_token
   mkdir -p "$bin_dir"
+  home_go_caches
 {{- range .Tools}}
   queue_artifact {{install . "tool_dir" "bin_dir"}}
 {{- end}}
