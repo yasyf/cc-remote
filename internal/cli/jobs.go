@@ -164,12 +164,13 @@ func (p *jobPool) adopt(names []string) error {
 			if err := state.ValidateName(name); err != nil {
 				return err
 			}
-			found, err := state.Load(p.dir.Job(name), &jobMember{})
+			member := &jobMember{}
+			found, err := state.Load(p.dir.Job(name), member)
 			if err != nil {
 				return err
 			}
-			if found {
-				return fmt.Errorf("%s is already a job machine", name)
+			if found && member.State != jobFailed {
+				return fmt.Errorf("%s is already a %s job machine", name, member.State)
 			}
 			if err := p.save(&jobMember{SchemaVersion: jobsSchema, Name: name, State: jobReady, CreatedAt: p.now().UTC()}); err != nil {
 				return err
@@ -399,7 +400,7 @@ func newJobsAdoptCmd() *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "adopt <machine>...",
-		Short: "Record machines provisioned elsewhere as ready job machines",
+		Short: "Record machines provisioned elsewhere, or failed machines you repaired, as ready job machines",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			pool, err := openJobs(&flags)

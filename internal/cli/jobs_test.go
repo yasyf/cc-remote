@@ -252,3 +252,25 @@ func TestJobsRunPassesTheMachineAndTheCommandStatusThenReleases(t *testing.T) {
 		t.Fatalf("after run = %+v, want ready", member)
 	}
 }
+
+func TestJobsAdoptReturnsARepairedFailedMachineAndRefusesALiveOne(t *testing.T) {
+	w := newJobsWorld(t, config.Jobs{Reset: []string{"sh", "-c", "check"}})
+	w.adopt(t, "fleet-a")
+	if _, err := w.pool.claim(t.Context(), "lane", 0); err != nil {
+		t.Fatal(err)
+	}
+	w.machines.exitOn["fleet-a sh"] = 1
+	if err := w.pool.release(t.Context(), "fleet-a"); err == nil {
+		t.Fatal("release with a failing reset passed")
+	}
+
+	if err := w.pool.adopt([]string{"fleet-a"}); err != nil {
+		t.Fatalf("adopt of a failed machine = %v", err)
+	}
+	if member := w.member(t, "fleet-a"); member.State != jobReady || member.Holder != "" || member.Reason != "" {
+		t.Fatalf("re-adopted record = %+v, want ready with no holder or reason", member)
+	}
+	if err := w.pool.adopt([]string{"fleet-a"}); err == nil || !strings.Contains(err.Error(), "already a ready job machine") {
+		t.Fatalf("adopt of a ready machine = %v", err)
+	}
+}
