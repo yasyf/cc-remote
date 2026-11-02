@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -19,6 +20,9 @@ func main() {
 
 	if err := cli.NewRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "cc-remote:", err)
+		if exited, ok := errors.AsType[*cli.CommandExit](err); ok {
+			os.Exit(exited.ExitCode())
+		}
 		os.Exit(1)
 	}
 }
