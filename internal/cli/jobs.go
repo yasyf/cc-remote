@@ -164,12 +164,13 @@ func (p *jobPool) adopt(names []string) error {
 			if err := state.ValidateName(name); err != nil {
 				return err
 			}
-			found, err := state.Load(p.dir.Job(name), &jobMember{})
+			member := &jobMember{}
+			found, err := state.Load(p.dir.Job(name), member)
 			if err != nil {
 				return err
 			}
-			if found {
-				return fmt.Errorf("%s is already a job machine", name)
+			if found && member.State != jobFailed {
+				return fmt.Errorf("%s is already a %s job machine", name, member.State)
 			}
 			if err := p.save(&jobMember{SchemaVersion: jobsSchema, Name: name, State: jobReady, CreatedAt: p.now().UTC()}); err != nil {
 				return err
@@ -354,7 +355,11 @@ func (p *jobPool) provision(ctx context.Context, name string) error {
 	command.Dir, command.Stdout, command.Stderr = filepath.Dir(p.cfg.Path), output, output
 	if err := command.Run(); err != nil {
 		reason := fmt.Sprintf("provision failed (%v); its output is in %s", err, logPath)
-		return errors.Join(fmt.Errorf("%s: %s", name, reason), p.change(name, jobProvisioning, failed(reason)))
+		destroyed := p.provider.Destroy(ctx, name)
+		if errors.Is(destroyed, providers.ErrNotFound) {
+			destroyed = nil
+		}
+		return errors.Join(fmt.Errorf("%s: %s", name, reason), destroyed, p.change(name, jobProvisioning, failed(reason)))
 	}
 	p.log.Info("provisioned a job machine", "machine", name)
 	return p.change(name, jobProvisioning, func(member *jobMember) { member.State = jobReady })
@@ -399,7 +404,7 @@ func newJobsAdoptCmd() *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "adopt <machine>...",
-		Short: "Record machines provisioned elsewhere as ready job machines",
+		Short: "Record machines provisioned elsewhere, or failed machines you repaired, as ready job machines",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			pool, err := openJobs(&flags)
