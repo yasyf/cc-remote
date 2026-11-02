@@ -88,7 +88,7 @@ exit 0`)
 			}
 			return strings.TrimSpace(string(raw))
 		}
-		if argv := read(".argv"); strings.Contains(argv, "tskey-auth") || !strings.Contains(argv, "--hostname=ws-1") || !strings.Contains(argv, "--auth-key=file:") || !strings.Contains(argv, "--ssh") {
+		if argv := read(".argv"); strings.Contains(argv, "tskey-auth") || !strings.Contains(argv, "--hostname=ws-1") || !strings.Contains(argv, "--auth-key=file:") || !strings.Contains(argv, "--ssh") || !strings.Contains(argv, "--force-reauth") {
 			t.Errorf("%v: tailscale saw argv %q", daemon, argv)
 		}
 		if key := read(".key"); key != "tskey-auth-kNEW-minted" {
