@@ -62,7 +62,7 @@ func spec(name string, labels map[string]string) providers.Spec {
 func TestSpritesSatisfiesTheContract(t *testing.T) {
 	providertest.Run(t, func(t *testing.T) providertest.Harness {
 		p, _ := newProvider(t)
-		return providertest.Harness{Provider: p, Spec: spec}
+		return providertest.Harness{Provider: p, Spec: spec, Suspends: true}
 	})
 }
 

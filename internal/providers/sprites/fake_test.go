@@ -140,12 +140,11 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 			for _, named := range slices.Sorted(maps.Keys(sprite.services)) {
 				listed = append(listed, map[string]any{"name": named, "cmd": "/bin/" + named, "state": map[string]string{"name": named, "status": sprite.services[named]}})
 			}
+			sprite.idle()
 			return respond(200, listed)
 		case post && verb == "stop" && sprite.services[service] != "":
 			sprite.services[service] = "stopped"
-			if !sprite.held && !slices.Contains(slices.Collect(maps.Values(sprite.services)), "running") {
-				sprite.status = "warm"
-			}
+			sprite.idle()
 			return respond(200, map[string]string{})
 		}
 		f.t.Fatalf("sprite api %q", args)
@@ -176,6 +175,12 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 		body["next_continuation_token"] = strconv.Itoa(next)
 	}
 	return respond(200, body)
+}
+
+func (s *fakeSprite) idle() {
+	if !s.held && !slices.Contains(slices.Collect(maps.Values(s.services)), "running") {
+		s.status = "warm"
+	}
 }
 
 func (f *fakeSprites) resource(name string, sprite *fakeSprite) map[string]any {
