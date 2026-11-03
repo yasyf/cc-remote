@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`cc-remote orca stop <lane>` stops the workspace a lane runs on.** It finds
+  the workspace `prepare` created under the lane's name or the warm pool
+  workspace the lane claimed, closes the task's SSH forward, and suspends the
+  machine, keeping its disk and records. It refuses a warm pool workspace's own
+  name, so it stops only a workspace a lane claimed.
+- **`cc-remote suspend` stops a Sprite.** Sprites has no stop verb, so suspend
+  stops every service on the Sprite and waits up to two minutes for it to
+  pause, failing with the error when something still holds it.
 - **A system `.deb` can be a dependency with no `bins`.** It links nothing, so
   an inventory can pin a backported `git` together with the matching `git-man`
   its `Depends` names.

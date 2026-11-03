@@ -353,22 +353,46 @@ func TestDestroyKeepsTheReceiptUntilTheSpriteIsGone(t *testing.T) {
 	}
 }
 
-func TestSuspendFailsAndLeavesTheSpriteAsItIs(t *testing.T) {
+func TestSuspendStopsEveryServiceAndReturnsOnceTheSpritePauses(t *testing.T) {
 	p, fake := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
 		t.Fatal(err)
 	}
-	before := len(fake.verbs())
+	fake.sprites["alpha"].services = map[string]string{"sshd": "running", "cc-remote-orca": "running", "cc-remote-payload": "starting", "old": "stopped"}
+	if err := p.Suspend(t.Context(), "alpha"); err != nil {
+		t.Fatalf("Suspend = %v", err)
+	}
+	var stops []string
+	for _, call := range fake.calls {
+		if call[0] == "api" && slices.Contains(call, "POST") {
+			stops = append(stops, call[3])
+		}
+	}
+	want := []string{"/v1/sprites/alpha/services/cc-remote-orca/stop", "/v1/sprites/alpha/services/cc-remote-payload/stop", "/v1/sprites/alpha/services/sshd/stop"}
+	if !slices.Equal(stops, want) {
+		t.Errorf("Suspend stopped %q, want %q", stops, want)
+	}
+	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.State != providers.StateSuspended {
+		t.Errorf("after the suspend, Get = %+v, %v; want the sprite paused", machine, err)
+	}
+}
+
+func TestSuspendOfASpriteSomethingStillHoldsFailsNamingTheHold(t *testing.T) {
+	within, every := pauseWithin, pauseEvery
+	pauseWithin, pauseEvery = 0, 0
+	t.Cleanup(func() { pauseWithin, pauseEvery = within, every })
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	fake.sprites["alpha"].services = map[string]string{"sshd": "running"}
+	fake.sprites["alpha"].held = true
 	err := p.Suspend(t.Context(), "alpha")
-	want := "suspending sprite alpha: unsupported operation: Sprites has no stop verb, so cc-remote cannot stop a sprite; it sleeps on its own only once no session, request, or connection holds it, and an open cc-remote orca forward holds it active; run cc-remote destroy to free it"
-	if !errors.Is(err, errors.ErrUnsupported) || err.Error() != want {
-		t.Errorf("Suspend = %v, want %q", err, want)
+	if err == nil || !strings.Contains(err.Error(), "suspending sprite alpha: its services stopped, but it still runs") {
+		t.Errorf("Suspend = %v, want the hold named", err)
 	}
-	if verbs := fake.verbs()[before:]; !slices.Equal(verbs, []string{"api"}) {
-		t.Errorf("Suspend ran sprite %q, want only the api read", verbs)
-	}
-	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.State != providers.StateRunning {
-		t.Errorf("after the failed suspend, Get = %+v, %v; want the sprite running", machine, err)
+	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.State != providers.StateRunning || fake.sprites["alpha"].services["sshd"] != "stopped" {
+		t.Errorf("after the held suspend, Get = %+v, %v, services %v; want it running with sshd stopped", machine, err, fake.sprites["alpha"].services)
 	}
 }
 

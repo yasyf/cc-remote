@@ -24,6 +24,8 @@ type fakeSprite struct {
 	status     string
 	createdAt  time.Time
 	authorized []string
+	services   map[string]string
+	held       bool
 }
 
 type fakeSprites struct {
@@ -103,7 +105,11 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 }
 
 func (f *fakeSprites) api(args []string) (providers.Result, error) {
-	if len(args) != 5 || args[1] != "--" || args[2] != "-sS" || args[3] != "-w" || args[4] != "\n%{http_code}" {
+	if len(args) < 5 || args[1] != "--" || args[2] != "-sS" || args[3] != "-w" || args[4] != "\n%{http_code}" {
+		f.t.Fatalf("sprite api %q", args)
+	}
+	post := slices.Equal(args[5:], []string{"-X", "POST"})
+	if !post && len(args) != 5 {
 		f.t.Fatalf("sprite api %q", args)
 	}
 	respond := func(status int, body any) (providers.Result, error) {
@@ -120,12 +126,29 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if name, ok := strings.CutPrefix(path.Path, "/v1/sprites/"); ok {
+	if rest, ok := strings.CutPrefix(path.Path, "/v1/sprites/"); ok {
+		name, sub, _ := strings.Cut(rest, "/")
 		sprite, found := f.sprites[name]
 		if !found {
 			return respond(404, map[string]string{"error": "sprite not found"})
 		}
-		return respond(200, f.resource(name, sprite))
+		switch service, verb, _ := strings.Cut(strings.TrimPrefix(sub, "services/"), "/"); {
+		case sub == "" && !post:
+			return respond(200, f.resource(name, sprite))
+		case sub == "services" && !post:
+			listed := []map[string]any{}
+			for _, named := range slices.Sorted(maps.Keys(sprite.services)) {
+				listed = append(listed, map[string]any{"name": named, "cmd": "/bin/" + named, "state": map[string]string{"name": named, "status": sprite.services[named]}})
+			}
+			return respond(200, listed)
+		case post && verb == "stop" && sprite.services[service] != "":
+			sprite.services[service] = "stopped"
+			if !sprite.held && !slices.Contains(slices.Collect(maps.Values(sprite.services)), "running") {
+				sprite.status = "warm"
+			}
+			return respond(200, map[string]string{})
+		}
+		f.t.Fatalf("sprite api %q", args)
 	}
 	if path.Path != "/v1/sprites" {
 		f.t.Fatalf("sprite api %s", args[0])

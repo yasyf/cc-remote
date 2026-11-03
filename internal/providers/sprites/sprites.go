@@ -28,6 +28,11 @@ const (
 	downloadChunk = 1 << 30
 )
 
+var (
+	pauseWithin = 2 * time.Minute
+	pauseEvery  = 5 * time.Second
+)
+
 const (
 	StepValidate  CreateStep = "create.validate"
 	StepPreflight CreateStep = "create.preflight"
@@ -157,6 +162,13 @@ type sprite struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type service struct {
+	Name  string `json:"name"`
+	State struct {
+		Status string `json:"status"`
+	} `json:"state"`
+}
+
 type page struct {
 	Sprites               []sprite `json:"sprites"`
 	HasMore               bool     `json:"has_more"`
@@ -252,7 +264,49 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 	if _, err := p.Get(ctx, id); err != nil {
 		return err
 	}
-	return fmt.Errorf("suspending sprite %s: %w: Sprites has no stop verb, so cc-remote cannot stop a sprite; it sleeps on its own only once no session, request, or connection holds it, and an open cc-remote orca forward holds it active; run cc-remote destroy to free it", id, errors.ErrUnsupported)
+	services := "/v1/sprites/" + id + "/services"
+	status, body, err := p.api(ctx, services)
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return fmt.Errorf("suspending sprite %s: %w listing its services: %s", id, &StatusError{Status: status}, bytes.TrimSpace(body))
+	}
+	var listed []service
+	if err := json.Unmarshal(body, &listed); err != nil {
+		return fmt.Errorf("suspending sprite %s: reading its services: %w", id, err)
+	}
+	for _, running := range listed {
+		if running.State.Status == "stopped" {
+			continue
+		}
+		status, body, err := p.api(ctx, services+"/"+url.PathEscape(running.Name)+"/stop", "-X", "POST")
+		if err != nil {
+			return err
+		}
+		if status/100 != 2 {
+			return fmt.Errorf("suspending sprite %s: %w stopping service %s: %s", id, &StatusError{Status: status}, running.Name, bytes.TrimSpace(body))
+		}
+	}
+	return p.paused(ctx, id)
+}
+
+func (p *Provider) paused(ctx context.Context, id string) error {
+	deadline := time.Now().Add(pauseWithin)
+	for {
+		machine, err := p.Get(ctx, id)
+		if err != nil || machine.State != providers.StateRunning {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("suspending sprite %s: its services stopped, but it still runs %v later, so a session, request, or connection holds it, such as an open cc-remote orca forward", id, pauseWithin)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pauseEvery):
+		}
+	}
 }
 
 func (p *Provider) Destroy(ctx context.Context, id string) error {
@@ -326,8 +380,8 @@ func (c *byteCount) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (p *Provider) api(ctx context.Context, path string) (int, []byte, error) {
-	out, err := providers.Output(ctx, p.Runner, p.command(nil, "api", "-o", p.Org, path, "--", "-sS", "-w", "\n%{http_code}"))
+func (p *Provider) api(ctx context.Context, path string, curl ...string) (int, []byte, error) {
+	out, err := providers.Output(ctx, p.Runner, p.command(nil, append([]string{"api", "-o", p.Org, path, "--", "-sS", "-w", "\n%{http_code}"}, curl...)...))
 	if err != nil {
 		return 0, nil, err
 	}

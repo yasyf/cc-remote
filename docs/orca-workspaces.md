@@ -182,10 +182,18 @@ prompt again. These commands never stop the
 runtime, the worker, or the forward.
 
 The Orca workspace card's Sleep and Delete controls do not manage the provider
-machine; use `cc-remote suspend` on a Namespace workspace and
-`cc-remote destroy`. Sprites has no stop verb, so `cc-remote suspend` fails on
-a Sprite and changes nothing, and the open forward keeps the Sprite active
-until `cc-remote destroy` frees it.
+machine; use `cc-remote orca stop`, `cc-remote suspend`, and `cc-remote destroy`.
+
+`cc-remote orca stop lane-name` stops the workspace a lane runs on: the one
+`prepare` created under the lane's name, or the warm pool workspace the lane
+claimed. It closes the task's SSH forward and suspends the machine, then prints
+the lane and workspace. A Namespace instance stops. Sprites has no stop verb,
+so on a Sprite it stops every service and waits up to two minutes for the
+Sprite to pause, which it does once no session, request, or connection holds
+it. The disk, the workspace record, the task record, and the pool record stay,
+and `reconnect` reopens the forward. It refuses a warm pool workspace's own
+name, so it stops only a workspace a lane claimed, and it exits nonzero with
+the error when the machine does not stop.
 
 `reconnect` restores only the transport to an existing runtime. It does not
 resume a machine, restart a runtime, or recover a worker after process loss.
