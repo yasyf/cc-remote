@@ -474,7 +474,7 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	}, "lane lane-a already claimed warm workspace pool-a, now failed")
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "pool-b", "")
-	}, "pool-b names a warm pool workspace")
+	}, "pool-b already has an Orca task")
 }
 
 func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T) {
@@ -1023,7 +1023,7 @@ func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
 			"exit 1 and HTTP status unknown at create.command", `{"step":"create.command","class":"exit","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 		{
-			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
+			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then rm "$SPRITE_CALLS.created"; printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
 			"exit unknown and HTTP status 500 at create.readback", `{"step":"create.readback","class":"http","exit":null,"httpStatus":500,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 	}

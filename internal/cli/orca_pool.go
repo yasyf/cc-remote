@@ -661,7 +661,7 @@ func (f *orcaFailure) describe() string {
 
 func withheld(err error) error {
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		var parts []error
+		parts := make([]error, 0, len(joined.Unwrap()))
 		for _, part := range joined.Unwrap() {
 			parts = append(parts, withheld(part))
 		}
