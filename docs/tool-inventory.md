@@ -113,6 +113,22 @@ receives executable and content checks against its marketplace source, including
 the descriptor's version, sizes, and SHA-256 pins. Verification leaves its payload
 for first use. Captain Hook binaries retain their runtime probes.
 
+### Repository hooks and the pinned Captain Hook
+
+When the inventory pins `captainHook`, cc-remote loads the repository's
+`.claude/hooks` with the interpreter of the installed Captain Hook build, the
+build `~/.local/share/captain-hook/host/version.json` reports. A hook that
+imports an API newer than that build fails to load, and its guard never runs.
+
+- `cc-remote payload build` fetches only `.claude/hooks` from the config's
+  `repository` at its `ref` and loads it on the build machine after
+  verification. When a hook does not load, the build fails without writing a
+  payload and names each hook with its import error.
+- A create, resume, or reuse loads the checkout's hooks after the checkout and
+  proceeds even when one does not load. It logs a warning for each one and
+  lists them under `captainHookDrift` in its result and in the
+  `orca prepare` allocation, where a launcher can raise them.
+
 ### Provision WordNet for a task that needs it
 
 A standard startup does not eagerly initialize Captain Hook's WordNet lexicon.

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/yasyf/cc-remote/internal/config"
@@ -20,6 +21,7 @@ const (
 	LabelPayloadBuild = "cc-remote/payload-build"
 	payloadPrefix     = "cc-remote-payload-"
 	diagnoseTimeout   = 30 * time.Second
+	payloadHooks      = "/tmp/cc-remote-payload-hooks"
 )
 
 type Downloader interface {
@@ -73,8 +75,12 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	if packages == nil {
 		return PayloadBuild{}, fmt.Errorf("profile %s's inventory declares apt.payload, so its payload build also writes the resident packages archive; name its file with --packages-out", profile)
 	}
+	var hooks *hookSource
+	if rendered.captainHook {
+		hooks = &hookSource{repository: cfg.Repository, ref: cfg.Ref}
+	}
 	var githubToken string
-	if rendered.private {
+	if rendered.private || hooks != nil && TokenAllowed(cfg.Repository) {
 		if githubToken, err = token(ctx); err != nil {
 			return PayloadBuild{}, err
 		}
@@ -91,7 +97,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	}
 	slog.Info("created the payload build machine", "machine", name)
 	builder := &Session{Provider: provider, Stderr: stderr}
-	built, err := packPayload(ctx, builder.exec(name), downloader, rendered.scripts, githubToken, name, out, packages)
+	built, err := packPayload(ctx, builder.exec(name), builder.output(name), downloader, rendered.scripts, githubToken, hooks, name, out, packages)
 	if err != nil {
 		diagnosePayloadBuild(ctx, rendered.scripts, builder.capture(name), name)
 	}
@@ -101,7 +107,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	return built, nil
 }
 
-func packPayload(ctx context.Context, run images.Exec, downloader Downloader, scripts images.Scripts, githubToken, machine string, out, packages io.Writer) (PayloadBuild, error) {
+func packPayload(ctx context.Context, run images.Exec, capture images.Capture, downloader Downloader, scripts images.Scripts, githubToken string, hooks *hookSource, machine string, out, packages io.Writer) (PayloadBuild, error) {
 	tools := scripts.Fingerprint()
 	steps := []func() error{
 		func() error { return scripts.Provision(ctx, run, images.PhasePackages, images.PackagesFull) },
@@ -110,6 +116,7 @@ func packPayload(ctx context.Context, run images.Exec, downloader Downloader, sc
 		func() error { return scripts.Install(ctx, run, githubToken, "") },
 		func() error { return scripts.Natives(ctx, run) },
 		func() error { return scripts.Verify(ctx, run) },
+		func() error { return refuseHookDrift(ctx, run, capture, scripts, githubToken, hooks) },
 		func() error { return scripts.Provision(ctx, run, images.PhasePack, tools) },
 	}
 	for _, step := range steps {
@@ -130,6 +137,31 @@ func packPayload(ctx context.Context, run images.Exec, downloader Downloader, sc
 		return PayloadBuild{}, err
 	}
 	return built, nil
+}
+
+type hookSource struct {
+	repository, ref string
+}
+
+func refuseHookDrift(ctx context.Context, run images.Exec, capture images.Capture, scripts images.Scripts, githubToken string, hooks *hookSource) error {
+	if hooks == nil {
+		return nil
+	}
+	if err := run(ctx, []string{"sh", "-c", HooksScript(payloadHooks, hooks.repository, hooks.ref)}, strings.NewReader(githubToken+"\n")); err != nil {
+		return fmt.Errorf("fetch %s's hooks at %s: %w", hooks.repository, hooks.ref, err)
+	}
+	drift, err := scripts.CaptainHookDrift(ctx, capture, payloadHooks)
+	if err != nil {
+		return err
+	}
+	if len(drift) == 0 {
+		return nil
+	}
+	lines := make([]string, len(drift))
+	for i, d := range drift {
+		lines[i] = d.String()
+	}
+	return fmt.Errorf("the payload's Captain Hook cannot load %s's hooks at %s, so the payload is not published:\n%s", hooks.repository, hooks.ref, strings.Join(lines, "\n"))
 }
 
 func download(ctx context.Context, downloader Downloader, machine, path string, w io.Writer) (string, int64, error) {

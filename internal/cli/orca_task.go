@@ -70,6 +70,7 @@ type orcaTask struct {
 	claimed  bool
 	booted   *orcaBoot
 	author   author
+	drift    []images.HookDrift
 }
 
 type orcaBoot struct {
@@ -395,7 +396,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		task, err = driver.task(result, l.agent, session.Provider)
 	}
 	if err == nil {
-		task.Pregrant, task.claimed, task.booted, task.author = pregrant, opening == openSpare, booted, l.author
+		task.Pregrant, task.claimed, task.booted, task.author, task.drift = pregrant, opening == openSpare, booted, l.author, result.HookDrift
 		err = driver.launch(ctx, session, task, runtime, keys, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {

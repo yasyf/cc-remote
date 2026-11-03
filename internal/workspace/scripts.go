@@ -51,17 +51,10 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 	if shallow {
 		depth = " --depth 1"
 	}
-	lines := []string{
-		"IFS= read -r token || token=''",
-		`askpass="$(mktemp)"`,
-		`trap 'rm -f "$askpass"' EXIT`,
-		`printf '%s\n' '#!/bin/sh' 'case "$1" in *Username*) echo x-access-token ;; *) printf "%s\\n" "$CC_REMOTE_GIT_TOKEN" ;; esac' > "$askpass"`,
-		`chmod 700 "$askpass"`,
-		`if [ -n "$token" ]; then export CC_REMOTE_GIT_TOKEN="$token" GIT_ASKPASS="$askpass"; set -- -c credential.helper=; else set --; fi`,
-		"export GIT_TERMINAL_PROMPT=0",
-		"root=" + remote.Quote(root),
-		"ref=" + remote.Quote(source.Ref),
-	}
+	lines := append(gitCredentials(),
+		"root="+remote.Quote(root),
+		"ref="+remote.Quote(source.Ref),
+	)
 	if source.pinned() {
 		return remote.Script(append(lines,
 			"head="+remote.Quote(source.Head),
@@ -84,6 +77,27 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 		"fi",
 		`if git -C "$root" rev-parse --quiet --verify "refs/remotes/origin/$ref" > /dev/null; then git -C "$root" branch --quiet --set-upstream-to "origin/$ref"; fi`,
 	)...)
+}
+
+func HooksScript(root, repository, ref string) string {
+	return remote.Script(append(gitCredentials(),
+		"root="+remote.Quote(root),
+		`rm -rf "$root"`,
+		`git "$@" clone --quiet --depth 1 --filter=blob:none --sparse --branch `+remote.Quote(ref)+` --single-branch `+remote.Quote(repository)+` "$root"`,
+		`git "$@" -C "$root" sparse-checkout set .claude/hooks`,
+	)...)
+}
+
+func gitCredentials() []string {
+	return []string{
+		"IFS= read -r token || token=''",
+		`askpass="$(mktemp)"`,
+		`trap 'rm -f "$askpass"' EXIT`,
+		`printf '%s\n' '#!/bin/sh' 'case "$1" in *Username*) echo x-access-token ;; *) printf "%s\\n" "$CC_REMOTE_GIT_TOKEN" ;; esac' > "$askpass"`,
+		`chmod 700 "$askpass"`,
+		`if [ -n "$token" ]; then export CC_REMOTE_GIT_TOKEN="$token" GIT_ASKPASS="$askpass"; set -- -c credential.helper=; else set --; fi`,
+		"export GIT_TERMINAL_PROMPT=0",
+	}
 }
 
 func RefreshScript(root string, env, steps []string) string {
