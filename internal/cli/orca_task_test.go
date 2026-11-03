@@ -1157,7 +1157,7 @@ func TestABeforeWorkerScriptThatFailsStopsPrepareWithNoWorker(t *testing.T) {
 	t.Setenv("REMOTE_FAIL", "the-install")
 	launch := orcaLaunch{agent: firstAgent, existing: true, author: firstAuthor, beforeWorker: "echo the-install"}
 	var out bytes.Buffer
-	err := launch.start(t.Context(), &out, w.session, native, orca.Runtime{Entry: "tools/orca/AppRun"}, "task-a", func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+	err := launch.start(t.Context(), &out, w.session, native, orca.Runtime{Entry: "tools/orca/AppRun"}, "task-a", func(context.Context, orcaDriver, *orcaTask) error {
 		t.Fatal("a failed script reached the brief")
 		return nil
 	})
