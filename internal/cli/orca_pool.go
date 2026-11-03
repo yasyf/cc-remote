@@ -175,23 +175,31 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 	if err != nil {
 		return err
 	}
-	allocation := &orcaAllocation{SchemaVersion: orcaAllocationSchema, Lane: lane, Workspace: lane, Allocation: allocationCreated, Ref: source.Ref, Replenish: pool.replenish()}
-	if member == nil {
-		allocation.Task, err = l.prime(ctx, session, runner, runtime, lane, openCreated, nil, finish)
-	} else {
-		defer release()
-		allocation.Workspace, allocation.Allocation = member.Name, allocationWarm
-		allocation.Task, err = l.prime(ctx, session, runner, runtime, member.Name, openSpare, member.Pregrant, finish)
-		err = errors.Join(err, pool.settle(member, allocation.Task, err))
+	replenish := pool.replenish()
+	for {
+		allocation := &orcaAllocation{SchemaVersion: orcaAllocationSchema, Lane: lane, Workspace: lane, Allocation: allocationCreated, Ref: source.Ref, Replenish: replenish}
+		if member == nil {
+			allocation.Task, err = l.prime(ctx, session, runner, runtime, lane, openCreated, nil, finish)
+		} else {
+			allocation.Workspace, allocation.Allocation = member.Name, allocationWarm
+			allocation.Task, err = l.prime(ctx, session, runner, runtime, member.Name, openSpare, member.Pregrant, finish)
+			err = errors.Join(err, pool.settle(member, allocation.Task, err))
+			if allocation.Task == nil {
+				release()
+				session.Log.Warn("the claimed warm workspace failed and stays claimed as failed; trying the next one", "lane", lane, "workspace", member.Name, "err", err)
+				if member, release, err = pool.claim(ctx, lane, source.Ref); err != nil {
+					return err
+				}
+				continue
+			}
+			defer release()
+		}
+		if allocation.Task == nil {
+			return err
+		}
+		allocation.Head = allocation.Task.BaseCommit
+		return errors.Join(err, emit(out, allocation))
 	}
-	if allocation.Task == nil && member != nil {
-		return fmt.Errorf("lane %s claimed warm workspace %s, which stays claimed as failed while no other workspace is tried: %w", lane, member.Name, err)
-	}
-	if allocation.Task == nil {
-		return err
-	}
-	allocation.Head = allocation.Task.BaseCommit
-	return errors.Join(err, emit(out, allocation))
 }
 
 func (p *orcaPool) records() ([]*orcaMember, error) {
@@ -277,8 +285,12 @@ func (p *orcaPool) claim(ctx context.Context, lane, ref string) (*orcaMember, fu
 			continue
 		}
 		member, release, err := p.take(ctx, listed.Name, lane, ref)
-		if err != nil || member != nil {
-			return member, release, err
+		if err != nil {
+			p.session.Log.Warn("a warm workspace could not be claimed; trying the next one", "lane", lane, "workspace", listed.Name, "err", err)
+			continue
+		}
+		if member != nil {
+			return member, release, nil
 		}
 	}
 	return nil, nil, nil
