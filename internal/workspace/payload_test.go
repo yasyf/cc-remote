@@ -32,6 +32,7 @@ type buildMachine struct {
 	diagnosis providers.Result
 	steps     []string
 	stdins    map[string]string
+	drift     string
 }
 
 func (m *buildMachine) Handle(_ string, cmd []string, stdin []byte) providers.Result {
@@ -41,8 +42,12 @@ func (m *buildMachine) Handle(_ string, cmd []string, stdin []byte) providers.Re
 		step = "diagnose memory"
 	case slices.Equal(cmd[:3], []string{"sudo", "bash", "-s"}):
 		step = "provision " + strings.Join(cmd[3:], " ")
+	case cmd[0] == "sh" && strings.Contains(cmd[2], "sparse-checkout"):
+		step = "fetch hooks " + cmd[2][strings.Index(cmd[2], "--branch"):strings.Index(cmd[2], " --single-branch")]
 	case cmd[0] == "sh":
 		step = "stage plugins"
+	case cmd[0] == "bash" && cmd[3] == "captain-hook-drift":
+		step = "hook drift " + cmd[4]
 	default:
 		step = "plugins " + strings.Join(cmd[slices.Index(cmd, "plugins.sh")+1:], " ")
 	}
@@ -54,6 +59,8 @@ func (m *buildMachine) Handle(_ string, cmd []string, stdin []byte) providers.Re
 	switch step {
 	case "diagnose memory":
 		return m.diagnosis
+	case "hook drift " + payloadHooks:
+		return providers.Result{Stdout: []byte(m.drift)}
 	case m.failing:
 		return m.failure
 	}
@@ -555,6 +562,50 @@ func TestGitTokenReadsTheEnvironmentBeforeTheCommand(t *testing.T) {
 			}
 			if err != nil || got != tt.want {
 				t.Errorf("GitToken = %q, %v, want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildPayloadPublishesOnlyWhenThePayloadsCaptainHookLoadsTheRepositorysHooks(t *testing.T) {
+	pinned := systemHead + "  - { name: uv, version: 0.1.0, url: https://example.com/uv, sha256: " + sha + ", format: binary }\n" + configureEnv + closureApt +
+		"captainHook: { version: 1.0.0, url: https://example.com/hook.tar.gz, sha256: " + sha + " }\n"
+	drift := `{"hook":"hooks.merge_guard","error":"ImportError: cannot import name 'project_request_body' from 'cc_transcript.parser'"}` + "\n"
+	tests := []struct {
+		name  string
+		drift string
+		want  string
+		pack  bool
+	}{
+		{name: "every hook loads", pack: true},
+		{name: "a hook does not load", drift: drift, want: "the payload's Captain Hook cannot load the repository's hooks, so the payload is not published: https://github.com/example/app at main:\nhooks.merge_guard: ImportError: cannot import name 'project_request_body' from 'cc_transcript.parser'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := payloadConfig(t, "", pinned)
+			scripts := fullScripts(t, cfg)
+			machine := &buildMachine{drift: tt.drift}
+			provider := &downloading{Fake: &providertest.Fake{Handle: machine.Handle}, payload: "hsqs squashfs payload"}
+			token := func(context.Context) (string, error) { return buildToken, nil }
+			_, err := BuildPayload(t.Context(), cfg, provider, "fake", "lean", token, io.Discard, io.Discard, io.Discard)
+			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+			steps := []string{"provision packages full", "provision tools", "stage plugins", "plugins install", "plugins natives", "plugins verify", "fetch hooks --branch main", "hook drift " + payloadHooks}
+			if tt.pack {
+				steps = append(steps, "provision pack "+scripts.Fingerprint())
+			}
+			if !slices.Equal(machine.steps, steps) {
+				t.Errorf("steps = %q, want %q", machine.steps, steps)
+			}
+			if got := machine.stdins["fetch hooks --branch main"]; got != buildToken+"\n" {
+				t.Errorf("the hooks fetch read %q on stdin, want the token", got)
+			}
+			if tt.pack == (len(provider.reads) == 0) {
+				t.Errorf("reads = %q with pack %v", provider.reads, tt.pack)
+			}
+			if calls := provider.Calls(); calls[len(calls)-1] != "destroy "+provider.created.Name {
+				t.Errorf("calls = %q", calls)
 			}
 		})
 	}

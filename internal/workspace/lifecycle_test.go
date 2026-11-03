@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +97,7 @@ type scripted struct {
 	stdins        map[string][]string
 	ready         map[string]string
 	holds         map[string]*hold
+	drift         providers.Result
 	baked         string
 }
 
@@ -214,6 +216,8 @@ func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Resu
 		return providers.Result{Stderr: []byte("cc-remote: this machine already carries /var/lib/tailscale/tailscaled.state, so its image joined a tailnet before this workspace was created; rebuild it unenrolled"), ExitCode: 1}
 	}
 	switch {
+	case strings.Contains(script, "captain-hook-drift"):
+		return m.drift
 	case strings.Contains(script, images.ManifestPath):
 		return providers.Result{Stdout: []byte(baked)}
 	case strings.Contains(script, enrolls):
@@ -2777,5 +2781,47 @@ func TestAResumeRemountsAndRejectsAPackagesPinTheReadyPayloadWasNotBuiltWith(t *
 	}
 	if record, found := h.record("ws-1"); !found || record.Machine != "ws-1" || record.Unverified {
 		t.Errorf("the rejected resume changed the retained record: %+v, %v", record, found)
+	}
+}
+
+func TestALaunchReportsCheckoutHooksTheMachinesCaptainHookCannotLoadAndProceeds(t *testing.T) {
+	pinned := systemHead + "  - { name: uv, version: 0.1.0, url: https://example.com/uv, sha256: " + sha + ", format: binary }\n" + staticTailnet + configureEnv +
+		"captainHook: { version: 1.0.0, url: https://example.com/hook.tar.gz, sha256: " + sha + " }\n"
+	tests := []struct {
+		name  string
+		drift providers.Result
+		want  []images.HookDrift
+	}{
+		{name: "every hook loads"},
+		{
+			name:  "a hook does not load",
+			drift: providers.Result{Stdout: []byte(`{"hook":"hooks.merge_guard","error":"ImportError: cannot import name 'project_request_body'"}` + "\n")},
+			want:  []images.HookDrift{{Hook: "hooks.merge_guard", Error: "ImportError: cannot import name 'project_request_body'"}},
+		},
+		{
+			name:  "the check cannot run",
+			drift: providers.Result{Stderr: []byte("python: not found"), ExitCode: 127},
+			want:  []images.HookDrift{{Hook: "/home/fake/app/.claude/hooks", Error: "load /home/fake/app's Captain Hook hooks: bash on ws-1 exited 127: python: not found"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := build(t, false, pinned, "{}", providers.Traits{})
+			h.machine.drift = tt.drift
+			created, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.ordered(0, checkout, "captain-hook-drift /home/fake/app")
+			resumed, err := h.session.Resume(context.Background(), "ws-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for flow, result := range map[string]*Result{"create": created, "resume": resumed} {
+				if !slices.Equal(result.HookDrift, tt.want) {
+					t.Errorf("%s reported drift %q, want %q", flow, result.HookDrift, tt.want)
+				}
+			}
+		})
 	}
 }

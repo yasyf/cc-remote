@@ -65,6 +65,7 @@ type Session struct {
 	home             string
 	payload          *config.Payload
 	closure          bool
+	captainHook      bool
 	privatePlugins   bool
 	tailnetFromTools bool
 	stderr           sync.Mutex
@@ -119,6 +120,7 @@ func Open(cfg *config.Config, provider providers.Provider, kind, profile string,
 		home:             rendered.home,
 		payload:          machine.Payload,
 		closure:          rendered.closure,
+		captainHook:      rendered.captainHook,
 		privatePlugins:   rendered.private,
 		tailnetFromTools: rendered.tailnetFromTools,
 	}
@@ -146,6 +148,7 @@ type rendered struct {
 	private          bool
 	tailnetFromTools bool
 	closure          bool
+	captainHook      bool
 }
 
 func render(cfg *config.Config, profile string, machine config.Machine, payload bool, platform string) (rendered, error) {
@@ -165,6 +168,7 @@ func render(cfg *config.Config, profile string, machine config.Machine, payload 
 		private:          slices.ContainsFunc(inventory.Claude.Marketplaces, func(m images.Marketplace) bool { return m.Private }),
 		tailnetFromTools: inventory.TailnetFromTools(),
 		closure:          inventory.Apt.Payload != nil,
+		captainHook:      inventory.CaptainHook != nil,
 	}
 	if machine.Image == "" {
 		var payload, packages string
@@ -300,6 +304,12 @@ func (s *Session) exec(machine string) images.Exec {
 	return func(ctx context.Context, argv []string, stdin io.Reader) error {
 		_, err := s.execute(ctx, machine, argv, stdin)
 		return err
+	}
+}
+
+func (s *Session) output(machine string) images.Capture {
+	return func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
+		return s.execute(ctx, machine, argv, stdin)
 	}
 }
 
@@ -554,16 +564,21 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	}
 	tail := newLanes(ctx)
 	var access providers.Access
+	var drift []images.HookDrift
 	tail.Go(func(ctx context.Context) error { return s.publish(ctx, machine) })
 	tail.Go(func(ctx context.Context) (err error) {
 		access, err = s.access(ctx, machine)
 		return err
 	})
+	tail.Go(func(ctx context.Context) error {
+		drift = s.hookDrift(ctx, machine)
+		return nil
+	})
 	if err := tail.Wait(); err != nil {
 		return nil, err
 	}
 	step.wait()
-	return s.deliverAccess(record, access)
+	return s.deliverAccess(record, access, drift)
 }
 
 type sideStep struct {
@@ -1026,11 +1041,35 @@ func (s *Session) enroll(ctx context.Context, held *state.Held, record *Record) 
 }
 
 func (s *Session) connect(ctx context.Context, record *Record) (*Result, error) {
-	access, err := s.access(ctx, record.Machine)
-	if err != nil {
+	lanes := newLanes(ctx)
+	var access providers.Access
+	var drift []images.HookDrift
+	lanes.Go(func(ctx context.Context) (err error) {
+		access, err = s.access(ctx, record.Machine)
+		return err
+	})
+	lanes.Go(func(ctx context.Context) error {
+		drift = s.hookDrift(ctx, record.Machine)
+		return nil
+	})
+	if err := lanes.Wait(); err != nil {
 		return nil, err
 	}
-	return s.deliverAccess(record, access)
+	return s.deliverAccess(record, access, drift)
+}
+
+func (s *Session) hookDrift(ctx context.Context, machine string) []images.HookDrift {
+	if !s.captainHook {
+		return nil
+	}
+	drift, err := s.Scripts.CaptainHookDrift(ctx, s.output(machine), s.ProjectRoot())
+	if err != nil {
+		drift = []images.HookDrift{{Hook: s.ProjectRoot() + "/.claude/hooks", Error: err.Error()}}
+	}
+	for _, d := range drift {
+		s.Log.Warn("a checkout hook does not load under the machine's Captain Hook, so its guard is not running", "machine", machine, "hook", d.Hook, "error", d.Error)
+	}
+	return drift
 }
 
 func (s *Session) access(ctx context.Context, machine string) (providers.Access, error) {
@@ -1043,7 +1082,7 @@ func (s *Session) access(ctx context.Context, machine string) (providers.Access,
 	return access, err
 }
 
-func (s *Session) deliverAccess(record *Record, access providers.Access) (*Result, error) {
+func (s *Session) deliverAccess(record *Record, access providers.Access, drift []images.HookDrift) (*Result, error) {
 	result := &Result{
 		SchemaVersion: SchemaVersion,
 		Name:          record.Name,
@@ -1054,6 +1093,7 @@ func (s *Session) deliverAccess(record *Record, access providers.Access) (*Resul
 		ProjectRoot:   s.ProjectRoot(),
 		Forwards:      record.Forwards,
 		Tailnet:       record.Tailnet,
+		HookDrift:     drift,
 	}
 	switch access.Kind {
 	case providers.AccessCompute:

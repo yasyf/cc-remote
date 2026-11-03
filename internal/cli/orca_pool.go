@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/sprites"
 	"github.com/yasyf/cc-remote/internal/state"
@@ -96,14 +97,15 @@ type orcaPool struct {
 }
 
 type orcaAllocation struct {
-	SchemaVersion int            `json:"schemaVersion"`
-	Lane          string         `json:"lane"`
-	Workspace     string         `json:"workspace"`
-	Allocation    string         `json:"allocation"`
-	Ref           string         `json:"ref"`
-	Head          string         `json:"head,omitempty"`
-	Replenish     *orcaReplenish `json:"replenish"`
-	Task          *orcaTask      `json:"task"`
+	SchemaVersion int                `json:"schemaVersion"`
+	Lane          string             `json:"lane"`
+	Workspace     string             `json:"workspace"`
+	Allocation    string             `json:"allocation"`
+	Ref           string             `json:"ref"`
+	Head          string             `json:"head,omitempty"`
+	Replenish     *orcaReplenish     `json:"replenish"`
+	Task          *orcaTask          `json:"task"`
+	HookDrift     []images.HookDrift `json:"captainHookDrift,omitempty"`
 }
 
 type orcaReplenish struct {
@@ -190,7 +192,7 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 	if allocation.Task == nil {
 		return err
 	}
-	allocation.Head = allocation.Task.BaseCommit
+	allocation.Head, allocation.HookDrift = allocation.Task.BaseCommit, allocation.Task.drift
 	return errors.Join(err, emit(out, allocation))
 }
 

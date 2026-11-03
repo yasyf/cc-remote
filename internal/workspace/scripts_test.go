@@ -192,3 +192,35 @@ func TestSourceValidationKeepsOptionsOutOfGit(t *testing.T) {
 		}
 	}
 }
+
+func TestHooksScriptChecksOutOnlyTheRefsHooksWithoutKeepingTheToken(t *testing.T) {
+	repository := workspacetest.GitRepository(t)
+	origin := strings.TrimPrefix(repository, "file://")
+	for path, text := range map[string]string{".claude/hooks/guard.py": "main\n", "app/main.go": "package main\n"} {
+		if err := os.MkdirAll(filepath.Join(origin, filepath.Dir(path)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(origin, path), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, origin, "add", ".")
+	git(t, origin, "commit", "-q", "-m", "hooks")
+	git(t, origin, "checkout", "-q", "feature")
+	home := t.TempDir()
+	root := filepath.Join(home, "hooks")
+	for range 2 {
+		if out, err := runScript(t, home, workspace.HooksScript(root, repository, "main"), workspacetest.Token+"\n"); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(root, ".claude", "hooks", "guard.py")); err != nil || string(got) != "main\n" {
+		t.Errorf("guard.py = %q, %v; want main's copy", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "app")); !os.IsNotExist(err) {
+		t.Errorf("the checkout holds app/ beside the hooks: %v", err)
+	}
+	if out, err := exec.Command("grep", "-rl", workspacetest.Token, home).Output(); err == nil {
+		t.Errorf("the token is on disk in %s", out)
+	}
+}

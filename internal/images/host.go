@@ -208,6 +208,21 @@ mv "$edited" "$settings"`
 
 const stagePluginsEnabling = stagePlugins + "\n" + enablePayloadPlugins
 
+const captainHookDrift = `set -euo pipefail
+build="$(jq -er .build "$HOME/.local/share/captain-hook/host/version.json")"
+python="$(dirname "$(readlink -f "$HOME/.daemonkit/tools/capt-hook/$build/bin/hook")")/python"
+exec "$python" -P -c '
+import json, sys
+from pathlib import Path
+from loguru import logger
+from captain_hook.app import _state
+from captain_hook.cli import CliState
+logger.remove()
+CliState(root=Path(sys.argv[1])).discover(scope="hooks")
+for error in _state.load_errors:
+    print(json.dumps({"hook": error.source, "error": f"{type(error.exc).__name__}: {error.exc}"}))
+' "$1"`
+
 const diagnoseMemory = `set -euo pipefail
 root="${1:-}"
 home="${2:-$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
@@ -406,6 +421,31 @@ func (s Scripts) Configure(ctx context.Context, exec Exec, env map[string]string
 
 func (s Scripts) Verify(ctx context.Context, exec Exec) error {
 	return runPlugins(ctx, exec, []string{"verify"}, nil, nil)
+}
+
+type HookDrift struct {
+	Hook  string `json:"hook"`
+	Error string `json:"error"`
+}
+
+func (d HookDrift) String() string {
+	return d.Hook + ": " + d.Error
+}
+
+func (s Scripts) CaptainHookDrift(ctx context.Context, capture Capture, root string) ([]HookDrift, error) {
+	out, err := capture(ctx, []string{"bash", "-c", captainHookDrift, "captain-hook-drift", root}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("load %s's Captain Hook hooks: %w", root, err)
+	}
+	var drift []HookDrift
+	for line := range bytes.Lines(out) {
+		var d HookDrift
+		if err := json.Unmarshal(line, &d); err != nil {
+			return nil, fmt.Errorf("load %s's Captain Hook hooks: %q is not a drift record: %w", root, line, err)
+		}
+		drift = append(drift, d)
+	}
+	return drift, nil
 }
 
 func (s Scripts) DiagnoseMemory(ctx context.Context, capture Capture) (json.RawMessage, error) {

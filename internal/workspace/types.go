@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/tailnet"
 )
@@ -75,6 +76,7 @@ type Result struct {
 	Compute       *providers.ComputeInstance `json:"compute,omitempty"`
 	Forwards      []Forward                  `json:"forwards,omitempty"`
 	Tailnet       *tailnet.Node              `json:"tailnet,omitempty"`
+	HookDrift     []images.HookDrift         `json:"captainHookDrift,omitempty"`
 }
 
 func sshFromTarget(target providers.Target) SSH {
