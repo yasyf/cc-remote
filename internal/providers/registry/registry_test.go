@@ -3,6 +3,7 @@ package registry_test
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestNewSprites(t *testing.T) {
 				StateDir: h.StateDir,
 				Helper:   h.Helper,
 			}
-			if got != want {
+			if !reflect.DeepEqual(got, want) {
 				t.Errorf("config = %+v, want %+v", got, want)
 			}
 			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv}
