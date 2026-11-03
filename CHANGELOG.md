@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A burst of warm claims refills the pool in one create's time.** Every
+  `prepare --warm` starts a fill, but fills used to coalesce into one that
+  created workspaces one after another, so a burst ran the pool dry for
+  minutes and later launches created their workspace cold. Fills now run side
+  by side: each counts the workspaces other fills are still creating, reserves
+  the shortfall, and creates it at once. A failed create no longer ends the
+  fill: it is tried once more under a new name, and the detached fill's output
+  goes to `pool/fill-<key>.log` instead of `/dev/null`.
+- **A warm claim that fails before its worker starts moves to the next
+  workspace.** A spare whose helper check, Orca pairing, or checkout refresh
+  failed stayed claimed as failed and ended the launch. The launch now leaves
+  it failed, claims the next unused spare, and creates the lane's own workspace
+  once none is left.
 - **`cc-remote suspend` passes over a Sprite service that already exited.** The
   Sprites API answers 409 to stopping a service that is not running, which
   ended the suspend and every `cc-remote orca stop` on such a Sprite.

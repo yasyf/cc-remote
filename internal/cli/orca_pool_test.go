@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,6 +93,16 @@ func nameSpares(t *testing.T, names ...string) {
 		return names[taken-1]
 	}
 	t.Cleanup(func() { spareName = original })
+}
+
+func (w *firstWorker) oneExecAtATime() {
+	var running sync.Mutex
+	handle := w.provider.Handle
+	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
+		running.Lock()
+		defer running.Unlock()
+		return handle(id, cmd, stdin)
+	}
 }
 
 func standInFill(t *testing.T) *atomic.Int32 {
@@ -409,60 +420,61 @@ func TestCompetingRequestsAreRefusedBeforeTheClaimedSpareIsTouched(t *testing.T)
 	w.free("lane-a")
 }
 
-func TestAFailedClaimStaysClaimedAndNoOtherSpareIsTried(t *testing.T) {
-	w := newWarmPool(t, "pool-a")
+func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b")
+	w.oneExecAtATime()
+	*w.session.Config.Orca.Pool.Ready = 2
 	fills := standInFill(t)
 	pool := openPool(w.session)
-	if _, err := pool.fill(t.Context()); err != nil {
-		t.Fatal(err)
+	if fill, err := pool.fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-b"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
 	}
-	w.spare(pool, "pool-b")
-	if err := os.WriteFile(filepath.Join(w.root, "notes.txt"), []byte("left behind\n"), 0o600); err != nil {
-		t.Fatal(err)
+	handle := w.provider.Handle
+	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
+		if id == "pool-a" && strings.Contains(cmd[len(cmd)-1], "fetch --quiet --prune --depth 1 origin") {
+			return providers.Result{ExitCode: 1, Stderr: []byte("fatal: sk-leakedsecret failed to connect\n")}
+		}
+		return handle(id, cmd, stdin)
 	}
-	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-b"))
 	calls := len(w.provider.Calls())
-	native := 0
-	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
-		native++
-		return nil, errors.New("a failed claim reached the Orca CLI")
-	})
+	native, commands := w.nativeAs("pool-b")
 	var out bytes.Buffer
-	err := w.warm(t.Context(), w.session, runner, &out, "lane-a", "")
-	if err == nil || !strings.Contains(err.Error(), "lane lane-a claimed warm workspace pool-a") || !strings.Contains(err.Error(), "check the unused checkout on pool-a exited 8: the checkout has uncommitted or untracked changes") {
-		t.Fatalf("warm = %v", err)
+	if err := w.warm(t.Context(), w.session, native, &out, "lane-a", ""); err != nil {
+		t.Fatal(err)
 	}
-	if out.Len() != 0 || native != 0 {
-		t.Errorf("a failed claim printed %q after %d Orca calls", out.String(), native)
+	if allocation := w.allocation(out.Bytes()); allocation.Lane != "lane-a" || allocation.Workspace != "pool-b" || allocation.Allocation != allocationWarm || allocation.Task == nil || allocation.Task.Terminal != "term-1" {
+		t.Errorf("allocation = %+v, want lane-a started on pool-b", allocation)
 	}
-	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 || member.Failure.HTTPStatus != nil {
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant\n%q", native.calls, commands)
+	}
+	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
 		t.Errorf("pool-a = %+v, want it failed for lane-a with error metadata", member)
 	}
-	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("uncommitted")) || bytes.Contains(stored, []byte("exited")) {
+	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("failed to connect")) {
 		t.Errorf("the pool record kept error text: %s, %v", stored, err)
 	}
-	if member := w.member("pool-b"); member.State != memberReady || member.Lane != "" {
-		t.Errorf("pool-b = %+v, want it untouched", member)
+	if member := w.member("pool-b"); member.State != memberPrepared || member.Lane != "lane-a" {
+		t.Errorf("pool-b = %+v, want it prepared for lane-a", member)
 	}
 	for _, call := range w.provider.Calls()[calls:] {
-		if strings.Contains(call, "pool-b") || strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "wake ") {
-			t.Errorf("the failed claim went on to %q", call)
+		if strings.HasPrefix(call, "create ") {
+			t.Errorf("the lane created a workspace while a spare was ready: %q", call)
 		}
 	}
-	if _, err := os.Stat(w.keys); !os.IsNotExist(err) {
-		t.Errorf("a failed claim read the key: %v", err)
-	}
-	if fills.Load() != 1 {
-		t.Errorf("fills = %d, want the one started after the claim", fills.Load())
+	if fills.Load() != 2 {
+		t.Errorf("fills = %d, want one started after each claim", fills.Load())
 	}
 	w.free("pool-a")
+	w.free("pool-b")
 	w.free("lane-a")
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
 	}, "lane lane-a already claimed warm workspace pool-a, now failed")
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "pool-b", "")
-	}, "pool-b names a warm pool workspace")
+	}, "pool-b already has an Orca task")
 }
 
 func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T) {
@@ -476,35 +488,24 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 	}
 	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
 	calls, scripts := len(w.provider.Calls()), len(w.local.Scripts("pool-a"))
-	native := 0
 	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
-		native++
-		return nil, errors.New("an unread checkout reached the Orca CLI")
+		return nil, errors.New("the lane's own workspace reached the Orca CLI")
 	})
 	err := w.warm(t.Context(), w.session, runner, io.Discard, "lane-a", "")
 	if err == nil || !strings.Contains(err.Error(), "check the unused checkout on pool-a exited 128: its remote output is withheld") {
 		t.Fatalf("warm = %v, want the failed git status reported without its output", err)
 	}
-	if native != 0 {
-		t.Errorf("%d Orca calls after the failed check", native)
-	}
-	for _, call := range w.provider.Calls()[calls:] {
-		if strings.HasPrefix(call, "wake ") || strings.HasPrefix(call, "create ") {
-			t.Errorf("the failed check went on to %q", call)
-		}
+	lifecycle := w.provider.Calls()[calls:]
+	if slices.Contains(lifecycle, "wake pool-a") || !slices.Contains(lifecycle, "create lane-a") {
+		t.Errorf("provider calls = %q, want pool-a left asleep and the lane's own workspace created", lifecycle)
 	}
 	for _, script := range w.local.Scripts("pool-a")[scripts:] {
 		if strings.Contains(script, "fetch --quiet") || strings.Contains(script, "checkout --quiet --force") {
 			t.Errorf("the failed check went on to refresh the checkout: %q", script)
 		}
 	}
-	if _, err := os.Stat(w.keys); !os.IsNotExist(err) {
-		t.Errorf("the failed check read the key: %v", err)
-	}
-	for _, name := range []string{"pool-a", "lane-a"} {
-		if _, err := os.Lstat(w.session.Config.State().Orca(name)); !os.IsNotExist(err) {
-			t.Errorf("the failed check left Orca task state for %s: %v", name, err)
-		}
+	if _, err := os.Lstat(w.session.Config.State().Orca("pool-a")); !os.IsNotExist(err) {
+		t.Errorf("the failed check left Orca task state for pool-a: %v", err)
 	}
 	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil {
 		t.Errorf("pool-a = %+v, want it failed for lane-a", member)
@@ -765,31 +766,27 @@ func TestWarmFillCreatesAgentFreeSparesWithoutAModelRuntimeOrKey(t *testing.T) {
 }
 
 func TestConcurrentWarmFillsStopAtTheReadyTarget(t *testing.T) {
-	w := newWarmPool(t, "pool-a", "pool-b")
+	w := newWarmPool(t, "pool-a")
 	creating := newGate()
 	w.paused = creating
-	first, second := make(chan error, 1), make(chan error, 1)
-	var filled, refilled *orcaFill
+	first := make(chan error, 1)
+	var filled *orcaFill
 	go func() {
 		var err error
 		filled, err = openPool(w.session).fill(t.Context())
 		first <- err
 	}()
 	w.reach(creating, first)
-	go func() {
-		var err error
-		refilled, err = openPool(w.contender()).fill(t.Context())
-		second <- err
-	}()
+	refilled, err := openPool(w.contender()).fill(t.Context())
+	if err != nil || len(refilled.Created) != 0 || len(refilled.Ready) != 0 || len(refilled.Abandoned) != 0 {
+		t.Errorf("fill during a create = %+v, %v; want it to count pool-a's create and return at once", refilled, err)
+	}
 	close(creating.release)
 	if err := <-first; err != nil {
 		t.Fatal(err)
 	}
-	if err := <-second; err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(filled.Created, []string{"pool-a"}) || !slices.Equal(filled.Ready, []string{"pool-a"}) || filled.Coalesced || len(refilled.Created) != 0 || !refilled.Coalesced {
-		t.Errorf("fills = %+v and %+v, want one spare made and the later fill coalesced into the running one", filled, refilled)
+	if !slices.Equal(filled.Created, []string{"pool-a"}) {
+		t.Errorf("fill = %+v, want pool-a made", filled)
 	}
 	creates := 0
 	for _, call := range w.provider.Calls() {
@@ -802,32 +799,54 @@ func TestConcurrentWarmFillsStopAtTheReadyTarget(t *testing.T) {
 	}
 }
 
-func TestAFillRecountsSparesClaimedWhileItCreates(t *testing.T) {
+func TestAClaimDuringAFillGetsItsOwnCreateWithoutWaiting(t *testing.T) {
 	w := newWarmPool(t, "pool-b", "pool-c")
+	w.oneExecAtATime()
 	*w.session.Config.Orca.Pool.Ready = 2
 	pool := openPool(w.session)
 	w.spare(pool, "pool-a")
 	creating := newGate()
 	w.paused = creating
-	done := make(chan error, 1)
-	var fill *orcaFill
+	first, second := make(chan error, 1), make(chan error, 1)
+	var filled, refilled *orcaFill
 	go func() {
 		var err error
-		fill, err = pool.fill(t.Context())
-		done <- err
+		filled, err = pool.fill(t.Context())
+		first <- err
 	}()
-	w.reach(creating, done)
+	w.reach(creating, first)
 	claimed, release, err := openPool(w.contender()).claim(t.Context(), "lane-a", "main")
 	if err != nil || claimed == nil || claimed.Name != "pool-a" {
 		t.Fatalf("claim during the fill = %+v, %v; want pool-a without waiting for the create", claimed, err)
 	}
 	release()
-	close(creating.release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	go func() {
+		var err error
+		refilled, err = openPool(w.contender()).fill(t.Context())
+		second <- err
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		member, err := pool.load("pool-c")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if member != nil && member.State == memberProvisioning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pool-c = %+v; want the second fill to start its create while pool-b's is still running", member)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if !slices.Equal(fill.Created, []string{"pool-b", "pool-c"}) || !slices.Equal(fill.Ready, []string{"pool-b", "pool-c"}) {
-		t.Errorf("fill = %+v, want pool-a's claim counted and the target refilled with pool-b and pool-c", fill)
+	close(creating.release)
+	for _, done := range []chan error{first, second} {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !slices.Equal(filled.Created, []string{"pool-b"}) || !slices.Equal(refilled.Created, []string{"pool-c"}) {
+		t.Errorf("fills = %+v and %+v, want pool-b from the first and pool-c from the fill the claim started", filled, refilled)
 	}
 	for name, want := range map[string]memberState{"pool-a": memberClaimed, "pool-b": memberReady, "pool-c": memberReady} {
 		if got := w.member(name); got.State != want {
@@ -1004,7 +1023,7 @@ func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
 			"exit 1 and HTTP status unknown at create.command", `{"step":"create.command","class":"exit","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 		{
-			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
+			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then rm "$SPRITE_CALLS.created"; printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
 			"exit unknown and HTTP status 500 at create.readback", `{"step":"create.readback","class":"http","exit":null,"httpStatus":500,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 	}
@@ -1012,44 +1031,47 @@ func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path, calls := spritesConfig(t, dir, tt.script)
-			nameSpares(t, "pool-a")
+			nameSpares(t, "pool-a", "pool-b")
 			_, err := runPublicFill(t, path)
-			if !strings.Contains(err.Error(), "create warm workspace pool-a failed with "+tt.want+";") {
-				t.Fatalf("fill = %v, want the failed create reported as %q", err, tt.want)
-			}
 			states := state.Dir(filepath.Join(dir, "state"))
-			member := &orcaMember{}
-			if _, err := state.Load(states.Pool("pool-a"), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-				t.Fatalf("pool-a = %+v, %v; want it failed with error metadata", member, err)
-			}
-			member.Failure.Bytes, member.Failure.SHA256 = 0, ""
-			if failure, err := json.Marshal(member.Failure); err != nil || string(failure) != tt.failure {
-				t.Errorf("failure = %s, %v; want %s", failure, err, tt.failure)
-			}
-			record := &workspace.Record{}
-			if _, err := state.Load(states.Workspace("pool-a"), record); err != nil || !record.Unverified || record.Machine != "pool-a" {
-				t.Errorf("workspace pool-a = %+v, %v; want its record kept unverified", record, err)
-			}
-			for _, stored := range []string{states.Pool("pool-a"), states.Workspace("pool-a")} {
-				raw, err := os.ReadFile(stored)
-				if err != nil {
-					t.Fatal(err)
+			for _, name := range []string{"pool-a", "pool-b"} {
+				if !strings.Contains(err.Error(), "create warm workspace "+name+" failed with "+tt.want+";") {
+					t.Fatalf("fill = %v, want %s's failed create reported as %q", err, name, tt.want)
 				}
-				for _, leaked := range []string{"sk-leakedsecret", "fatal", "synthetic provider", "sprite create"} {
-					if bytes.Contains(raw, []byte(leaked)) {
-						t.Errorf("%s kept %q: %s", stored, leaked, raw)
+				member := &orcaMember{}
+				if _, err := state.Load(states.Pool(name), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+					t.Fatalf("%s = %+v, %v; want it failed with error metadata", name, member, err)
+				}
+				member.Failure.Bytes, member.Failure.SHA256 = 0, ""
+				if failure, err := json.Marshal(member.Failure); err != nil || string(failure) != tt.failure {
+					t.Errorf("%s failure = %s, %v; want %s", name, failure, err, tt.failure)
+				}
+				record := &workspace.Record{}
+				if _, err := state.Load(states.Workspace(name), record); err != nil || !record.Unverified || record.Machine != name {
+					t.Errorf("workspace %s = %+v, %v; want its record kept unverified", name, record, err)
+				}
+				for _, stored := range []string{states.Pool(name), states.Workspace(name)} {
+					raw, err := os.ReadFile(stored)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, leaked := range []string{"sk-leakedsecret", "fatal", "synthetic provider", "sprite create"} {
+						if bytes.Contains(raw, []byte(leaked)) {
+							t.Errorf("%s kept %q: %s", stored, leaked, raw)
+						}
 					}
 				}
 			}
-			if invoked, err := os.ReadFile(calls); err != nil || string(invoked) != tt.calls {
-				t.Errorf("provider CLI calls = %q, %v; want %q with no retry or destroy", invoked, err, tt.calls)
+			if invoked, err := os.ReadFile(calls); err != nil || string(invoked) != tt.calls+tt.calls {
+				t.Errorf("provider CLI calls = %q, %v; want %q twice, one retry and no destroy", invoked, err, tt.calls)
 			}
 		})
 	}
 }
 
-func TestAFillKeepsItsReadySpareWhenTheNextCreateIsRejected(t *testing.T) {
-	w := newWarmPool(t, "pool-a", "pool-b")
+func TestAFillTriesARejectedCreateOnceMoreUnderANewName(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b", "pool-c")
+	w.oneExecAtATime()
 	*w.session.Config.Orca.Pool.Ready = 2
 	provider := &rejecting{Fake: w.provider, name: "pool-b"}
 	session := w.over(provider)
@@ -1057,11 +1079,13 @@ func TestAFillKeepsItsReadySpareWhenTheNextCreateIsRejected(t *testing.T) {
 	session.Stderr = io.Discard
 	pool := openPool(session)
 	fill, err := pool.fill(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-b failed with exit 1 and HTTP status unknown at create.command;") || strings.Contains(err.Error(), "sk-leakedsecret") || !slices.Equal(fill.Created, []string{"pool-a"}) {
-		t.Fatalf("fill = %+v, %v; want pool-a made and pool-b's rejected create reported as metadata", fill, err)
+	if err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-c"}) {
+		t.Fatalf("fill = %+v, %v; want pool-a made and pool-b's rejected create replaced by pool-c", fill, err)
 	}
-	if got := w.member("pool-a"); got.State != memberReady {
-		t.Errorf("pool-a = %+v, want it kept ready", got)
+	for _, name := range []string{"pool-a", "pool-c"} {
+		if got := w.member(name); got.State != memberReady {
+			t.Errorf("%s = %+v, want it ready", name, got)
+		}
 	}
 	failed := w.member("pool-b")
 	if failed.State != memberFailed || failed.Failure == nil || failed.Failure.Step != string(sprites.StepCommand) || failed.Failure.Exit == nil || *failed.Failure.Exit != 1 || failed.Failure.HTTPStatus != nil {
@@ -1074,9 +1098,6 @@ func TestAFillKeepsItsReadySpareWhenTheNextCreateIsRejected(t *testing.T) {
 	if _, err := state.Load(w.session.Config.State().Workspace("pool-b"), record); err != nil || !record.Unverified || record.Machine != "pool-b" {
 		t.Errorf("workspace pool-b = %+v, %v; want its record kept unverified", record, err)
 	}
-	if ready, err := pool.ready(); err != nil || ready != 1 {
-		t.Errorf("ready = %d, %v; want pool-a alone", ready, err)
-	}
 	creates := 0
 	for _, call := range w.provider.Calls() {
 		if strings.HasPrefix(call, "create ") {
@@ -1086,14 +1107,13 @@ func TestAFillKeepsItsReadySpareWhenTheNextCreateIsRejected(t *testing.T) {
 			t.Errorf("the fill destroyed a machine after the rejected create: %q", call)
 		}
 	}
-	if creates != 1 || provider.creates.Load() != 1 {
-		t.Errorf("creates = %d made and %d rejected, want one of each and no retry", creates, provider.creates.Load())
+	if creates != 2 || provider.creates.Load() != 1 {
+		t.Errorf("creates = %d made and %d rejected, want two made and one rejected", creates, provider.creates.Load())
 	}
 }
 
-func TestWarmFillRecordsAFailedCreateAndStops(t *testing.T) {
+func TestWarmFillTriesAFailedCreateOnceMoreAndReportsBoth(t *testing.T) {
 	w := newWarmPool(t, "pool-a", "pool-b")
-	*w.session.Config.Orca.Pool.Ready = 2
 	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
 		if strings.Contains(cmd[len(cmd)-1], "clone --quiet") {
 			return providers.Result{ExitCode: 1, Stderr: []byte("fatal: sk-leakedsecret could not read the origin\n")}
@@ -1102,29 +1122,26 @@ func TestWarmFillRecordsAFailedCreateAndStops(t *testing.T) {
 	}
 	pool := openPool(w.session)
 	fill, err := pool.fill(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit 1 and HTTP status unknown at checkout;") || strings.Contains(err.Error(), "sk-leakedsecret") || strings.Contains(err.Error(), "fatal") || len(fill.Created) != 0 || len(fill.Ready) != 0 {
-		t.Fatalf("fill = %+v, %v; want the failed create reported as metadata", fill, err)
+	if err == nil || strings.Contains(err.Error(), "sk-leakedsecret") || strings.Contains(err.Error(), "fatal") || len(fill.Created) != 0 || len(fill.Ready) != 0 {
+		t.Fatalf("fill = %+v, %v; want both failed creates reported as metadata", fill, err)
 	}
-	member := w.member("pool-a")
-	if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "checkout" || member.Failure.Class != classExit || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-		t.Errorf("pool-a = %+v with failure %+v, want it failed at the checkout with exit 1 and error metadata", member, member.Failure)
-	}
-	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) {
-		t.Errorf("the pool record kept remote output: %s, %v", stored, err)
-	}
-	for _, call := range w.provider.Calls() {
-		if strings.Contains(call, "pool-b") {
-			t.Errorf("the fill tried another spare after a failure: %q", call)
+	for _, name := range []string{"pool-a", "pool-b"} {
+		if !strings.Contains(err.Error(), "create warm workspace "+name+" failed with exit 1 and HTTP status unknown at checkout;") {
+			t.Errorf("fill = %v, want %s's failed checkout reported", err, name)
+		}
+		member := w.member(name)
+		if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "checkout" || member.Failure.Class != classExit || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+			t.Errorf("%s = %+v with failure %+v, want it failed at the checkout with exit 1 and error metadata", name, member, member.Failure)
+		}
+		if stored, err := os.ReadFile(w.session.Config.State().Pool(name)); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) {
+			t.Errorf("the pool record kept remote output: %s, %v", stored, err)
+		}
+		if !slices.Contains(w.provider.Calls(), "destroy "+name) {
+			t.Errorf("provider calls = %q, want the failed create of %s to remove its machine", w.provider.Calls(), name)
 		}
 	}
-	if !slices.Contains(w.provider.Calls(), "destroy pool-a") {
-		t.Errorf("provider calls = %q, want the failed create to remove its machine", w.provider.Calls())
-	}
-	if loaded, err := pool.load("pool-b"); err != nil || loaded != nil {
-		t.Errorf("pool-b = %+v, %v; want no record", loaded, err)
-	}
 	if claimed, _, err := pool.claim(t.Context(), "lane-a", "main"); err != nil || claimed != nil {
-		t.Errorf("claim = %+v, %v; want the failed spare kept out", claimed, err)
+		t.Errorf("claim = %+v, %v; want the failed spares kept out", claimed, err)
 	}
 }
 
@@ -1137,7 +1154,7 @@ func TestReplenishStartsOneDetachedFillAndReturnsAtOnce(t *testing.T) {
 	t.Cleanup(func() { fillCommand = original })
 	fillCommand = func(config, provider, profile string) (*exec.Cmd, error) {
 		argv = []string{config, provider, profile}
-		return exec.Command("sh", "-c", `printf '%s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" > "$0.tmp"; cat; echo "stdin closed" >> "$0.tmp"; mv "$0.tmp" "$0"; sleep 3`, marker), nil
+		return exec.Command("sh", "-c", `printf '%s %s\n' "$$" "$(ps -o pgid= -p $$ | tr -d ' ')" > "$0.tmp"; cat; echo "stdin closed" >> "$0.tmp"; echo "fill output"; echo "fill error" >&2; mv "$0.tmp" "$0"; sleep 3`, marker), nil
 	}
 	started := time.Now()
 	replenish := pool.replenish()
@@ -1158,6 +1175,9 @@ func TestReplenishStartsOneDetachedFillAndReturnsAtOnce(t *testing.T) {
 			t.Fatalf("fill marker = %q, %v; want %q from a session of its own reading the null device", marked, err, want)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if logged, err := os.ReadFile(pool.dir.PoolLog(pool.key)); err != nil || string(logged) != "fill output\nfill error\n" {
+		t.Errorf("fill log = %q, %v; want the fill's stdout and stderr appended", logged, err)
 	}
 	fillCommand = func(string, string, string) (*exec.Cmd, error) {
 		return nil, errors.New("no helper binary")

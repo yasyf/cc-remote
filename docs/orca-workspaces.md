@@ -334,8 +334,11 @@ untouched. A claimed workspace never returns to the pool. A failed preparation i
 recorded `failed` with its error's metadata only: the step that failed, the
 error's class, the exit code when one was observed, the HTTP status when a
 provider lookup answered one, and the message's byte length and SHA-256, never
-its text. The command neither tries another workspace nor
-creates one. A command that dies leaves its workspace `claimed`.
+its text. When that happens before the worker's terminal starts, the command
+logs a warning, claims the next unused workspace, and creates the lane's own
+workspace once none is left; a failed launch reports every workspace that
+failed. A failure after the terminal starts ends the command. A command that
+dies leaves its workspace `claimed`.
 A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
 first worker, so `--warm` refuses a lane that already has an Orca task, already
 claimed a workspace, or names a pool workspace.
@@ -347,9 +350,10 @@ a readiness setting, not a spending cap. Set it to `0` to stop the background
 fill; `--warm` then claims only workspaces that already exist.
 
 Once it has claimed, or found the pool empty, `prepare --warm` starts one
-`cc-remote orca pool fill` in a session of its own, with its standard streams
-on `/dev/null`. It doesn't wait for the fill, and the fill can't hold its
-stdout open. A fill that fails to start shows up as `replenish.failure`, and
+`cc-remote orca pool fill` in a session of its own, with stdin on `/dev/null`
+and stdout and stderr appended to `pool/fill-<key>.log` under the state
+directory. It doesn't wait for the fill, and the fill can't hold its stdout
+open. A fill that fails to start shows up as `replenish.failure`, and
 the worker is still prepared.
 
 Run the fill yourself to top up the pool, then list it:
@@ -359,15 +363,20 @@ cc-remote orca pool fill --config .cc-remote/config.yaml
 cc-remote orca pool status --config .cc-remote/config.yaml
 ```
 
-`fill` exits at once when another fill of the same key is running, since that
-fill counts again before it ends, and it stops at a 20-minute deadline. It
-marks a `provisioning` workspace left by a fill that died as `abandoned`,
-refuses a `ready` one that no longer passes the claim checks, and creates
-workspaces until `orca.pool.ready` eligible ones are `ready`. Each is a plain `create` with a `pool-`
-name and the pool label, so it holds tools, plugins, and a shallow checkout of
-`config.ref`. A fill starts no Orca runtime, records no task, starts no worker,
-and reads no API key. A failed create is recorded `failed` with the same error metadata and ends the
-fill.
+Fills of the same key run side by side, and each stops at a 20-minute
+deadline. Under the pool's state lock a fill marks a `provisioning` workspace
+whose fill died as `abandoned`, counts one whose fill is still creating it,
+refuses a `ready` one that no longer passes the claim checks, and reserves
+enough new workspaces to bring the ready and in-flight count to
+`orca.pool.ready`. It then creates those workspaces at once, so a claim that
+leaves the pool one short makes exactly one create, and a burst of claims
+refills in about one create's time instead of one after another. Each is a
+plain `create` with a `pool-` name and the pool label, so it holds tools,
+plugins, and a shallow checkout of `config.ref`. A fill starts no Orca runtime,
+records no task, starts no worker, and reads no API key. A failed create is
+recorded `failed` with the same error metadata, logged as a warning, and tried
+once more under a new name; the fill reports every create that failed both
+times.
 
 The record's `step` names where the create failed. Once the Sprite exists it
 is the create phase, such as `payload.mount`, `tools.install`, or `checkout`,
