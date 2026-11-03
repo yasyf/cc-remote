@@ -1145,7 +1145,7 @@ func TestPrepareRunsTheBeforeWorkerScriptAheadOfTheWorkerAndRecordsItsOutput(t *
 	if !slices.Equal(native.calls, commands) {
 		t.Errorf("orca calls =\n%q\nwant\n%q", native.calls, commands)
 	}
-	if got := sshCalls(t); !slices.Equal(got, []string{"check", "other: " + script, "key-dir", "key-write", "head", "brief"}) {
+	if got := sshCalls(t); !slices.Equal(got, []string{"check", "other: " + remote.Quote(script), "key-dir", "key-write", "head", "brief"}) {
 		t.Errorf("ssh calls = %q, want the script ahead of the worker's key", got)
 	}
 	w.free("task-a")
