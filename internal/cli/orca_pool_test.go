@@ -1145,6 +1145,7 @@ func TestAFillCountsASpareThatAnotherFillReadiedAfterItsCensus(t *testing.T) {
 	if err := pool.save(readied); err != nil {
 		t.Fatal(err)
 	}
+	calls := len(w.provider.Calls())
 	observed := &observing{Fake: w.provider, paused: newGate(), on: "pool-a"}
 	done := make(chan error, 1)
 	var fill *orcaFill
@@ -1169,7 +1170,7 @@ func TestAFillCountsASpareThatAnotherFillReadiedAfterItsCensus(t *testing.T) {
 	if len(fill.Created) != 0 || !slices.Equal(fill.Ready, []string{"pool-a", "pool-b"}) {
 		t.Errorf("fill = %+v, want pool-b counted ready and nothing created past the target", fill)
 	}
-	for _, call := range w.provider.Calls() {
+	for _, call := range w.provider.Calls()[calls:] {
 		if strings.HasPrefix(call, "create ") {
 			t.Errorf("the fill overshot the target with %q", call)
 		}
