@@ -146,6 +146,32 @@ pull request. Codex keeps that token in its shell tools.
 
 An optional `orca.keys.trunk` command, which has no default, runs locally and adds a scoped Trunk key that every newly launched worker receives as `TRUNK_MERGE_API_KEY`. Like `GH_TOKEN`, it stays available to shell tools rather than being excluded with the model credentials.
 
+On Sprites, `orca.connectors` replaces a model key with a Fly Connector, so the
+real key never reaches the machine:
+
+```yaml
+providers:
+  sprites:
+    org: my-org
+    connector_labels: [gateway-models]
+orca:
+  connectors:
+    anthropic: {base_url_variable: ANTHROPIC_BASE_URL, placeholder: sprites}
+    openai: {base_url_variable: OPENAI_BASE_URL, placeholder: sprites}
+    typesafe: {base_url_variable: TYPESAFE_BASE_URL, placeholder: sprites}
+```
+
+A provider listed there runs no `orca.keys` command and may not have one. Its
+worker variable holds the placeholder. Before each worker starts, cc-remote reads
+`https://api.sprites.dev/v1/gateway/list` from the machine, finds that provider's
+`gateway_base_url`, and exports it as the named variable. Codex ignores
+`OPENAI_BASE_URL`, so a Codex worker uses the URL as its model provider's base URL,
+and cc-remote sets `openai_base_url` in the machine's `~/.codex/config.toml` for
+every other Codex run there. A machine that may not use the Connector
+fails the launch with a message naming the provider, rather than failing on its
+first model call. `connector_labels` sets those labels on each Sprite at create;
+an existing Sprite needs them set separately.
+
 Every key travels only over SSH stdin into a
 one-use pipe that the worker's terminal reads and removes.
 

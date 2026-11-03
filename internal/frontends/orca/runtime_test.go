@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 )
 
@@ -437,6 +438,119 @@ func TestParseKeyDir(t *testing.T) {
 	}
 	if got := orca.KeyWriteScript(dir); got != "exec cat > /home/agent/.cc-remote/orca/key.Ab12Cd34/key" {
 		t.Errorf("KeyWriteScript = %q", got)
+	}
+}
+
+func TestParseRoutesFindsEachConnectorsBaseURL(t *testing.T) {
+	connectors := map[string]config.Connector{
+		config.KeyOpenAI:    {BaseURLVariable: "OPENAI_BASE_URL", Placeholder: "p"},
+		config.KeyAnthropic: {BaseURLVariable: "ANTHROPIC_BASE_URL", Placeholder: "p"},
+	}
+	list := `{"available":[{"provider":"typesafe"}],"connections":[
+		{"provider":"github","gateway_base_url":"https://gw.test/github/g"},
+		{"provider":"openai","gateway_base_url":"https://gw.test/openai/o/"},
+		{"provider":"anthropic","gateway_base_url":"https://gw.test/anthropic/a"}]}`
+	got, err := orca.ParseRoutes([]byte(list), connectors)
+	want := []orca.Route{
+		{Provider: config.KeyAnthropic, Variable: "ANTHROPIC_BASE_URL", BaseURL: "https://gw.test/anthropic/a"},
+		{Provider: config.KeyOpenAI, Variable: "OPENAI_BASE_URL", BaseURL: "https://gw.test/openai/o"},
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("ParseRoutes = %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestParseRoutesRefusesAMachineWithoutTheConnector(t *testing.T) {
+	connectors := map[string]config.Connector{config.KeyTypeSafe: {BaseURLVariable: "TYPESAFE_BASE_URL", Placeholder: "p"}}
+	_, err := orca.ParseRoutes([]byte(`{"available":[{"provider":"typesafe"}],"connections":[]}`), connectors)
+	if err == nil || !strings.Contains(err.Error(), "no typesafe Connector") {
+		t.Errorf("ParseRoutes = %v, want a refusal naming typesafe", err)
+	}
+}
+
+func TestCodexTalksToTheOpenAIConnector(t *testing.T) {
+	agent := orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e"}
+	argv := strings.Join(agent.Argv(orca.ShellPolicy{Legacy: true}, orca.Route{Provider: config.KeyOpenAI, Variable: "OPENAI_BASE_URL", BaseURL: "https://gw.test/openai/o"}), "\n")
+	if !strings.Contains(argv, `base_url="https://gw.test/openai/o/v1"`) || strings.Contains(argv, "api.openai.com") {
+		t.Errorf("codex argv = %s, want the Connector as its model provider", argv)
+	}
+}
+
+func TestCodexBaseURLScriptSetsOneTopLevelSetting(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("openai_base_url = \"https://old.test/v1\"\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	routes := []orca.Route{{Provider: config.KeyOpenAI, Variable: "OPENAI_BASE_URL", BaseURL: "https://gw.test/openai/o"}}
+	for range 2 {
+		cmd := exec.Command("sh", "-c", orca.CodexBaseURLScript(routes))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "openai_base_url = \"https://gw.test/openai/o/v1\"\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n"
+	if string(got) != want {
+		t.Errorf("config.toml = %q, want %q", got, want)
+	}
+}
+
+func TestCodexBaseURLScriptCreatesAMissingConfig(t *testing.T) {
+	home := t.TempDir()
+	cmd := exec.Command("sh", "-c", orca.CodexBaseURLScript([]orca.Route{{Provider: config.KeyOpenAI, BaseURL: "https://gw.test/openai/o"}}))
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil || string(got) != "openai_base_url = \"https://gw.test/openai/o/v1\"\n" {
+		t.Errorf("config.toml = %q, %v", got, err)
+	}
+}
+
+func TestWorkerBehindConnectorsHoldsOnlyPlaceholders(t *testing.T) {
+	routes := []orca.Route{
+		{Provider: config.KeyAnthropic, Variable: "ANTHROPIC_BASE_URL", BaseURL: "https://gw.test/anthropic/a"},
+		{Provider: config.KeyOpenAI, Variable: "OPENAI_BASE_URL", BaseURL: "https://gw.test/openai/o"},
+		{Provider: config.KeyTypeSafe, Variable: "TYPESAFE_BASE_URL", BaseURL: "https://gw.test/typesafe/t"},
+	}
+	agent := orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}
+	bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	worker := "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$ANTHROPIC_API_KEY\" \"$OPENAI_API_KEY\" \"$TYPESAFE_API_KEY\" \"$ANTHROPIC_BASE_URL\" \"$OPENAI_BASE_URL\" \"$TYPESAFE_BASE_URL\"\n"
+	if err := os.WriteFile(filepath.Join(bin, orca.AgentClaude), []byte(worker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", agent.Command(dir, orca.ShellPolicy{}, routes...))
+	cmd.Env = append(append(withoutCredentials(), "ANTHROPIC_API_KEY=stale-real-key", "OPENAI_API_KEY=stale-real-key", "TYPESAFE_API_KEY=stale-real-key"), "PATH="+bin+":"+os.Getenv("PATH"))
+	go func() {
+		fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		_, _ = fifo.WriteString("sprites\nsprites\nsprites\n")
+		_ = fifo.Close()
+	}()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "sprites|sprites|sprites|https://gw.test/anthropic/a|https://gw.test/openai/o|https://gw.test/typesafe/t"
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("worker saw %q, want %q", got, want)
 	}
 }
 

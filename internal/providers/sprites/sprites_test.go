@@ -410,6 +410,38 @@ func TestSuspendOfASpriteSomethingStillHoldsFailsNamingTheHold(t *testing.T) {
 	}
 }
 
+func TestCreateSetsTheConnectorLabels(t *testing.T) {
+	p, fake := newProvider(t)
+	p.ConnectorLabels = []string{"gateway-models"}
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.sprites["alpha"].labels; !slices.Equal(got, []string{"gateway-models"}) {
+		t.Errorf("labels = %q, want the configured Connector label", got)
+	}
+}
+
+func TestCreateWithoutConnectorLabelsSetsNone(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.sprites["alpha"].labels; got != nil {
+		t.Errorf("labels = %q, want none", got)
+	}
+}
+
+func TestCreateThatCannotSetConnectorLabelsIsAmbiguous(t *testing.T) {
+	p, fake := newProvider(t)
+	p.ConnectorLabels = []string{"gateway-models"}
+	fake.labelStatus = 403
+	_, err := p.Create(t.Context(), spec("alpha", nil))
+	var created *CreateError
+	if !errors.Is(err, providers.ErrAmbiguous) || !errors.As(err, &created) || created.Step != StepLabel {
+		t.Errorf("Create = %v, want an ambiguous failure at the label step", err)
+	}
+}
+
 func TestCreateLosingARaceIsAmbiguous(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true

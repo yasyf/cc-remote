@@ -108,7 +108,14 @@ type Orca struct {
 	Trust   []string            `yaml:"trust"`
 	Pool    Pool                `yaml:"pool"`
 
+	Connectors map[string]Connector `yaml:"connectors"`
+
 	BootstrapHelper *BootstrapHelper `yaml:"bootstrap_helper"`
+}
+
+type Connector struct {
+	BaseURLVariable string `yaml:"base_url_variable"`
+	Placeholder     string `yaml:"placeholder"`
 }
 
 type Jobs struct {
@@ -216,7 +223,9 @@ func (o *Orca) applyDefaults() {
 		o.Keys = map[string][]string{}
 	}
 	for _, provider := range []string{KeyAnthropic, KeyOpenAI} {
-		if _, ok := o.Keys[provider]; !ok {
+		_, keyed := o.Keys[provider]
+		_, connected := o.Connectors[provider]
+		if !keyed && !connected {
 			o.Keys[provider] = []string{"/usr/bin/security", "find-generic-password", "-s", "cc-remote-" + provider + "-api-key", "-a", provider, "-w"}
 		}
 	}
@@ -236,6 +245,20 @@ func (o Orca) validate() error {
 		}
 		if len(command) == 0 || command[0] == "" {
 			return fmt.Errorf("orca.keys.%s needs the command that prints the key as its first element", provider)
+		}
+	}
+	for provider, connector := range o.Connectors {
+		if provider != KeyAnthropic && provider != KeyOpenAI && provider != KeyTypeSafe {
+			return fmt.Errorf("orca.connectors.%s: name %s, %s, or %s", provider, KeyAnthropic, KeyOpenAI, KeyTypeSafe)
+		}
+		if _, ok := o.Keys[provider]; ok {
+			return fmt.Errorf("orca.connectors.%s is also under orca.keys; a worker's key comes from one or the other", provider)
+		}
+		if !envName.MatchString(connector.BaseURLVariable) {
+			return fmt.Errorf("orca.connectors.%s.base_url_variable %q must be an environment variable name", provider, connector.BaseURLVariable)
+		}
+		if connector.Placeholder == "" || strings.ContainsAny(connector.Placeholder, "\r\n") {
+			return fmt.Errorf("orca.connectors.%s.placeholder must be one non-empty line", provider)
 		}
 	}
 	for _, owner := range o.Trust {

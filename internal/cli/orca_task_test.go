@@ -141,9 +141,23 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 		{"claude with every key", orca.AgentClaude, map[string][]string{config.KeyAnthropic: anthropic, config.KeyOpenAI: openai, config.KeyTypeSafe: typesafe, config.KeyGitHub: github}, "sk-anthropic-sentinel", "sk-openai-sentinel", "ts-typesafe-sentinel", "gho-github-sentinel"},
 		{"codex with only a GitHub token", orca.AgentCodex, map[string][]string{config.KeyOpenAI: openai, config.KeyGitHub: github}, "sk-openai-sentinel", "", "", "gho-github-sentinel"},
 	}
+	t.Run("a Connector provider sends its placeholder and runs no command", func(t *testing.T) {
+		cfg := config.Orca{
+			Keys: map[string][]string{config.KeyGitHub: github},
+			Connectors: map[string]config.Connector{
+				config.KeyAnthropic: {BaseURLVariable: "ANTHROPIC_BASE_URL", Placeholder: "anthropic-placeholder"},
+				config.KeyOpenAI:    {BaseURLVariable: "OPENAI_BASE_URL", Placeholder: "openai-placeholder"},
+				config.KeyTypeSafe:  {BaseURLVariable: "TYPESAFE_BASE_URL", Placeholder: "typesafe-placeholder"},
+			},
+		}
+		got, err := captureKeys(t.Context(), cfg, orca.Agent{Kind: orca.AgentClaude})
+		if err != nil || string(got.key) != "anthropic-placeholder" || string(got.judge) != "openai-placeholder" || string(got.typesafe) != "typesafe-placeholder" || string(got.github) != "gho-github-sentinel" {
+			t.Errorf("captureKeys = %q, %q, %q, %q, %v", got.key, got.judge, got.typesafe, got.github, err)
+		}
+	})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := captureKeys(t.Context(), tt.keys, orca.Agent{Kind: tt.kind})
+			got, err := captureKeys(t.Context(), config.Orca{Keys: tt.keys}, orca.Agent{Kind: tt.kind})
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
@@ -159,7 +173,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 	for _, agent := range []orca.Agent{{Kind: orca.AgentClaude}, {Kind: orca.AgentCodex}} {
 		keys := map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), agent.JudgeKeyProvider(): {failing}}
-		got, err := captureKeys(t.Context(), keys, agent)
+		got, err := captureKeys(t.Context(), config.Orca{Keys: keys}, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "judge key command") || got.key != nil || got.judge != nil {
 			t.Errorf("%s captureKeys with a failing judge = %q, %q, %v", agent.Kind, got.key, got.judge, err)
 		}
@@ -167,12 +181,12 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			t.Errorf("the error leaks a key: %v", err)
 		}
 		keys = map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), config.KeyTypeSafe: {failing}}
-		got, err = captureKeys(t.Context(), keys, agent)
+		got, err = captureKeys(t.Context(), config.Orca{Keys: keys}, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "typesafe key command") || got.key != nil || got.typesafe != nil {
 			t.Errorf("%s captureKeys with a failing TypeSafe key = %q, %q, %v", agent.Kind, got.key, got.typesafe, err)
 		}
 		keys = map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), config.KeyGitHub: {failing}}
-		got, err = captureKeys(t.Context(), keys, agent)
+		got, err = captureKeys(t.Context(), config.Orca{Keys: keys}, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "github key command") || got.key != nil || got.github != nil {
 			t.Errorf("%s captureKeys with a failing GitHub token = %q, %q, %v", agent.Kind, got.key, got.github, err)
 		}
@@ -191,7 +205,7 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkKey(t *testing.T) {
 	for _, kind := range []string{orca.AgentClaude, orca.AgentCodex} {
 		agent := orca.Agent{Kind: kind}
 		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel")}
-		got, err := captureKeys(t.Context(), keys, agent)
+		got, err := captureKeys(t.Context(), config.Orca{Keys: keys}, agent)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,7 +226,7 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkKey(t *testing.T) {
 			t.Fatal(err)
 		}
 		keys[config.KeyTrunk] = []string{failing}
-		got, err = captureKeys(t.Context(), keys, agent)
+		got, err = captureKeys(t.Context(), config.Orca{Keys: keys}, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "trunk key command") || got.key != nil || got.trunk != nil {
 			t.Errorf("failed Trunk capture = %+v, %v", got, err)
 		}

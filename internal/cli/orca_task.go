@@ -361,7 +361,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			return nil, err
 		}
 		if err = checkRetained(ctx, session, result); err == nil {
-			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
+			keys, err = captureKeys(ctx, session.Config.Orca, l.agent)
 		}
 	case openSpare:
 		if result, err = session.Reuse(ctx, name, l.source(session.Config)); err != nil {
@@ -371,7 +371,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			err = claimHelper(ctx, session, result.Machine)
 		}
 		if err == nil {
-			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
+			keys, err = captureKeys(ctx, session.Config.Orca, l.agent)
 		}
 	case openCreated:
 		var helper *config.BootstrapHelper
@@ -383,7 +383,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 				return ensureHelper(ctx, session, machine, helper)
 			}
 		}
-		if keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent); err != nil {
+		if keys, err = captureKeys(ctx, session.Config.Orca, l.agent); err != nil {
 			return nil, err
 		}
 		if result, err = session.Create(ctx, name, l.source(session.Config)); err != nil {
@@ -856,7 +856,11 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	if err := d.save(task); err != nil {
 		return err
 	}
-	if task.Terminal, err = d.worker(ctx, native, task, repo, title, keys, policy); err != nil {
+	routes, err := connectorRoutes(ctx, task, session.Config.Orca.Connectors)
+	if err != nil {
+		return err
+	}
+	if task.Terminal, err = d.worker(ctx, native, task, repo, title, keys, policy, routes); err != nil {
 		return err
 	}
 	if err := d.save(task); err != nil {
@@ -982,7 +986,27 @@ func lastReady(stdout []byte) []byte {
 	return []byte(lines[len(lines)-1])
 }
 
-func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, repo orca.Repo, title string, keys secrets, policy orca.ShellPolicy) (string, error) {
+func connectorRoutes(ctx context.Context, task *orcaTask, connectors map[string]config.Connector) ([]orca.Route, error) {
+	if len(connectors) == 0 {
+		return nil, nil
+	}
+	list, err := task.run(ctx, orca.ConnectorListScript, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list the Connectors machine %s may use: %w", task.Machine, err)
+	}
+	routes, err := orca.ParseRoutes(list, connectors)
+	if err != nil {
+		return nil, err
+	}
+	if _, connected := connectors[config.KeyOpenAI]; connected {
+		if _, err := task.run(ctx, orca.CodexBaseURLScript(routes), nil); err != nil {
+			return nil, fmt.Errorf("point Codex on machine %s at its Connector: %w", task.Machine, err)
+		}
+	}
+	return routes, nil
+}
+
+func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, repo orca.Repo, title string, keys secrets, policy orca.ShellPolicy, routes []orca.Route) (string, error) {
 	out, err := task.run(ctx, orca.KeyDirScript, nil)
 	if err != nil {
 		return "", err
@@ -991,7 +1015,7 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 	if err != nil {
 		return "", err
 	}
-	terminal, err := native.CreateTerminal(ctx, repo, title, task.Agent.Command(dir, policy))
+	terminal, err := native.CreateTerminal(ctx, repo, title, task.Agent.Command(dir, policy, routes...))
 	if err != nil {
 		dropped := task.dropKey(ctx, dir)
 		return terminal.Handle, errors.Join(err, dropped)
@@ -1149,37 +1173,40 @@ func (s secrets) clear() {
 	clear(s.trunk)
 }
 
-func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
+func captureKeys(ctx context.Context, cfg config.Orca, agent orca.Agent) (secrets, error) {
 	var captured secrets
 	var err error
-	if captured.key, err = captureKey(ctx, keys[agent.KeyProvider()]); err != nil {
+	if captured.key, err = captureProvider(ctx, cfg, agent.KeyProvider()); err != nil {
 		return secrets{}, err
 	}
-	if command, ok := keys[agent.JudgeKeyProvider()]; ok {
-		if captured.judge, err = captureKey(ctx, command); err != nil {
-			captured.clear()
-			return secrets{}, fmt.Errorf("judge %w", err)
-		}
+	if captured.judge, err = captureProvider(ctx, cfg, agent.JudgeKeyProvider()); err != nil {
+		captured.clear()
+		return secrets{}, fmt.Errorf("judge %w", err)
 	}
-	if command, ok := keys[config.KeyTypeSafe]; ok {
-		if captured.typesafe, err = captureKey(ctx, command); err != nil {
-			captured.clear()
-			return secrets{}, fmt.Errorf("typesafe %w", err)
-		}
+	if captured.typesafe, err = captureProvider(ctx, cfg, config.KeyTypeSafe); err != nil {
+		captured.clear()
+		return secrets{}, fmt.Errorf("typesafe %w", err)
 	}
-	if command, ok := keys[config.KeyGitHub]; ok {
-		if captured.github, err = captureKey(ctx, command); err != nil {
-			captured.clear()
-			return secrets{}, fmt.Errorf("github %w", err)
-		}
+	if captured.github, err = captureProvider(ctx, cfg, config.KeyGitHub); err != nil {
+		captured.clear()
+		return secrets{}, fmt.Errorf("github %w", err)
 	}
-	if command, ok := keys[config.KeyTrunk]; ok {
-		if captured.trunk, err = captureKey(ctx, command); err != nil {
-			captured.clear()
-			return secrets{}, fmt.Errorf("trunk %w", err)
-		}
+	if captured.trunk, err = captureProvider(ctx, cfg, config.KeyTrunk); err != nil {
+		captured.clear()
+		return secrets{}, fmt.Errorf("trunk %w", err)
 	}
 	return captured, nil
+}
+
+func captureProvider(ctx context.Context, cfg config.Orca, provider string) ([]byte, error) {
+	if connector, ok := cfg.Connectors[provider]; ok {
+		return []byte(connector.Placeholder), nil
+	}
+	command, ok := cfg.Keys[provider]
+	if !ok {
+		return nil, nil
+	}
+	return captureKey(ctx, command)
 }
 
 func captureKey(ctx context.Context, command []string) ([]byte, error) {

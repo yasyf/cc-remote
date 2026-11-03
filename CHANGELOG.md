@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca.connectors` runs workers with no model key on the machine.** A provider
+  listed there sends a placeholder instead of a key and exports the base URL of
+  its Fly Connector, read from the machine's gateway list at launch.
+  `providers.sprites.connector_labels` sets the labels those Connectors' policies
+  match on each new Sprite.
 - **`cc-remote orca stop <lane>` stops the workspace a lane runs on.** It finds
   the workspace `prepare` created under the lane's name or the warm pool
   workspace the lane claimed, closes the task's SSH forward, and suspends the
