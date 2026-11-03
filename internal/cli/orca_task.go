@@ -402,6 +402,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 	}
 	if err == nil {
 		task.Pregrant, task.claimed, task.booted, task.author, task.drift = pregrant, opening == openSpare, booted, l.author, result.HookDrift
+		task.beforeWorker = l.beforeWorker
 		err = driver.launch(ctx, session, task, runtime, keys, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
