@@ -544,7 +544,7 @@ and it takes no --ref.`,
 	launch.bind(cmd, "MCP servers the worker may start, inline only: for claude one JSON object per flag; for codex one TOML inline table for mcp_servers (default none)")
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
 	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start the first worker on the recorded workspace's machine and retained checkout instead of creating one")
-	cmd.Flags().BoolVar(&launch.warm, "warm", false, "treat the name as a lane: claim an unused warm pool Sprite refreshed to --ref, or create the lane's workspace when the pool is empty, then refill the pool in the background")
+	cmd.Flags().BoolVar(&launch.warm, "warm", false, "treat the name as a lane: claim an unused warm pool Sprite refreshed to --ref, moving to the next when one fails before its worker starts, or create the lane's workspace when none is left, refilling the pool in the background after each claim")
 	_ = cmd.MarkFlagRequired("brief-file")
 	return cmd
 }

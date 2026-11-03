@@ -179,27 +179,42 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 	if _, err := selectHelper(session); err != nil {
 		return err
 	}
-	member, release, err := pool.claim(ctx, lane, source.Ref)
-	if err != nil {
-		return err
-	}
-	allocation := &orcaAllocation{SchemaVersion: orcaAllocationSchema, Lane: lane, Workspace: lane, Allocation: allocationCreated, Ref: source.Ref, Replenish: pool.replenish()}
-	if member == nil {
-		allocation.Task, err = l.prime(ctx, session, runner, runtime, lane, openCreated, nil, finish)
-	} else {
-		defer release()
+	allocation := &orcaAllocation{SchemaVersion: orcaAllocationSchema, Lane: lane, Ref: source.Ref}
+	var failed []error
+	for {
+		member, release, err := pool.claim(ctx, lane, source.Ref)
+		if err != nil {
+			return withEarlier(failed, err)
+		}
+		allocation.Replenish = pool.replenish()
+		if member == nil {
+			break
+		}
 		allocation.Workspace, allocation.Allocation = member.Name, allocationWarm
 		allocation.Task, err = l.prime(ctx, session, runner, runtime, member.Name, openSpare, member.Pregrant, finish)
 		err = errors.Join(err, pool.settle(member, allocation.Task, err))
+		release()
+		if err == nil || allocation.Task != nil && allocation.Task.Terminal != "" {
+			allocation.Head, allocation.HookDrift = allocation.Task.BaseCommit, allocation.Task.drift
+			return errors.Join(withEarlier(failed, err), emit(out, allocation))
+		}
+		session.Log.Warn("a claimed warm workspace failed before its worker started, so the lane tries the next", "lane", lane, "workspace", member.Name, "failure", failureOf(err).describe())
+		failed = append(failed, fmt.Errorf("lane %s claimed warm workspace %s, which stays claimed as failed: %w", lane, member.Name, err))
 	}
-	if allocation.Task == nil && member != nil {
-		return fmt.Errorf("lane %s claimed warm workspace %s, which stays claimed as failed while no other workspace is tried: %w", lane, member.Name, err)
+	allocation.Workspace, allocation.Allocation = lane, allocationCreated
+	task, err := l.prime(ctx, session, runner, runtime, lane, openCreated, nil, finish)
+	if task == nil {
+		return withEarlier(failed, err)
 	}
-	if allocation.Task == nil {
-		return err
+	allocation.Task, allocation.Head, allocation.HookDrift = task, task.BaseCommit, task.drift
+	return errors.Join(withEarlier(failed, err), emit(out, allocation))
+}
+
+func withEarlier(earlier []error, err error) error {
+	if err == nil {
+		return nil
 	}
-	allocation.Head, allocation.HookDrift = allocation.Task.BaseCommit, allocation.Task.drift
-	return errors.Join(err, emit(out, allocation))
+	return errors.Join(append(earlier, err)...)
 }
 
 func (p *orcaPool) records() ([]*orcaMember, error) {
@@ -423,6 +438,7 @@ func (p *orcaPool) fill(ctx context.Context) (*orcaFill, error) {
 			defer mu.Unlock()
 			if name != "" {
 				fill.Created = append(fill.Created, name)
+				fill.Ready = append(fill.Ready, name)
 			}
 			errs = append(errs, err)
 		})
@@ -644,6 +660,13 @@ func (f *orcaFailure) describe() string {
 }
 
 func withheld(err error) error {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var parts []error
+		for _, part := range joined.Unwrap() {
+			parts = append(parts, withheld(part))
+		}
+		return errors.Join(parts...)
+	}
 	var failed *spareFailure
 	if errors.As(err, &failed) {
 		return failed

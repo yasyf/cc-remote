@@ -334,8 +334,11 @@ untouched. A claimed workspace never returns to the pool. A failed preparation i
 recorded `failed` with its error's metadata only: the step that failed, the
 error's class, the exit code when one was observed, the HTTP status when a
 provider lookup answered one, and the message's byte length and SHA-256, never
-its text. The command neither tries another workspace nor
-creates one. A command that dies leaves its workspace `claimed`.
+its text. When that happens before the worker's terminal starts, the command
+logs a warning, claims the next unused workspace, and creates the lane's own
+workspace once none is left; a failed launch reports every workspace that
+failed. A failure after the terminal starts ends the command. A command that
+dies leaves its workspace `claimed`.
 A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
 first worker, so `--warm` refuses a lane that already has an Orca task, already
 claimed a workspace, or names a pool workspace.
