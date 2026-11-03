@@ -1126,6 +1126,53 @@ func TestExistingPrepareStartsTheFirstWorkerOnTheRetainedCheckout(t *testing.T) 
 	w.free("task-a")
 }
 
+func TestPrepareRunsTheBeforeWorkerScriptAheadOfTheWorkerAndRecordsItsOutput(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	native, commands := w.native()
+	script := "echo installed ccx 1.2.3"
+	launch := orcaLaunch{agent: firstAgent, existing: true, author: firstAuthor, beforeWorker: script}
+	var out bytes.Buffer
+	err := launch.start(t.Context(), &out, w.session, native, orca.Runtime{Entry: "tools/orca/AppRun"}, "task-a", func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+		return driver.publish(ctx, task, []byte("Read every line.\n"))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := w.prepared(out.Bytes())
+	if task.BeforeWorker != "installed ccx 1.2.3\n" {
+		t.Errorf("beforeWorker = %q", task.BeforeWorker)
+	}
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant\n%q", native.calls, commands)
+	}
+	if got := sshCalls(t); !slices.Equal(got, []string{"check", "other: " + script, "key-dir", "key-write", "head", "brief"}) {
+		t.Errorf("ssh calls = %q, want the script ahead of the worker's key", got)
+	}
+	w.free("task-a")
+}
+
+func TestABeforeWorkerScriptThatFailsStopsPrepareWithNoWorker(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	native, commands := w.native()
+	t.Setenv("REMOTE_FAIL", "the-install")
+	launch := orcaLaunch{agent: firstAgent, existing: true, author: firstAuthor, beforeWorker: "echo the-install"}
+	var out bytes.Buffer
+	err := launch.start(t.Context(), &out, w.session, native, orca.Runtime{Entry: "tools/orca/AppRun"}, "task-a", func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+		t.Fatal("a failed script reached the brief")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "the --before-worker-file script failed, so no worker started") || !strings.Contains(err.Error(), "exit 7") {
+		t.Fatalf("err = %v", err)
+	}
+	if slices.Contains(native.calls, commands[3]) {
+		t.Errorf("a worker started after the script failed: %q", native.calls)
+	}
+	if slices.Contains(sshCalls(t), "key-dir") {
+		t.Errorf("the worker's key reached the machine after the script failed: %q", sshCalls(t))
+	}
+	w.free("task-a")
+}
+
 func TestExistingPrepareHoldsTheTaskFromAdmissionThroughOutput(t *testing.T) {
 	w := newFirstWorker(t, nil, true)
 	native, commands := w.native()

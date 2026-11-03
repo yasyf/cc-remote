@@ -67,12 +67,14 @@ type orcaTask struct {
 	Brief         *orcaArtifact  `json:"brief,omitempty"`
 	BaseCommit    string         `json:"baseCommit,omitempty"`
 	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
+	BeforeWorker  string         `json:"beforeWorker,omitempty"`
 
-	provider providers.Provider
-	claimed  bool
-	booted   *orcaBoot
-	author   author
-	drift    []images.HookDrift
+	provider     providers.Provider
+	claimed      bool
+	booted       *orcaBoot
+	author       author
+	beforeWorker string
+	drift        []images.HookDrift
 }
 
 type orcaBoot struct {
@@ -95,6 +97,7 @@ type orcaLaunch struct {
 	ref, title     string
 	agent          orca.Agent
 	existing, warm bool
+	beforeWorker   string
 	author         author
 }
 
@@ -501,7 +504,7 @@ directory for status, reconnect, send, and read.`,
 
 func newOrcaPrepareCmd(runner orca.Runner) *cobra.Command {
 	var launch orcaLaunch
-	var briefFile string
+	var briefFile, beforeWorkerFile string
 	cmd := &cobra.Command{
 		Use:   "prepare <name>",
 		Short: "Create a workspace and start an idle worker on its checkout with its brief on the machine, sending no prompt",
@@ -519,7 +522,11 @@ allocation warm or created, the checkout's HEAD, the fill it started, and the ta
 With --existing, prepare starts the first worker of a recorded workspace instead of creating one: it resumes
 the exact recorded machine and keeps its checkout as it is. It refuses a recorded Orca task, a machine without
 the workspace's ownership, a checkout or origin that differs from the config, and earlier Orca runtime state,
-and it takes no --ref.`,
+and it takes no --ref.
+
+With --before-worker-file, the file's script runs with sh on the machine after the checkout and before the worker
+starts, so the worker's first session sees whatever it installs. A nonzero exit stops prepare with no worker. The
+task record carries the script's stdout as beforeWorker.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := launch.agent.Validate(); err != nil {
@@ -538,6 +545,13 @@ and it takes no --ref.`,
 			if err != nil {
 				return err
 			}
+			if beforeWorkerFile != "" {
+				script, err := os.ReadFile(beforeWorkerFile)
+				if err != nil {
+					return err
+				}
+				launch.beforeWorker = string(script)
+			}
 			return launch.run(cmd, runner, args[0], func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
 				return driver.publish(ctx, task, brief)
 			})
@@ -545,6 +559,7 @@ and it takes no --ref.`,
 	}
 	launch.bind(cmd, "MCP servers the worker may start, inline only: for claude one JSON object per flag; for codex one TOML inline table for mcp_servers (default none)")
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
+	cmd.Flags().StringVar(&beforeWorkerFile, "before-worker-file", "", "file holding a script to run on the machine before the worker starts; a nonzero exit stops prepare with no worker")
 	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start the first worker on the recorded workspace's machine and retained checkout instead of creating one")
 	cmd.Flags().BoolVar(&launch.warm, "warm", false, "treat the name as a lane: claim an unused warm pool Sprite refreshed to --ref, moving to the next when one fails before its worker starts, or create the lane's workspace when none is left, refilling the pool in the background after each claim")
 	_ = cmd.MarkFlagRequired("brief-file")
@@ -855,6 +870,13 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	task.RepoID = repo.ID
 	if err := d.save(task); err != nil {
 		return err
+	}
+	if task.beforeWorker != "" {
+		said, err := task.run(ctx, task.beforeWorker, nil)
+		if err != nil {
+			return errors.Join(fmt.Errorf("the --before-worker-file script failed, so no worker started: %w", err), d.save(task))
+		}
+		task.BeforeWorker = string(said)
 	}
 	if task.Terminal, err = d.worker(ctx, native, task, repo, title, keys, policy); err != nil {
 		return err

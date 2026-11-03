@@ -227,6 +227,11 @@ TOML table for Codex, because a path names a file on this machine. It
 refuses Fable models, which run only as an explicit local choice.
 `--service-tier` is a Codex setting on both `prepare` and `create`.
 
+`--before-worker-file` names a script that `prepare` runs with `sh` on the
+machine after the checkout and before the worker starts, so the first session
+sees whatever it installs. A nonzero exit stops `prepare` with no worker. The
+task record carries the script's stdout as `beforeWorker`.
+
 Neither command initializes WordNet. The brief of a task that needs it in place
 tells the worker to
 [provision it first](tool-inventory.md#provision-wordnet-for-a-task-that-needs-it).
