@@ -578,7 +578,7 @@ func TestBuildPayloadPublishesOnlyWhenThePayloadsCaptainHookLoadsTheRepositorysH
 		pack  bool
 	}{
 		{name: "every hook loads", pack: true},
-		{name: "a hook does not load", drift: drift, want: "the payload's Captain Hook cannot load https://github.com/example/app's hooks at main, so the payload is not published:\nhooks.merge_guard: ImportError: cannot import name 'project_request_body' from 'cc_transcript.parser'"},
+		{name: "a hook does not load", drift: drift, want: "the payload's Captain Hook cannot load the repository's hooks, so the payload is not published: https://github.com/example/app at main:\nhooks.merge_guard: ImportError: cannot import name 'project_request_body' from 'cc_transcript.parser'"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

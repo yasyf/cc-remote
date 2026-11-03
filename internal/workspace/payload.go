@@ -98,7 +98,7 @@ func BuildPayload(ctx context.Context, cfg *config.Config, provider providers.Pr
 	slog.Info("created the payload build machine", "machine", name)
 	builder := &Session{Provider: provider, Stderr: stderr}
 	built, err := packPayload(ctx, builder.exec(name), builder.output(name), downloader, rendered.scripts, githubToken, hooks, name, out, packages)
-	if err != nil {
+	if err != nil && !errors.Is(err, errHookDrift) {
 		diagnosePayloadBuild(ctx, rendered.scripts, builder.capture(name), name)
 	}
 	if err := errors.Join(err, discardPayloadBuild(context.WithoutCancel(ctx), provider, name)); err != nil {
@@ -139,6 +139,8 @@ func packPayload(ctx context.Context, run images.Exec, capture images.Capture, d
 	return built, nil
 }
 
+var errHookDrift = errors.New("the payload's Captain Hook cannot load the repository's hooks, so the payload is not published")
+
 type hookSource struct {
 	repository, ref string
 }
@@ -161,7 +163,7 @@ func refuseHookDrift(ctx context.Context, run images.Exec, capture images.Captur
 	for i, d := range drift {
 		lines[i] = d.String()
 	}
-	return fmt.Errorf("the payload's Captain Hook cannot load %s's hooks at %s, so the payload is not published:\n%s", hooks.repository, hooks.ref, strings.Join(lines, "\n"))
+	return fmt.Errorf("%w: %s at %s:\n%s", errHookDrift, hooks.repository, hooks.ref, strings.Join(lines, "\n"))
 }
 
 func download(ctx context.Context, downloader Downloader, machine, path string, w io.Writer) (string, int64, error) {

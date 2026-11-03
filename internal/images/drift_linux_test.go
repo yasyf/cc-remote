@@ -39,7 +39,7 @@ func TestCaptainHookDriftRunsTheInterpreterOfTheBuildTheHostReports(t *testing.T
 	if err := os.WriteFile(filepath.Join(host, "version.json"), []byte(`{"schema":1,"build":"1.0.0"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	capture := func(ctx context.Context, argv []string, stdin io.Reader) ([]byte, error) {
+	capture := func(ctx context.Context, argv []string, _ io.Reader) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		var stderr bytes.Buffer
