@@ -409,7 +409,7 @@ func TestCompetingRequestsAreRefusedBeforeTheClaimedSpareIsTouched(t *testing.T)
 	w.free("lane-a")
 }
 
-func TestAFailedClaimStaysClaimedAndNoOtherSpareIsTried(t *testing.T) {
+func TestAFailedClaimStaysFailedAndPrintsItsErrorWhileTheNextSpareIsTried(t *testing.T) {
 	w := newWarmPool(t, "pool-a")
 	fills := standInFill(t)
 	pool := openPool(w.session)
@@ -421,48 +421,32 @@ func TestAFailedClaimStaysClaimedAndNoOtherSpareIsTried(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
-	calls := len(w.provider.Calls())
-	native := 0
+	var logged bytes.Buffer
+	w.session.Log = slog.New(slog.NewTextHandler(&logged, nil))
 	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
-		native++
 		return nil, errors.New("a failed claim reached the Orca CLI")
 	})
-	var out bytes.Buffer
-	err := w.warm(t.Context(), w.session, runner, &out, "lane-a", "")
-	if err == nil || !strings.Contains(err.Error(), "lane lane-a claimed warm workspace pool-a") || !strings.Contains(err.Error(), "check the unused checkout on pool-a exited 8: the checkout has uncommitted or untracked changes") {
-		t.Fatalf("warm = %v", err)
-	}
-	if out.Len() != 0 || native != 0 {
-		t.Errorf("a failed claim printed %q after %d Orca calls", out.String(), native)
-	}
+	_ = w.warm(t.Context(), w.session, runner, io.Discard, "lane-a", "")
 	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 || member.Failure.HTTPStatus != nil {
 		t.Errorf("pool-a = %+v, want it failed for lane-a with error metadata", member)
 	}
 	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("uncommitted")) || bytes.Contains(stored, []byte("exited")) {
 		t.Errorf("the pool record kept error text: %s, %v", stored, err)
 	}
-	if member := w.member("pool-b"); member.State != memberReady || member.Lane != "" {
-		t.Errorf("pool-b = %+v, want it untouched", member)
+	if !strings.Contains(logged.String(), "workspace=pool-a") || !strings.Contains(logged.String(), "the checkout has uncommitted or untracked changes") {
+		t.Errorf("log = %q, want pool-a's error printed", logged.String())
 	}
-	for _, call := range w.provider.Calls()[calls:] {
-		if strings.Contains(call, "pool-b") || strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "wake ") {
-			t.Errorf("the failed claim went on to %q", call)
-		}
-	}
-	if _, err := os.Stat(w.keys); !os.IsNotExist(err) {
-		t.Errorf("a failed claim read the key: %v", err)
+	if member := w.member("pool-b"); member.State == memberReady {
+		t.Errorf("pool-b = %+v, want it tried after pool-a failed", member)
 	}
 	if fills.Load() != 1 {
-		t.Errorf("fills = %d, want the one started after the claim", fills.Load())
+		t.Errorf("fills = %d, want the one started after the first claim", fills.Load())
 	}
 	w.free("pool-a")
 	w.free("lane-a")
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
-	}, "lane lane-a already claimed warm workspace pool-a, now failed")
-	w.refusedWithoutEffects(func(runner orca.Runner) error {
-		return w.warm(t.Context(), w.contender(), runner, io.Discard, "pool-b", "")
-	}, "pool-b names a warm pool workspace")
+	}, "lane-a already has an Orca task under")
 }
 
 func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T) {
@@ -476,20 +460,19 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 	}
 	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
 	calls, scripts := len(w.provider.Calls()), len(w.local.Scripts("pool-a"))
-	native := 0
+	var logged bytes.Buffer
+	w.session.Log = slog.New(slog.NewTextHandler(&logged, nil))
 	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
-		native++
 		return nil, errors.New("an unread checkout reached the Orca CLI")
 	})
-	err := w.warm(t.Context(), w.session, runner, io.Discard, "lane-a", "")
-	if err == nil || !strings.Contains(err.Error(), "check the unused checkout on pool-a exited 128: its remote output is withheld") {
-		t.Fatalf("warm = %v, want the failed git status reported without its output", err)
+	if err := w.warm(t.Context(), w.session, runner, io.Discard, "lane-a", ""); err == nil || !strings.Contains(err.Error(), "sh on lane-a exited 128") {
+		t.Fatalf("warm = %v, want the lane's own workspace tried after pool-a failed", err)
 	}
-	if native != 0 {
-		t.Errorf("%d Orca calls after the failed check", native)
+	if !strings.Contains(logged.String(), "check the unused checkout on pool-a exited 128: its remote output is withheld") || strings.Contains(logged.String(), "index file smaller than expected") {
+		t.Errorf("log = %q, want the failed git status reported without its output", logged.String())
 	}
 	for _, call := range w.provider.Calls()[calls:] {
-		if strings.HasPrefix(call, "wake ") || strings.HasPrefix(call, "create ") {
+		if call == "wake pool-a" {
 			t.Errorf("the failed check went on to %q", call)
 		}
 	}
@@ -498,13 +481,8 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 			t.Errorf("the failed check went on to refresh the checkout: %q", script)
 		}
 	}
-	if _, err := os.Stat(w.keys); !os.IsNotExist(err) {
-		t.Errorf("the failed check read the key: %v", err)
-	}
-	for _, name := range []string{"pool-a", "lane-a"} {
-		if _, err := os.Lstat(w.session.Config.State().Orca(name)); !os.IsNotExist(err) {
-			t.Errorf("the failed check left Orca task state for %s: %v", name, err)
-		}
+	if _, err := os.Lstat(w.session.Config.State().Orca("pool-a")); !os.IsNotExist(err) {
+		t.Errorf("the failed check left Orca task state for pool-a: %v", err)
 	}
 	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil {
 		t.Errorf("pool-a = %+v, want it failed for lane-a", member)
@@ -647,14 +625,16 @@ func TestWarmClaimRefusesUnverifiedOrIncompatibleSparesWithoutTouchingThem(t *te
 	}
 }
 
-func TestWarmClaimFailsWithoutClaimingWhenTheProviderCannotAnswer(t *testing.T) {
+func TestWarmClaimPassesOverASpareTheProviderCannotAnswerForAndPrintsWhy(t *testing.T) {
 	w := newWarmPool(t)
 	pool := openPool(w.session)
 	w.spare(pool, "pool-a")
 	session := w.over(&observing{Fake: w.provider, on: "pool-a", err: errors.New("sprites api answered 502")})
+	var logged bytes.Buffer
+	session.Log = slog.New(slog.NewTextHandler(&logged, nil))
 	member, _, err := openPool(session).claim(t.Context(), "lane-a", "main")
-	if err == nil || member != nil || !strings.Contains(err.Error(), "observe warm workspace pool-a before claiming it: sprites api answered 502") {
-		t.Fatalf("claim = %+v, %v", member, err)
+	if err != nil || member != nil || !strings.Contains(logged.String(), "observe warm workspace pool-a before claiming it: sprites api answered 502") {
+		t.Fatalf("claim = %+v, %v; log = %q", member, err, logged.String())
 	}
 	if got := w.member("pool-a"); got.State != memberReady || got.Lane != "" || got.Reason != "" || got.Failure != nil {
 		t.Errorf("pool-a = %+v, want it still unclaimed", got)
