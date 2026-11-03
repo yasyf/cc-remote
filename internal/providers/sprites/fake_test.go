@@ -142,6 +142,8 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 			}
 			sprite.idle()
 			return respond(200, listed)
+		case post && verb == "stop" && sprite.services[service] == "failed":
+			return respond(409, map[string]string{"error": "service is not running"})
 		case post && verb == "stop" && sprite.services[service] != "":
 			sprite.services[service] = "stopped"
 			sprite.idle()

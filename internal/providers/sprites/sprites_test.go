@@ -377,6 +377,20 @@ func TestSuspendStopsEveryServiceAndReturnsOnceTheSpritePauses(t *testing.T) {
 	}
 }
 
+func TestSuspendStopsTheRestWhenAServiceAlreadyExited(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	fake.sprites["alpha"].services = map[string]string{"cc-remote-capt-hookd": "failed", "sshd": "running"}
+	if err := p.Suspend(t.Context(), "alpha"); err != nil {
+		t.Fatalf("Suspend = %v, want the exited service's 409 passed over", err)
+	}
+	if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.State != providers.StateSuspended || fake.sprites["alpha"].services["sshd"] != "stopped" {
+		t.Errorf("after the suspend, Get = %+v, %v, services %v; want it paused with sshd stopped", machine, err, fake.sprites["alpha"].services)
+	}
+}
+
 func TestSuspendOfASpriteSomethingStillHoldsFailsNamingTheHold(t *testing.T) {
 	within, every := pauseWithin, pauseEvery
 	pauseWithin, pauseEvery = 0, 0
