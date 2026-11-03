@@ -3,17 +3,21 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
 
 type orcaStopped struct {
 	Lane      string `json:"lane"`
 	Workspace string `json:"workspace"`
+	Found     string `json:"found,omitempty"`
 }
 
 func newOrcaStopCmd() *cobra.Command {
@@ -24,7 +28,11 @@ func newOrcaStopCmd() *cobra.Command {
 		Long: `stop finds the workspace a lane runs on, the one prepare created under the lane's name or the
 warm pool workspace the lane claimed, closes the task's SSH forward, and suspends the machine. Its
 disk, workspace record, task record, and pool record stay. A warm pool workspace's own name is
-refused, so stop reaches only a workspace a lane claimed.`,
+refused, so stop reaches only a workspace a lane claimed.
+
+A lane with no task record has no forward to close. A lane with no workspace record, or whose
+machine the provider no longer has, is already stopped: stop removes the records left for it, as
+destroy would, names what it found under "found", and succeeds.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session, err := flags.open()
@@ -47,19 +55,33 @@ func stopLane(ctx context.Context, session *workspace.Session, lane string) (*or
 	if err != nil {
 		return nil, err
 	}
-	task, err := loadTask(session.Config.State(), name)
-	if err != nil {
+	dir := session.Config.State()
+	task, err := loadTask(dir, name)
+	switch {
+	case errors.Is(err, errNoTask):
+	case err != nil:
 		return nil, err
-	}
-	if task.Forward != nil {
+	case task.Forward != nil:
 		if err := task.Forward.close(ctx); err != nil {
 			return nil, err
 		}
 	}
-	if err := session.Suspend(ctx, name); err != nil {
+	stopped := &orcaStopped{Lane: lane, Workspace: name}
+	err = session.Suspend(ctx, name)
+	if err == nil {
+		return stopped, nil
+	}
+	if !errors.Is(err, workspace.ErrNotRecorded) && !errors.Is(err, providers.ErrNotFound) {
 		return nil, err
 	}
-	return &orcaStopped{Lane: lane, Workspace: name}, nil
+	stopped.Found = err.Error()
+	if err := session.Destroy(ctx, name); err != nil && !errors.Is(err, workspace.ErrNotRecorded) {
+		return nil, err
+	}
+	if err := state.Remove(dir.Orca(name)); err != nil {
+		return nil, err
+	}
+	return stopped, nil
 }
 
 func (p *orcaPool) workspaceOf(lane string) (string, error) {
