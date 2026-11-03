@@ -164,8 +164,10 @@ orca:
 A provider listed there runs no `orca.keys` command and may not have one. Its
 worker variable holds the placeholder. Before each worker starts, cc-remote reads
 `https://api.sprites.dev/v1/gateway/list` from the machine, finds that provider's
-`gateway_base_url`, and exports it as the named variable. A Codex worker also uses
-it as its model provider's base URL. A machine that may not use the Connector
+`gateway_base_url`, and exports it as the named variable. Codex ignores
+`OPENAI_BASE_URL`, so a Codex worker uses the URL as its model provider's base URL,
+and cc-remote sets `openai_base_url` in the machine's `~/.codex/config.toml` for
+every other Codex run there. A machine that may not use the Connector
 fails the launch with a message naming the provider, rather than failing on its
 first model call. `connector_labels` sets those labels on each Sprite at create;
 an existing Sprite needs them set separately.

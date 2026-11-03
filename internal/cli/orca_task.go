@@ -992,7 +992,16 @@ func connectorRoutes(ctx context.Context, task *orcaTask, connectors map[string]
 	if err != nil {
 		return nil, fmt.Errorf("list the Connectors machine %s may use: %w", task.Machine, err)
 	}
-	return orca.ParseRoutes(list, connectors)
+	routes, err := orca.ParseRoutes(list, connectors)
+	if err != nil {
+		return nil, err
+	}
+	if _, connected := connectors[config.KeyOpenAI]; connected {
+		if _, err := task.run(ctx, orca.CodexBaseURLScript(routes), nil); err != nil {
+			return nil, fmt.Errorf("point Codex on machine %s at its Connector: %w", task.Machine, err)
+		}
+	}
+	return routes, nil
 }
 
 func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, repo orca.Repo, title string, keys secrets, policy orca.ShellPolicy, routes []orca.Route) (string, error) {

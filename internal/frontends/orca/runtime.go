@@ -231,6 +231,17 @@ func ParseRoutes(list []byte, connectors map[string]config.Connector) ([]Route, 
 	return routes, nil
 }
 
+func CodexBaseURLScript(routes []Route) string {
+	return `set -eu
+config="$HOME/.codex/config.toml"
+mkdir -p "$HOME/.codex"
+touch "$config"
+next="$config.next.$$"
+{ printf '%s\n' ` + remote.Quote(`openai_base_url = "`+openAIProviderURL(routes)+`"`) + `; grep -v '^openai_base_url[[:space:]]*=' "$config" || true; } > "$next"
+chmod 600 "$next"
+mv "$next" "$config"`
+}
+
 func openAIProviderURL(routes []Route) string {
 	base := openAIBaseURL
 	for _, route := range routes {

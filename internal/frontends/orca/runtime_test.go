@@ -476,6 +476,46 @@ func TestCodexTalksToTheOpenAIConnector(t *testing.T) {
 	}
 }
 
+func TestCodexBaseURLScriptSetsOneTopLevelSetting(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("openai_base_url = \"https://old.test/v1\"\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	routes := []orca.Route{{Provider: config.KeyOpenAI, Variable: "OPENAI_BASE_URL", BaseURL: "https://gw.test/openai/o"}}
+	for range 2 {
+		cmd := exec.Command("sh", "-c", orca.CodexBaseURLScript(routes))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "openai_base_url = \"https://gw.test/openai/o/v1\"\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n"
+	if string(got) != want {
+		t.Errorf("config.toml = %q, want %q", got, want)
+	}
+}
+
+func TestCodexBaseURLScriptCreatesAMissingConfig(t *testing.T) {
+	home := t.TempDir()
+	cmd := exec.Command("sh", "-c", orca.CodexBaseURLScript([]orca.Route{{Provider: config.KeyOpenAI, BaseURL: "https://gw.test/openai/o"}}))
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil || string(got) != "openai_base_url = \"https://gw.test/openai/o/v1\"\n" {
+		t.Errorf("config.toml = %q, %v", got, err)
+	}
+}
+
 func TestWorkerBehindConnectorsHoldsOnlyPlaceholders(t *testing.T) {
 	routes := []orca.Route{
 		{Provider: config.KeyAnthropic, Variable: "ANTHROPIC_BASE_URL", BaseURL: "https://gw.test/anthropic/a"},
