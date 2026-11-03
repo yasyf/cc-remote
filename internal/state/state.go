@@ -90,8 +90,8 @@ func (d Dir) Pool(name string) string {
 	return filepath.Join(string(d), "pool", name+".json")
 }
 
-func (d Dir) PoolFill(key string) string {
-	return filepath.Join(string(d), "pool", "fill-"+key+".lock")
+func (d Dir) PoolLog(key string) string {
+	return filepath.Join(string(d), "pool", "fill-"+key+".log")
 }
 
 func (d Dir) Job(name string) string {

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ const (
 	allocationWarm       = "warm"
 	allocationCreated    = "created"
 	fillTimeout          = 20 * time.Minute
+	createTries          = 2
 )
 
 type memberState string
@@ -85,6 +87,11 @@ type orcaFailure struct {
 	SHA256     string       `json:"sha256"`
 }
 
+type reservation struct {
+	member *orcaMember
+	unlock func()
+}
+
 type spareFailure struct {
 	member *orcaMember
 }
@@ -121,7 +128,6 @@ type orcaFill struct {
 	Created   []string `json:"created,omitempty"`
 	Abandoned []string `json:"abandoned,omitempty"`
 	Refused   []string `json:"refused,omitempty"`
-	Coalesced bool     `json:"coalesced,omitempty"`
 }
 
 type orcaPoolStatus struct {
@@ -394,60 +400,89 @@ func (p *orcaPool) settle(member *orcaMember, task *orcaTask, err error) error {
 
 func (p *orcaPool) fill(ctx context.Context) (*orcaFill, error) {
 	fill := &orcaFill{Key: p.key, Target: p.target}
-	for {
-		unlock, held, err := state.TryLock(p.dir.PoolFill(p.key))
-		if err != nil {
-			return fill, err
-		}
-		if !held {
-			fill.Coalesced = true
-			return fill, nil
-		}
-		err = p.refill(ctx, fill)
-		unlock()
-		if err != nil {
-			return fill, err
-		}
-		ready, err := p.ready()
-		if err != nil || ready >= p.target {
-			return fill, err
-		}
-	}
-}
-
-func (p *orcaPool) refill(ctx context.Context, fill *orcaFill) error {
 	helper, err := selectHelper(p.session)
 	if err != nil {
-		return err
+		return fill, err
 	}
 	if helper != nil {
 		p.session.Alongside = func(ctx context.Context, machine string) error {
 			return ensureHelper(ctx, p.session, machine, helper)
 		}
 	}
-	for {
-		member, err := p.shortfall(ctx, fill)
-		if err != nil || member == nil {
-			return err
-		}
-		result, err := p.session.CreateSpare(ctx, member.Name, workspace.Source{Ref: p.session.Config.Ref})
-		if err == nil {
-			member.Pregrant, err = p.pregrant(ctx, result)
-		}
-		if err != nil {
-			member.State, member.Failure = memberFailed, failureOf(err)
-			var refusal orca.GrantRefusal
-			if errors.As(err, &refusal) {
-				member.Reason = refusal.Error()
-			}
-			return errors.Join(&spareFailure{member: member}, p.save(member))
-		}
-		member.State = memberReady
-		if err := p.save(member); err != nil {
-			return err
-		}
-		fill.Created = append(fill.Created, member.Name)
+	reserved, err := p.shortfall(ctx, fill)
+	if err != nil {
+		return fill, err
 	}
+	var mu sync.Mutex
+	var errs []error
+	var wg sync.WaitGroup
+	for _, spare := range reserved {
+		wg.Go(func() {
+			name, err := p.create(ctx, spare)
+			mu.Lock()
+			defer mu.Unlock()
+			if name != "" {
+				fill.Created = append(fill.Created, name)
+			}
+			errs = append(errs, err)
+		})
+	}
+	wg.Wait()
+	slices.Sort(fill.Created)
+	return fill, errors.Join(errs...)
+}
+
+func (p *orcaPool) create(ctx context.Context, spare *reservation) (string, error) {
+	var failures []error
+	for {
+		err := p.build(ctx, spare)
+		if err == nil {
+			return spare.member.Name, nil
+		}
+		p.session.Log.Warn("a warm workspace create failed", "try", len(failures)+1, "of", createTries, "error", err)
+		if failures = append(failures, err); len(failures) == createTries {
+			return "", errors.Join(failures...)
+		}
+		err = p.locked(func() (err error) {
+			spare, err = p.reserve()
+			return err
+		})
+		if err != nil {
+			return "", errors.Join(append(failures, err)...)
+		}
+	}
+}
+
+func (p *orcaPool) build(ctx context.Context, spare *reservation) error {
+	defer spare.unlock()
+	member := spare.member
+	result, err := p.session.CreateSpare(ctx, member.Name, workspace.Source{Ref: p.session.Config.Ref})
+	if err == nil {
+		member.Pregrant, err = p.pregrant(ctx, result)
+	}
+	if err != nil {
+		member.State, member.Failure = memberFailed, failureOf(err)
+		var refusal orca.GrantRefusal
+		if errors.As(err, &refusal) {
+			member.Reason = refusal.Error()
+		}
+		return errors.Join(&spareFailure{member: member}, p.save(member))
+	}
+	member.State = memberReady
+	return p.save(member)
+}
+
+func (p *orcaPool) reserve() (*reservation, error) {
+	member := &orcaMember{SchemaVersion: orcaPoolSchema, Name: spareName(), Provider: p.session.Kind, Profile: p.session.Profile, Key: p.key, State: memberProvisioning, CreatedAt: p.session.Now().UTC()}
+	unlock, err := state.Lock(p.dir.Orca(member.Name) + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	if err := p.save(member); err != nil {
+		unlock()
+		return nil, err
+	}
+	return &reservation{member: member, unlock: unlock}, nil
 }
 
 func (p *orcaPool) pregrant(ctx context.Context, result *workspace.Result) (*orca.Pregrant, error) {
@@ -464,24 +499,33 @@ func (p *orcaPool) pregrant(ctx context.Context, result *workspace.Result) (*orc
 	return grant.Fill(ctx)
 }
 
-func (p *orcaPool) shortfall(ctx context.Context, fill *orcaFill) (*orcaMember, error) {
+func (p *orcaPool) shortfall(ctx context.Context, fill *orcaFill) ([]*reservation, error) {
 	eligible, err := p.census(ctx, fill)
 	if err != nil {
 		return nil, err
 	}
-	var next *orcaMember
+	var reserved []*reservation
 	err = p.locked(func() error {
 		members, err := p.members()
 		if err != nil {
 			return err
 		}
-		fill.Ready = nil
+		creating := 0
 		for _, member := range members {
 			switch {
 			case member.Key != p.key:
 			case member.State == memberReady && eligible[member.Name]:
 				fill.Ready = append(fill.Ready, member.Name)
 			case member.State == memberProvisioning:
+				unlock, held, err := state.TryLock(p.dir.Orca(member.Name) + ".lock")
+				if err != nil {
+					return err
+				}
+				if !held {
+					creating++
+					continue
+				}
+				unlock()
 				member.State, member.Reason = memberAbandoned, "the fill that created it ended before it recorded the create's outcome, so its machine is left as it is"
 				if err := p.save(member); err != nil {
 					return err
@@ -489,13 +533,22 @@ func (p *orcaPool) shortfall(ctx context.Context, fill *orcaFill) (*orcaMember, 
 				fill.Abandoned = append(fill.Abandoned, member.Name)
 			}
 		}
-		if len(fill.Ready) >= p.target {
-			return nil
+		for range p.target - len(fill.Ready) - creating {
+			spare, err := p.reserve()
+			if err != nil {
+				return err
+			}
+			reserved = append(reserved, spare)
 		}
-		next = &orcaMember{SchemaVersion: orcaPoolSchema, Name: spareName(), Provider: p.session.Kind, Profile: p.session.Profile, Key: p.key, State: memberProvisioning, CreatedAt: p.session.Now().UTC()}
-		return p.save(next)
+		return nil
 	})
-	return next, err
+	if err != nil {
+		for _, spare := range reserved {
+			spare.unlock()
+		}
+		return nil, err
+	}
+	return reserved, nil
 }
 
 func (p *orcaPool) census(ctx context.Context, fill *orcaFill) (map[string]bool, error) {
@@ -532,20 +585,6 @@ func (p *orcaPool) census(ctx context.Context, fill *orcaFill) (map[string]bool,
 	return eligible, nil
 }
 
-func (p *orcaPool) ready() (int, error) {
-	count := 0
-	err := p.locked(func() error {
-		members, err := p.members()
-		for _, member := range members {
-			if member.Key == p.key && member.State == memberReady {
-				count++
-			}
-		}
-		return err
-	})
-	return count, err
-}
-
 func (p *orcaPool) replenish() *orcaReplenish {
 	started := &orcaReplenish{Target: p.target}
 	if p.target == 0 {
@@ -566,8 +605,18 @@ func (p *orcaPool) spawn() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	logPath := p.dir.PoolLog(p.key)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return 0, err
+	}
+	output, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = output.Close() }()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = fillEnv(os.Environ())
+	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start the warm pool fill: %w", err)
 	}
@@ -666,11 +715,12 @@ func newOrcaPoolFillCmd() *cobra.Command {
 		Short: "Create agent-free warm workspaces until orca.pool.ready of them are unused, then exit",
 		Long: `fill creates workspaces for the selected Sprite provider and profile until orca.pool.ready of them are
 recorded unused and still eligible, then exits. Each is a plain create labelled with the pool's compatibility
-key: tools, plugins, and a shallow checkout of config.ref, with no Orca runtime, task, worker, or API key. One
-fill runs per key at a time; a fill that finds another running exits at once, and the running one counts again
-before it ends. A failed create is recorded as failed and ends the fill without another attempt, and its error
-is shown only as the step that failed, its class, exit, HTTP status, length, and SHA-256. The fill stops at a
-20 minute deadline. prepare --warm starts this command detached once it has claimed.`,
+key: tools, plugins, and a shallow checkout of config.ref, with no Orca runtime, task, worker, or API key. Fills
+run side by side: each counts the ready workspaces and the ones other fills are still creating, reserves the
+shortfall, and creates those workspaces at once, so a claim that leaves the pool one short makes one create. A
+failed create is recorded as failed and tried once more under a new name, and its error is shown only as the
+step that failed, its class, exit, HTTP status, length, and SHA-256. The fill stops at a 20 minute deadline.
+prepare --warm starts this command detached once it has claimed, appending its output to the pool's fill log.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			session, err := flags.open()
