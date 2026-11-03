@@ -374,9 +374,9 @@ refills in about one create's time instead of one after another. Each is a
 plain `create` with a `pool-` name and the pool label, so it holds tools,
 plugins, and a shallow checkout of `config.ref`. A fill starts no Orca runtime,
 records no task, starts no worker, and reads no API key. A failed create is
-recorded `failed` with the same error metadata, logged as a warning, and tried
-once more under a new name; the fill reports every create that failed both
-times.
+recorded `failed` with the same error metadata and logged as a warning, and the
+fill reports it; the other creates go on, and the next claim's fill counts the
+shortfall again and replaces it.
 
 The record's `step` names where the create failed. Once the Sprite exists it
 is the create phase, such as `payload.mount`, `tools.install`, or `checkout`,
