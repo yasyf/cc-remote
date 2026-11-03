@@ -335,7 +335,7 @@ func (s *Session) verifyTailnet(ctx context.Context) error {
 	return err
 }
 
-var errNotRecorded = errors.New("no workspace is recorded")
+var ErrNotRecorded = errors.New("no workspace is recorded")
 
 func (s *Session) Recorded(name string) (*Record, error) {
 	record := &Record{}
@@ -344,7 +344,7 @@ func (s *Session) Recorded(name string) (*Record, error) {
 		return nil, err
 	}
 	if !found {
-		return nil, fmt.Errorf("%w for %s under %s", errNotRecorded, name, s.State)
+		return nil, fmt.Errorf("%w for %s under %s", ErrNotRecorded, name, s.State)
 	}
 	if record.Provider != s.Kind || record.Profile != s.Profile {
 		return nil, fmt.Errorf("workspace %s is a %s/%s workspace, not %s/%s", name, record.Provider, record.Profile, s.Kind, s.Profile)
@@ -414,7 +414,7 @@ func (s *Session) create(ctx context.Context, name string, source Source, labels
 		return nil, err
 	}
 	recorded, err := s.Recorded(name)
-	if err != nil && !errors.Is(err, errNotRecorded) {
+	if err != nil && !errors.Is(err, ErrNotRecorded) {
 		return nil, err
 	}
 	if err := s.reconcile(name, recorded); err != nil {
@@ -1306,7 +1306,7 @@ func (s *Session) Destroy(ctx context.Context, name string) error {
 	}
 	defer held.Release()
 	record, err := s.Recorded(name)
-	if errors.Is(err, errNotRecorded) {
+	if errors.Is(err, ErrNotRecorded) {
 		return s.forgetUnrecorded(ctx, held, err)
 	}
 	if err != nil {

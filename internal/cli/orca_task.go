@@ -40,6 +40,8 @@ const (
 
 var ErrNotSubmitted = errors.New("the prompt was accepted, but no turn_started was observed")
 
+var errNoTask = errors.New("no Orca task is recorded")
+
 type orcaTask struct {
 	SchemaVersion int            `json:"schemaVersion"`
 	Workspace     string         `json:"workspace"`
@@ -1269,7 +1271,7 @@ func loadTask(dir state.Dir, name string) (*orcaTask, error) {
 		return nil, err
 	}
 	if !found {
-		return nil, fmt.Errorf("no Orca task is recorded for %s under %s; cc-remote orca create makes one", name, dir)
+		return nil, fmt.Errorf("%w for %s under %s; cc-remote orca create makes one", errNoTask, name, dir)
 	}
 	if task.SchemaVersion != orcaTaskSchema {
 		return nil, fmt.Errorf("%s holds task schema %d, not %d", dir.Orca(name), task.SchemaVersion, orcaTaskSchema)

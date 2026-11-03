@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **`cc-remote orca stop` succeeds on a lane that is already gone.** A lane
+  with no Orca task record failed with "no Orca task is recorded", and a lane
+  whose Sprite no longer existed failed on the suspend. A missing task record
+  now only means there is no forward to close. A lane with no workspace record,
+  or whose machine the provider no longer has, counts as stopped: stop removes
+  its leftover records, names what it found, and exits zero. A machine that
+  refuses to suspend still fails the stop.
 - **Concurrent fills stop at the ready target.** A fill counted a spare
   another fill finished between its census and its locked recount as neither
   ready nor in flight, so two fills could leave one spare past

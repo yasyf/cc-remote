@@ -195,6 +195,12 @@ and `reconnect` reopens the forward. It refuses a warm pool workspace's own
 name, so it stops only a workspace a lane claimed, and it exits nonzero with
 the error when the machine does not stop.
 
+A lane with no task record has no forward to close, so stop suspends its
+workspace alone. A lane is already stopped when no workspace is recorded for it
+or the provider no longer has its machine: stop removes the workspace, SSH,
+pool, and task records left for it, prints what it found under `found`, and
+exits zero.
+
 `reconnect` restores only the transport to an existing runtime. It does not
 resume a machine, restart a runtime, or recover a worker after process loss.
 The recorded runtime and receipt identities remain unchanged.
