@@ -1023,7 +1023,7 @@ func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
 			"exit 1 and HTTP status unknown at create.command", `{"step":"create.command","class":"exit","exit":1,"httpStatus":null,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 		{
-			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then rm "$SPRITE_CALLS.created"; printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
+			"a readback the API refuses", `if [ "$1" = create ]; then : > "$SPRITE_CALLS.created"; exit 0; fi` + "\n" + `if [ -e "$SPRITE_CALLS.created" ]; then printf '{"error":"fatal: sk-leakedsecret answered by the synthetic provider"}\n500'; exit 0; fi` + "\n" + absent,
 			"exit unknown and HTTP status 500 at create.readback", `{"step":"create.readback","class":"http","exit":null,"httpStatus":500,"bytes":0,"sha256":""}`, "api\ncreate\napi\n",
 		},
 	}
@@ -1031,46 +1031,44 @@ func TestThePublicFillRecordsOnlyTheFailedStepAndMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path, calls := spritesConfig(t, dir, tt.script)
-			nameSpares(t, "pool-a", "pool-b")
+			nameSpares(t, "pool-a")
 			_, err := runPublicFill(t, path)
+			if !strings.Contains(err.Error(), "create warm workspace pool-a failed with "+tt.want+";") {
+				t.Fatalf("fill = %v, want the failed create reported as %q", err, tt.want)
+			}
 			states := state.Dir(filepath.Join(dir, "state"))
-			for _, name := range []string{"pool-a", "pool-b"} {
-				if !strings.Contains(err.Error(), "create warm workspace "+name+" failed with "+tt.want+";") {
-					t.Fatalf("fill = %v, want %s's failed create reported as %q", err, name, tt.want)
+			member := &orcaMember{}
+			if _, err := state.Load(states.Pool("pool-a"), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+				t.Fatalf("pool-a = %+v, %v; want it failed with error metadata", member, err)
+			}
+			member.Failure.Bytes, member.Failure.SHA256 = 0, ""
+			if failure, err := json.Marshal(member.Failure); err != nil || string(failure) != tt.failure {
+				t.Errorf("failure = %s, %v; want %s", failure, err, tt.failure)
+			}
+			record := &workspace.Record{}
+			if _, err := state.Load(states.Workspace("pool-a"), record); err != nil || !record.Unverified || record.Machine != "pool-a" {
+				t.Errorf("workspace pool-a = %+v, %v; want its record kept unverified", record, err)
+			}
+			for _, stored := range []string{states.Pool("pool-a"), states.Workspace("pool-a")} {
+				raw, err := os.ReadFile(stored)
+				if err != nil {
+					t.Fatal(err)
 				}
-				member := &orcaMember{}
-				if _, err := state.Load(states.Pool(name), member); err != nil || member.State != memberFailed || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-					t.Fatalf("%s = %+v, %v; want it failed with error metadata", name, member, err)
-				}
-				member.Failure.Bytes, member.Failure.SHA256 = 0, ""
-				if failure, err := json.Marshal(member.Failure); err != nil || string(failure) != tt.failure {
-					t.Errorf("%s failure = %s, %v; want %s", name, failure, err, tt.failure)
-				}
-				record := &workspace.Record{}
-				if _, err := state.Load(states.Workspace(name), record); err != nil || !record.Unverified || record.Machine != name {
-					t.Errorf("workspace %s = %+v, %v; want its record kept unverified", name, record, err)
-				}
-				for _, stored := range []string{states.Pool(name), states.Workspace(name)} {
-					raw, err := os.ReadFile(stored)
-					if err != nil {
-						t.Fatal(err)
-					}
-					for _, leaked := range []string{"sk-leakedsecret", "fatal", "synthetic provider", "sprite create"} {
-						if bytes.Contains(raw, []byte(leaked)) {
-							t.Errorf("%s kept %q: %s", stored, leaked, raw)
-						}
+				for _, leaked := range []string{"sk-leakedsecret", "fatal", "synthetic provider", "sprite create"} {
+					if bytes.Contains(raw, []byte(leaked)) {
+						t.Errorf("%s kept %q: %s", stored, leaked, raw)
 					}
 				}
 			}
-			if invoked, err := os.ReadFile(calls); err != nil || string(invoked) != tt.calls+tt.calls {
-				t.Errorf("provider CLI calls = %q, %v; want %q twice, one retry and no destroy", invoked, err, tt.calls)
+			if invoked, err := os.ReadFile(calls); err != nil || string(invoked) != tt.calls {
+				t.Errorf("provider CLI calls = %q, %v; want %q with no retry or destroy", invoked, err, tt.calls)
 			}
 		})
 	}
 }
 
-func TestAFillTriesARejectedCreateOnceMoreUnderANewName(t *testing.T) {
-	w := newWarmPool(t, "pool-a", "pool-b", "pool-c")
+func TestAFillKeepsItsReadySpareWhenAParallelCreateIsRejected(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b")
 	w.oneExecAtATime()
 	*w.session.Config.Orca.Pool.Ready = 2
 	provider := &rejecting{Fake: w.provider, name: "pool-b"}
@@ -1079,13 +1077,11 @@ func TestAFillTriesARejectedCreateOnceMoreUnderANewName(t *testing.T) {
 	session.Stderr = io.Discard
 	pool := openPool(session)
 	fill, err := pool.fill(t.Context())
-	if err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-c"}) {
-		t.Fatalf("fill = %+v, %v; want pool-a made and pool-b's rejected create replaced by pool-c", fill, err)
+	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-b failed with exit 1 and HTTP status unknown at create.command;") || strings.Contains(err.Error(), "sk-leakedsecret") || !slices.Equal(fill.Created, []string{"pool-a"}) {
+		t.Fatalf("fill = %+v, %v; want pool-a made and pool-b's rejected create reported as metadata", fill, err)
 	}
-	for _, name := range []string{"pool-a", "pool-c"} {
-		if got := w.member(name); got.State != memberReady {
-			t.Errorf("%s = %+v, want it ready", name, got)
-		}
+	if got := w.member("pool-a"); got.State != memberReady {
+		t.Errorf("pool-a = %+v, want it kept ready", got)
 	}
 	failed := w.member("pool-b")
 	if failed.State != memberFailed || failed.Failure == nil || failed.Failure.Step != string(sprites.StepCommand) || failed.Failure.Exit == nil || *failed.Failure.Exit != 1 || failed.Failure.HTTPStatus != nil {
@@ -1107,13 +1103,13 @@ func TestAFillTriesARejectedCreateOnceMoreUnderANewName(t *testing.T) {
 			t.Errorf("the fill destroyed a machine after the rejected create: %q", call)
 		}
 	}
-	if creates != 2 || provider.creates.Load() != 1 {
-		t.Errorf("creates = %d made and %d rejected, want two made and one rejected", creates, provider.creates.Load())
+	if creates != 1 || provider.creates.Load() != 1 {
+		t.Errorf("creates = %d made and %d rejected, want one of each and no retry", creates, provider.creates.Load())
 	}
 }
 
-func TestWarmFillTriesAFailedCreateOnceMoreAndReportsBoth(t *testing.T) {
-	w := newWarmPool(t, "pool-a", "pool-b")
+func TestWarmFillRecordsAFailedCreateWithoutRetrying(t *testing.T) {
+	w := newWarmPool(t, "pool-a")
 	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
 		if strings.Contains(cmd[len(cmd)-1], "clone --quiet") {
 			return providers.Result{ExitCode: 1, Stderr: []byte("fatal: sk-leakedsecret could not read the origin\n")}
@@ -1122,26 +1118,61 @@ func TestWarmFillTriesAFailedCreateOnceMoreAndReportsBoth(t *testing.T) {
 	}
 	pool := openPool(w.session)
 	fill, err := pool.fill(t.Context())
-	if err == nil || strings.Contains(err.Error(), "sk-leakedsecret") || strings.Contains(err.Error(), "fatal") || len(fill.Created) != 0 || len(fill.Ready) != 0 {
-		t.Fatalf("fill = %+v, %v; want both failed creates reported as metadata", fill, err)
+	if err == nil || !strings.Contains(err.Error(), "create warm workspace pool-a failed with exit 1 and HTTP status unknown at checkout;") || strings.Contains(err.Error(), "sk-leakedsecret") || strings.Contains(err.Error(), "fatal") || len(fill.Created) != 0 || len(fill.Ready) != 0 {
+		t.Fatalf("fill = %+v, %v; want the failed create reported as metadata", fill, err)
 	}
-	for _, name := range []string{"pool-a", "pool-b"} {
-		if !strings.Contains(err.Error(), "create warm workspace "+name+" failed with exit 1 and HTTP status unknown at checkout;") {
-			t.Errorf("fill = %v, want %s's failed checkout reported", err, name)
-		}
-		member := w.member(name)
-		if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "checkout" || member.Failure.Class != classExit || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-			t.Errorf("%s = %+v with failure %+v, want it failed at the checkout with exit 1 and error metadata", name, member, member.Failure)
-		}
-		if stored, err := os.ReadFile(w.session.Config.State().Pool(name)); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) {
-			t.Errorf("the pool record kept remote output: %s, %v", stored, err)
-		}
-		if !slices.Contains(w.provider.Calls(), "destroy "+name) {
-			t.Errorf("provider calls = %q, want the failed create of %s to remove its machine", w.provider.Calls(), name)
-		}
+	member := w.member("pool-a")
+	if member.State != memberFailed || member.Failure == nil || member.Failure.Step != "checkout" || member.Failure.Class != classExit || member.Failure.Exit == nil || *member.Failure.Exit != 1 || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+		t.Errorf("pool-a = %+v with failure %+v, want it failed at the checkout with exit 1 and error metadata", member, member.Failure)
+	}
+	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("fatal")) {
+		t.Errorf("the pool record kept remote output: %s, %v", stored, err)
+	}
+	if !slices.Contains(w.provider.Calls(), "destroy pool-a") {
+		t.Errorf("provider calls = %q, want the failed create to remove its machine", w.provider.Calls())
 	}
 	if claimed, _, err := pool.claim(t.Context(), "lane-a", "main"); err != nil || claimed != nil {
-		t.Errorf("claim = %+v, %v; want the failed spares kept out", claimed, err)
+		t.Errorf("claim = %+v, %v; want the failed spare kept out", claimed, err)
+	}
+}
+
+func TestAFillCountsASpareThatAnotherFillReadiedAfterItsCensus(t *testing.T) {
+	w := newWarmPool(t)
+	*w.session.Config.Orca.Pool.Ready = 2
+	pool := openPool(w.session)
+	w.spare(pool, "pool-a")
+	readied := &orcaMember{SchemaVersion: orcaPoolSchema, Name: "pool-b", Provider: "fake", Profile: "lean", Key: pool.key, State: memberProvisioning, CreatedAt: time.Now().UTC()}
+	if err := pool.save(readied); err != nil {
+		t.Fatal(err)
+	}
+	observed := &observing{Fake: w.provider, paused: newGate(), on: "pool-a"}
+	done := make(chan error, 1)
+	var fill *orcaFill
+	go func() {
+		var err error
+		fill, err = openPool(w.over(observed)).fill(t.Context())
+		done <- err
+	}()
+	select {
+	case <-observed.paused.reached:
+	case err := <-done:
+		t.Fatalf("the fill returned %v before its census observed pool-a", err)
+	}
+	readied.State = memberReady
+	if err := pool.save(readied); err != nil {
+		t.Fatal(err)
+	}
+	close(observed.paused.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if len(fill.Created) != 0 || !slices.Equal(fill.Ready, []string{"pool-a", "pool-b"}) {
+		t.Errorf("fill = %+v, want pool-b counted ready and nothing created past the target", fill)
+	}
+	for _, call := range w.provider.Calls() {
+		if strings.HasPrefix(call, "create ") {
+			t.Errorf("the fill overshot the target with %q", call)
+		}
 	}
 }
 
