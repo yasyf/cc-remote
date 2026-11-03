@@ -246,6 +246,9 @@ printf '%s\n' "${logged[*]}" >> "$TEST_ROOT/apt"
 if [ -n "${LD_PRELOAD:-}" ]; then
   printf '%s %s\n' "$LD_PRELOAD" "$(< "$LD_PRELOAD")" >> "$TEST_ROOT/preload"
 fi
+if [[ " $* " == *" --no-download "* && -n "${APT_FAIL_OFFLINE:-}" ]]; then
+  exit "$APT_FAIL_OFFLINE"
+fi
 if [ "$1" = install ] && [[ " $* " != *" --download-only "* ]]; then
   for arg in "$@"; do
     case "$arg" in
@@ -548,7 +551,8 @@ func assertPackagesStoreHolds(t *testing.T, root string, want ...string) {
 func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 	base := "installed\tbase-files=13\ninstalled\tlibc6=2.42-1\n"
 	install := "install -y -qq --no-download -o Dpkg::Options::=--force-unsafe-io --no-install-recommends -o Dir::Cache::Archives=@CACHE@/ @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/libeatmydata1_131-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
-	drifted := "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:\n"
+	online := "update -qq\ninstall -y -qq --no-install-recommends @DEBS@/bubblewrap_0.11.0-2_amd64.deb @DEBS@/libeatmydata1_131-2_amd64.deb @DEBS@/openssh-server_1%3a9.9p1-3_amd64.deb\n"
+	drifted := "cc-remote: the resident packages did not install offline, so they install online once, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:\n"
 	shadowing := "cc-remote: the resident install left closure packages installed, whose system copies would shadow the payload; move them to apt.payload.resident or recreate the machine:\n"
 	tests := []struct {
 		name        string
@@ -569,14 +573,17 @@ func TestProvisionPackagesInstallsTheCapturedDebsOffline(t *testing.T) {
 		{name: "the captured debs install offline", apt: install},
 		{name: "the install runs with man-db's auto-update set aside and puts it back", autoUpdate: true, apt: install},
 		{name: "a failing install still puts man-db's auto-update back", autoUpdate: true, env: []string{"APT_FAIL=100"}, apt: install, exit: 100},
-		{name: "a failing install on a drifted base names the drift and puts man-db's auto-update back", autoUpdate: true, base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
+		{name: "a failing online install on a drifted base names the drift and puts man-db's auto-update back", autoUpdate: true, base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL=100"}, apt: install + "update -qq\n", exit: 100, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
 		{name: "a corrupted deb fails before apt and leaves man-db's auto-update in place", autoUpdate: true, corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
 		{name: "a repeat run over the installed resident packages passes", base: base + "installed\tbubblewrap=0.11.0-2\ninstalled\topenssh-server=1:9.9p1-3\n", apt: install},
 		{name: "packages dpkg only knows or keeps the configuration of are not part of the base", base: base + "config-files\told=1\nnot-installed\tgone=2\n", apt: install},
+		{name: "debs that will not install offline on a drifted base install online once, and the drift is named", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL_OFFLINE=100"}, apt: install + online, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
+		{name: "an online install over a drifted base still puts man-db's auto-update back", autoUpdate: true, base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL_OFFLINE=100"}, apt: install + online, wantErr: drifted},
+		{name: "debs that will not install offline on the captured base never go online", env: []string{"APT_FAIL_OFFLINE=100"}, apt: install, exit: 100},
 		{name: "a drifted base the captured debs still install on passes", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", apt: install},
-		{name: "a failing install names a drifted base version", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
-		{name: "a failing install names an extra base package", base: base + "installed\tvim=2\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "+vim=2\n"},
-		{name: "a failing install names a missing base package", base: "installed\tbase-files=13\n", env: []string{"APT_FAIL=100"}, apt: install, exit: 100, wantErr: drifted + "-libc6=2.42-1\n"},
+		{name: "a failing online install names a drifted base version", base: "installed\tbase-files=14\ninstalled\tlibc6=2.42-1\n", env: []string{"APT_FAIL=100"}, apt: install + "update -qq\n", exit: 100, wantErr: drifted + "-base-files=13\n+base-files=14\n"},
+		{name: "a failing online install names an extra base package", base: base + "installed\tvim=2\n", env: []string{"APT_FAIL=100"}, apt: install + "update -qq\n", exit: 100, wantErr: drifted + "+vim=2\n"},
+		{name: "a failing online install names a missing base package", base: "installed\tbase-files=13\n", env: []string{"APT_FAIL=100"}, apt: install + "update -qq\n", exit: 100, wantErr: drifted + "-libc6=2.42-1\n"},
 		{name: "a corrupted deb fails before apt", corrupt: true, exit: 1, wantErr: "/openssh-server_1%3a9.9p1-3_amd64.deb does not match its sha256 "},
 		{name: "an archive without the libeatmydata1 deb fails before apt", noEatmydata: true, exit: 1, wantErr: "cc-remote: the packages archive captured no libeatmydata1 deb, which the resident install preloads to skip dpkg's syncs; rebuild the payload"},
 		{name: "a libeatmydata1 deb without its library fails before apt", env: []string{"DPKG_DEB=nolib"}, exit: 1, wantErr: "cc-remote: libeatmydata1_131-2_amd64.deb holds 0 libeatmydata.so files, not one"},
