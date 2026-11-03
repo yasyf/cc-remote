@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **`cc-remote suspend` passes over a Sprite service that already exited.** The
+  Sprites API answers 409 to stopping a service that is not running, which
+  ended the suspend and every `cc-remote orca stop` on such a Sprite.
 - **Go's caches stay in the home.** A Sprite's Go puts its module cache under
   `/.sprite/languages/go/workspace/pkg/mod`, outside the home volume, and that
   cache served empty files. Builds failed with `expected 'package', found

@@ -284,7 +284,7 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		if status/100 != 2 {
+		if status/100 != 2 && status != 409 {
 			return fmt.Errorf("suspending sprite %s: %w stopping service %s: %s", id, &StatusError{Status: status}, running.Name, bytes.TrimSpace(body))
 		}
 	}
