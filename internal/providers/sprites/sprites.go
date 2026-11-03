@@ -38,6 +38,7 @@ const (
 	StepPreflight CreateStep = "create.preflight"
 	StepCommand   CreateStep = "create.command"
 	StepReadback  CreateStep = "create.readback"
+	StepLabel     CreateStep = "create.label"
 	StepRecord    CreateStep = "create.record"
 )
 
@@ -45,7 +46,9 @@ type Config struct {
 	Org      string `yaml:"org"`
 	CLI      string `yaml:"cli"`
 	StateDir string `yaml:"-"`
-	Helper   string `yaml:"-"`
+
+	ConnectorLabels []string `yaml:"connector_labels"`
+	Helper          string   `yaml:"-"`
 }
 
 func (c Config) validate() error {
@@ -149,11 +152,32 @@ func (p *Provider) Create(ctx context.Context, spec providers.Spec) (providers.M
 	if err != nil {
 		return named, &CreateError{Step: StepReadback, Err: fmt.Errorf("sprite %s: %w: created but unreadable: %w", spec.Name, providers.ErrAmbiguous, err)}
 	}
+	if err := p.labelForConnectors(ctx, spec.Name); err != nil {
+		return named, &CreateError{Step: StepLabel, Err: fmt.Errorf("sprite %s: %w: created but its Connector labels were not set: %w", spec.Name, providers.ErrAmbiguous, err)}
+	}
 	if err := p.records().Save(spec.Name, spec.Labels, created.CreatedAt); err != nil {
 		return named, &CreateError{Step: StepRecord, Err: fmt.Errorf("sprite %s: %w: created but its labels were not recorded: %w", spec.Name, providers.ErrAmbiguous, err)}
 	}
 	created.Labels = maps.Clone(spec.Labels)
 	return created, nil
+}
+
+func (p *Provider) labelForConnectors(ctx context.Context, id string) error {
+	if len(p.ConnectorLabels) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(map[string][]string{"labels": p.ConnectorLabels})
+	if err != nil {
+		return err
+	}
+	status, _, err := p.api(ctx, "/v1/sprites/"+id, "-X", "PUT", "-H", "Content-Type: application/json", "-d", string(body))
+	if err != nil {
+		return err
+	}
+	if status != 200 {
+		return &StatusError{Status: status}
+	}
+	return nil
 }
 
 type sprite struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"regexp"
@@ -200,6 +201,46 @@ func ParseKeyDir(out []byte) (string, error) {
 
 const typesafeVariable = "TYPESAFE_API_KEY"
 
+const openAIBaseURL = "https://api.openai.com"
+
+const ConnectorListScript = "exec curl -fsS --max-time 30 https://api.sprites.dev/v1/gateway/list"
+
+type Route struct {
+	Provider, Variable, BaseURL string
+}
+
+func ParseRoutes(list []byte, connectors map[string]config.Connector) ([]Route, error) {
+	type connection struct {
+		Provider string `json:"provider"`
+		BaseURL  string `json:"gateway_base_url"`
+	}
+	var parsed struct {
+		Connections []connection `json:"connections"`
+	}
+	if err := json.Unmarshal(list, &parsed); err != nil {
+		return nil, fmt.Errorf("parse the Connector list: %w", err)
+	}
+	routes := make([]Route, 0, len(connectors))
+	for _, provider := range slices.Sorted(maps.Keys(connectors)) {
+		found := slices.IndexFunc(parsed.Connections, func(c connection) bool { return c.Provider == provider })
+		if found < 0 {
+			return nil, fmt.Errorf("this machine may use no %s Connector; create one and give the machine a label its policy allows", provider)
+		}
+		routes = append(routes, Route{Provider: provider, Variable: connectors[provider].BaseURLVariable, BaseURL: strings.TrimRight(parsed.Connections[found].BaseURL, "/")})
+	}
+	return routes, nil
+}
+
+func openAIProviderURL(routes []Route) string {
+	base := openAIBaseURL
+	for _, route := range routes {
+		if route.Provider == config.KeyOpenAI {
+			base = route.BaseURL
+		}
+	}
+	return base + "/v1"
+}
+
 const trunkVariable = "TRUNK_MERGE_API_KEY"
 
 var githubVariables = []string{"GH_TOKEN", "GITHUB_TOKEN"}
@@ -289,7 +330,7 @@ func CredentialEnv() []string {
 	return append(names, typesafeVariable)
 }
 
-func (a Agent) Argv(policy ShellPolicy) []string {
+func (a Agent) Argv(policy ShellPolicy, routes ...Route) []string {
 	if a.Kind == AgentCodex {
 		servers := noCodexMCP
 		if len(a.MCP) == 1 {
@@ -299,7 +340,7 @@ func (a Agent) Argv(policy ShellPolicy) []string {
 			"codex", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox", "--model", a.Model,
 			"-c", `model_reasoning_effort="` + a.Effort + `"`,
 			"-c", `model_provider="cc_remote_openai"`,
-			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="https://api.openai.com/v1",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
+			"-c", `model_providers.cc_remote_openai={name="OpenAI remote worker",base_url="` + openAIProviderURL(routes) + `",env_key="OPENAI_API_KEY",requires_openai_auth=false,wire_api="responses"}`,
 			"-c", `cli_auth_credentials_store="ephemeral"`,
 			"-c", policy.override(),
 			"-c", "mcp_servers=" + servers,
@@ -339,8 +380,12 @@ func (a Agent) JudgeKeyProvider() string {
 	return a.judge().KeyProvider()
 }
 
-func (a Agent) Command(dir string, policy ShellPolicy) string {
+func (a Agent) Command(dir string, policy ShellPolicy, routes ...Route) string {
 	judge := a.judge()
+	exports := a.exports()
+	for _, route := range routes {
+		exports = append(exports, route.Variable+"="+remote.Quote(route.BaseURL))
+	}
 	script := strings.Join([]string{
 		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
 		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable}, githubVariables), " "),
@@ -351,8 +396,8 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$github" || ` + githubCredentials + `; }`,
 		`{ test -z "$trunk" || export ` + trunkVariable + `="$trunk"; }`,
 		"unset key judge typesafe github trunk name email",
-		"export " + strings.Join(a.exports(), " "),
-		"exec " + remote.QuoteAll(a.Argv(policy)),
+		"export " + strings.Join(exports, " "),
+		"exec " + remote.QuoteAll(a.Argv(policy, routes...)),
 	}, " && ")
 	return "exec sh -c " + remote.Quote(script)
 }

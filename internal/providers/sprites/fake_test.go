@@ -26,6 +26,7 @@ type fakeSprite struct {
 	authorized []string
 	services   map[string]string
 	held       bool
+	labels     []string
 }
 
 type fakeSprites struct {
@@ -38,6 +39,7 @@ type fakeSprites struct {
 	createRejects   string
 	createFails     string
 	readbackStatus  int
+	labelStatus     int
 	destroySurvives bool
 
 	mu      sync.Mutex
@@ -109,7 +111,8 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 		f.t.Fatalf("sprite api %q", args)
 	}
 	post := slices.Equal(args[5:], []string{"-X", "POST"})
-	if !post && len(args) != 5 {
+	put := len(args) == 11 && slices.Equal(args[5:10], []string{"-X", "PUT", "-H", "Content-Type: application/json", "-d"})
+	if !post && !put && len(args) != 5 {
 		f.t.Fatalf("sprite api %q", args)
 	}
 	respond := func(status int, body any) (providers.Result, error) {
@@ -118,6 +121,19 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 			f.t.Fatal(err)
 		}
 		return providers.Result{Stdout: fmt.Appendf(raw, "\n%d", status)}, nil
+	}
+	if put {
+		if f.labelStatus != 0 {
+			return respond(f.labelStatus, map[string]string{"error": "refused"})
+		}
+		var update struct {
+			Labels []string `json:"labels"`
+		}
+		if err := json.Unmarshal([]byte(args[10]), &update); err != nil {
+			f.t.Fatal(err)
+		}
+		f.sprites[strings.TrimPrefix(args[0], "/v1/sprites/")].labels = update.Labels
+		return respond(200, map[string]any{"labels": update.Labels})
 	}
 	if f.status != 0 {
 		return respond(f.status, map[string]string{"error": "unauthorized"})

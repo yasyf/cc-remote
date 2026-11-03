@@ -200,6 +200,19 @@ func TestParseFillsOrcaDefaults(t *testing.T) {
 	}
 }
 
+func TestOrcaConnectorReplacesTheDefaultKeychainCommand(t *testing.T) {
+	cfg, err := Parse([]byte(minimal + "orca:\n  connectors:\n    anthropic: {base_url_variable: ANTHROPIC_BASE_URL, placeholder: sprites}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command, ok := cfg.Orca.Keys["anthropic"]; ok {
+		t.Errorf("a Connector provider kept key command %q", command)
+	}
+	if got := cfg.Orca.Keys["openai"][0]; got != "/usr/bin/security" {
+		t.Errorf("openai key command = %q, want the default for a provider with no Connector", got)
+	}
+}
+
 func TestOrcaKeepsConfiguredKeysAndTrust(t *testing.T) {
 	cfg, err := Parse([]byte(minimal + "orca:\n  keys:\n    openai: [pass, show, openai]\n  trust: [example]\n"))
 	if err != nil {
@@ -342,6 +355,18 @@ func TestParseRefusesWhatCannotRun(t *testing.T) {
 		{"orca entry is absolute", func(s string) string { return s + "orca:\n  entry: /opt/AppRun\n" }, "orca.entry"},
 		{"orca key for an unknown provider", func(s string) string { return s + "orca:\n  keys:\n    other: [printf, k]\n" }, "orca.keys.other"},
 		{"orca key without a command", func(s string) string { return s + "orca:\n  keys:\n    openai: []\n" }, "orca.keys.openai"},
+		{"orca connector for an unknown provider", func(s string) string {
+			return s + "orca:\n  connectors:\n    github: {base_url_variable: GH_BASE, placeholder: p}\n"
+		}, "orca.connectors.github"},
+		{"orca connector beside a key command", func(s string) string {
+			return s + "orca:\n  keys:\n    openai: [printf, k]\n  connectors:\n    openai: {base_url_variable: OPENAI_BASE_URL, placeholder: p}\n"
+		}, "also under orca.keys"},
+		{"orca connector with a bad variable", func(s string) string {
+			return s + "orca:\n  connectors:\n    openai: {base_url_variable: 'A B', placeholder: p}\n"
+		}, "base_url_variable"},
+		{"orca connector without a placeholder", func(s string) string {
+			return s + "orca:\n  connectors:\n    openai: {base_url_variable: OPENAI_BASE_URL}\n"
+		}, "placeholder"},
 		{"orca trust names a repository", func(s string) string { return s + "orca:\n  trust: [example/app]\n" }, "orca.trust"},
 		{"negative orca pool", func(s string) string { return s + "orca:\n  pool:\n    ready: -1\n" }, "orca.pool.ready -1"},
 		{"orca pool with a spending cap", func(s string) string { return s + "orca:\n  pool:\n    ready: 1\n    budget: 10\n" }, "field budget not found"},
