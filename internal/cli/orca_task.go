@@ -277,12 +277,18 @@ func (l *orcaLaunch) bind(cmd *cobra.Command, mcp string) {
 	cmd.Flags().StringVar(&l.agent.Effort, "effort", "", "the worker's effort, passed through unchanged")
 	cmd.Flags().StringVar(&l.agent.Tier, "service-tier", "", "codex only: the worker's explicit service_tier, such as fast (default none)")
 	cmd.Flags().StringArrayVar(&l.agent.MCP, "mcp-config", nil, mcp)
+	cmd.Flags().StringArrayVar(&l.agent.Env, "env", nil, "NAME=VALUE the worker's environment exports (repeatable)")
 	cmd.Flags().StringVar(&l.title, "title", "", "Orca terminal title (default the workspace name)")
 	_ = cmd.MarkFlagRequired("model")
 	_ = cmd.MarkFlagRequired("effort")
 }
 
 func (l *orcaLaunch) run(cmd *cobra.Command, runner orca.Runner, name string, finish func(context.Context, orcaDriver, *orcaTask) error) error {
+	for _, pair := range l.agent.Env {
+		if name, _, ok := strings.Cut(pair, "="); !ok || name == "" {
+			return fmt.Errorf("--env %q is not NAME=VALUE", pair)
+		}
+	}
 	session, err := l.flags.open()
 	if err != nil {
 		return err

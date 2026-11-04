@@ -380,8 +380,8 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 		cleared  string
 		updater  string
 	}{
-		{orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "1"},
-		{orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e"}, "OPENAI_API_KEY", "CODEX_API_KEY", "unset"},
+		{orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Env: []string{"CLAUDE_LONG_RUNNING_LANE=lane 'a'"}}, "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "1"},
+		{orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e", Env: []string{"CLAUDE_LONG_RUNNING_LANE=lane 'a'"}}, "OPENAI_API_KEY", "CODEX_API_KEY", "unset"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.agent.Kind, func(t *testing.T) {
@@ -392,7 +392,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			worker := "#!/bin/sh\nprintf '%s|%s|%s|%s|%s\\n' \"$" + tt.variable + "\" \"${" + tt.cleared + "-unset}\" \"$CAPT_HOOK_ACTOR_JUDGE\" \"${DISABLE_AUTOUPDATER-unset}\" \"$1\"\n"
+			worker := "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s\\n' \"$" + tt.variable + "\" \"${" + tt.cleared + "-unset}\" \"$CAPT_HOOK_ACTOR_JUDGE\" \"${DISABLE_AUTOUPDATER-unset}\" \"$CLAUDE_LONG_RUNNING_LANE\" \"$1\"\n"
 			if err := os.WriteFile(filepath.Join(bin, tt.agent.Kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -414,7 +414,7 @@ func TestAgentCommandReadsTheKeyOnceAndExecsTheWorker(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.updater + "|" + tt.agent.Argv(orca.ShellPolicy{})[1] + "\n"
+			want := "sk-test-key|unset|" + tt.agent.Kind + "|" + tt.updater + "|lane 'a'|" + tt.agent.Argv(orca.ShellPolicy{})[1] + "\n"
 			if string(out) != want {
 				t.Errorf("worker saw %q, want %q", out, want)
 			}
