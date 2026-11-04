@@ -52,6 +52,7 @@ type Traits struct {
 	TailnetMode TailnetMode
 	Supervisor  Supervisor
 	Platform    string
+	GoBuildJobs int
 }
 
 type Spec struct {

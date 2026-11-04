@@ -87,6 +87,7 @@ func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
 		TailnetMode: providers.TailnetKernel,
 		Supervisor:  providers.SupervisorSpriteEnv,
+		GoBuildJobs: 4,
 	}
 }
 

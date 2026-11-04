@@ -40,12 +40,13 @@ var (
 )
 
 type Runtime struct {
-	Entry      string
-	Display    []string
-	Args       []string
-	Port       int
-	Advertise  string
-	Supervised bool
+	Entry       string
+	Display     []string
+	Args        []string
+	Port        int
+	Advertise   string
+	Supervised  bool
+	GoBuildJobs int
 }
 
 type Ready struct {
@@ -99,16 +100,21 @@ func (r Runtime) command() string {
 }
 
 func (r Runtime) Launcher() string {
-	return strings.Join([]string{
+	lines := []string{
 		"#!/bin/sh",
 		"set -eu",
 		"umask 077",
 		`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"`,
-		`cd "` + runtimeDir + `"`,
+	}
+	if r.GoBuildJobs > 0 {
+		lines = append(lines, "export GOFLAGS=-p="+strconv.Itoa(r.GoBuildJobs))
+	}
+	return strings.Join(append(lines,
+		`cd "`+runtimeDir+`"`,
 		"exec 9> serve.lock",
 		"flock -n 9 || exit 0",
-		"exec " + r.command() + " > serve.json 2>> serve.log",
-	}, "\n")
+		"exec "+r.command()+" > serve.json 2>> serve.log",
+	), "\n")
 }
 
 func (r Runtime) start() string {

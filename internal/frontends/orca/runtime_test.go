@@ -153,16 +153,18 @@ func TestFirstUseCheckRefusesAnyEarlierRuntimeState(t *testing.T) {
 
 func TestRuntimeLauncher(t *testing.T) {
 	runtime := orca.Runtime{
-		Entry:   ".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun",
-		Display: []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"},
-		Args:    []string{"--log-level", "info"},
-		Port:    7001,
+		Entry:       ".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun",
+		Display:     []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"},
+		Args:        []string{"--log-level", "info"},
+		Port:        7001,
+		GoBuildJobs: 4,
 	}
 	want := strings.Join([]string{
 		"#!/bin/sh",
 		"set -eu",
 		"umask 077",
 		`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"`,
+		"export GOFLAGS=-p=4",
 		`cd "$HOME/.cc-remote/orca"`,
 		"exec 9> serve.lock",
 		"flock -n 9 || exit 0",
