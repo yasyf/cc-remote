@@ -43,6 +43,7 @@ const (
 	prepares       = "cd /home/fake/app\n"
 	noState        = `{"BackendState":"NoState"}`
 	provisions     = "sudo bash -s"
+	movesToDisk    = "sudo --preserve-env=PATH bash -s /fast"
 	prereqsPhase   = "sudo bash -s prerequisites"
 	packagesPhase  = "sudo bash -s packages"
 	toolsPhase     = "sudo bash -s tools"
@@ -585,6 +586,43 @@ func (h *harness) ordered(from int, fragments ...string) []int {
 		}
 	}
 	return order
+}
+
+func TestACreateMovesToTheLocalDiskBeforeItWritesAnythingElse(t *testing.T) {
+	h := build(t, true, inventory, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv, LocalDisk: "/fast"})
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(0, movesToDisk, prereqsPhase, packagesPhase, publishes)
+	h.ordered(0, movesToDisk, prereqsPhase, checkout)
+	if first := h.machine.scripts["ws-1"][0]; first != movesToDisk {
+		t.Errorf("the first command on the machine was %q, want %q", first, movesToDisk)
+	}
+	if h.machine.ran("ws-1", movesToDisk) != 1 {
+		t.Errorf("the move ran other than once: %q", h.machine.scripts["ws-1"])
+	}
+}
+
+func TestAResumeBindsTheHomeAgainBeforeItReadsTheTools(t *testing.T) {
+	h := build(t, true, inventory, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv, LocalDisk: "/fast"})
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	from := len(h.machine.scripts["ws-1"])
+	if _, err := h.session.Resume(context.Background(), "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(from, "cc-remote-local-disk", readies)
+}
+
+func TestAProviderWithNoLocalDiskMovesNothing(t *testing.T) {
+	h := newHarness(t, true)
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.machine.ran("ws-1", "--preserve-env=PATH bash -s /") != 0 {
+		t.Errorf("a provider with no local disk ran the move: %q", h.machine.scripts["ws-1"])
+	}
 }
 
 func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {

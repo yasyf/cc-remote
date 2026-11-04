@@ -24,6 +24,7 @@ const (
 	nameLimit  = 55
 	user       = "sprite"
 	pageSize   = 500
+	localDisk  = "/tmp"
 	// fs/read ends every response at 2147479552 bytes, even one whose Content-Range claims more.
 	downloadChunk = 1 << 30
 )
@@ -88,6 +89,7 @@ func (p *Provider) Traits() providers.Traits {
 		TailnetMode: providers.TailnetKernel,
 		Supervisor:  providers.SupervisorSpriteEnv,
 		GoBuildJobs: 4,
+		LocalDisk:   localDisk,
 	}
 }
 

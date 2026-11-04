@@ -504,6 +504,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if err := s.adopt(ctx, machine); err != nil {
 		return nil, err
 	}
+	if err := s.moveToLocalDisk(ctx, machine); err != nil {
+		return nil, err
+	}
 	if err := s.installPrerequisites(ctx, machine); err != nil {
 		return nil, err
 	}
@@ -666,6 +669,26 @@ func (s *Session) adopt(ctx context.Context, machine string) error {
 	}
 	s.Log.Info("adopted the baked tools", "machine", machine, "image", s.image)
 	return nil
+}
+
+func (s *Session) wake(ctx context.Context, machine string) error {
+	if err := s.Provider.Wake(ctx, machine); err != nil {
+		return err
+	}
+	if s.Provider.Traits().LocalDisk == "" {
+		return nil
+	}
+	return s.Scripts.RebindLocalDisk(ctx, s.exec(machine))
+}
+
+func (s *Session) moveToLocalDisk(ctx context.Context, machine string) error {
+	disk := s.Provider.Traits().LocalDisk
+	if disk == "" {
+		return nil
+	}
+	return s.timed(ctx, laneMain, "local.disk", machine, func() error {
+		return s.Scripts.MoveToLocalDisk(ctx, s.exec(machine), disk)
+	})
 }
 
 func (s *Session) installPrerequisites(ctx context.Context, machine string) error {
@@ -1216,7 +1239,7 @@ func (s *Session) Reuse(ctx context.Context, name string, source Source) (*Resul
 			return nil, err
 		}
 	}
-	if err := s.Provider.Wake(ctx, record.Machine); err != nil {
+	if err := s.wake(ctx, record.Machine); err != nil {
 		return nil, err
 	}
 	if err := s.toolsReady(ctx, record); err != nil {
@@ -1286,7 +1309,7 @@ func (s *Session) deliver(ctx context.Context, record *Record) (*Result, error) 
 
 func (s *Session) reopen(ctx context.Context, record *Record) error {
 	machine := record.Machine
-	if err := s.Provider.Wake(ctx, machine); err != nil {
+	if err := s.wake(ctx, machine); err != nil {
 		return err
 	}
 	if err := s.readyTools(ctx, record); err != nil {

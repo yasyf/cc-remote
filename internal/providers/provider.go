@@ -49,6 +49,7 @@ const (
 )
 
 type Traits struct {
+	LocalDisk   string
 	TailnetMode TailnetMode
 	Supervisor  Supervisor
 	Platform    string
