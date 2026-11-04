@@ -88,6 +88,7 @@ type scripted struct {
 	minted        string
 	fail          error
 	failAll       bool
+	answer        func(string) (providers.Result, bool)
 	joined        bool
 	tailscaleFrom string
 	tailscale     bool
@@ -183,7 +184,7 @@ func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Resu
 	}
 	m.scripts[id] = append(m.scripts[id], script)
 	m.stdins[id] = append(m.stdins[id], strings.TrimSpace(string(stdin)))
-	failAll, joined, baked := m.failAll, m.joined, m.baked
+	failAll, joined, baked, answer := m.failAll, m.joined, m.baked, m.answer
 	missing := m.tailscaleFrom != "" && !m.tailscale && strings.Contains(script, "tailscale")
 	var held *hold
 	for fragment, h := range m.holds {
@@ -208,6 +209,11 @@ func (m *scripted) handle(id, script, stamp string, stdin []byte) providers.Resu
 	if held != nil {
 		close(held.entered)
 		return <-held.release
+	}
+	if answer != nil {
+		if result, answered := answer(script); answered {
+			return result
+		}
 	}
 	if failAll {
 		return providers.Result{Stderr: []byte("the machine went away"), ExitCode: 1}
@@ -2713,6 +2719,66 @@ func TestTheClosureNeedsItsPackagesArchivePin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResidentPackagesThatFailOnADifferingBaseInstallOnlineOnceAndTryAgain(t *testing.T) {
+	const (
+		offline = packagesPhase + " resident " + packagesSHA
+		online  = "sudo bash -s " + packagesSHA
+		refusal = "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:\n+tmux=1\n-tmux=2"
+	)
+	failing := func(result providers.Result, fragments map[string]int) func(string) (providers.Result, bool) {
+		return func(script string) (providers.Result, bool) {
+			for fragment, left := range fragments {
+				if strings.Contains(script, fragment) && left > 0 {
+					fragments[fragment]--
+					return result, true
+				}
+			}
+			return providers.Result{}, false
+		}
+	}
+	drift := providers.Result{Stderr: []byte(refusal), ExitCode: 100}
+	t.Run("the retry passes", func(t *testing.T) {
+		h := newPayloadHarness(t)
+		h.machine.answer = failing(drift, map[string]int{offline: 1})
+		if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+			t.Fatal(err)
+		}
+		h.ordered(h.ordered(0, offline, online)[1]+1, offline)
+		if got := h.machine.ran("ws-1", online); got != 1 {
+			t.Errorf("went online %d times, want once", got)
+		}
+	})
+	t.Run("an offline failure with no drift never goes online", func(t *testing.T) {
+		h := newPayloadHarness(t)
+		h.machine.answer = failing(providers.Result{Stderr: []byte("E: the archive is damaged"), ExitCode: 100}, map[string]int{offline: 1})
+		if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err == nil || !strings.Contains(err.Error(), "the archive is damaged") {
+			t.Fatal(err)
+		}
+		if got := h.machine.ran("ws-1", online); got != 0 {
+			t.Errorf("went online %d times", got)
+		}
+	})
+	t.Run("a failed online install names the drift and its own failure", func(t *testing.T) {
+		h := newPayloadHarness(t)
+		h.machine.answer = func(script string) (providers.Result, bool) {
+			switch {
+			case strings.Contains(script, offline):
+				return drift, true
+			case strings.Contains(script, online):
+				return providers.Result{Stderr: []byte("E: Unable to fetch"), ExitCode: 100}, true
+			}
+			return providers.Result{}, false
+		}
+		_, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"})
+		if err == nil || !strings.Contains(err.Error(), "+tmux=1") || !strings.Contains(err.Error(), "Unable to fetch") {
+			t.Fatal(err)
+		}
+		if got := h.machine.ran("ws-1", offline); got != 1 {
+			t.Errorf("ran the offline install %d times after the online install failed, want once", got)
+		}
+	})
 }
 
 func TestAResumeInstallsTheResidentPackagesFromTheNewArchive(t *testing.T) {
