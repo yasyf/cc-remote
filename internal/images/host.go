@@ -53,6 +53,11 @@ const (
 	PackagesResident = "resident"
 )
 
+const (
+	LocalDiskService = "cc-remote-local-disk"
+	localDiskBoot    = "/opt/cc-remote/local-disk.sh"
+)
+
 const BaseDriftListing = "(-payload +machine); rebuild the payload on this base:\n"
 
 const installPackagesOnline = `set -euo pipefail
@@ -62,6 +67,37 @@ mapfile -t debs < <(jq -r --arg dir "$dir" '.debs[] | $dir + "/" + .file' "$dir/
 apt-get update -qq < /dev/null
 apt-get install -y -qq --no-install-recommends "${debs[@]}" < /dev/null > /dev/null
 tar -cf "$dir.tar.admitted" -C "$dir" .
+`
+
+const moveToLocalDisk = `set -euo pipefail
+disk="$1"
+home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+boot=` + localDiskBoot + `
+store=/var/lib/cc-remote
+root="$disk/.cc-remote"
+install -d -m 0755 "$root/store" "$(dirname "$boot")"
+ln -s "$root/store" "$store"
+cat > "$boot" <<SH
+#!/bin/sh
+set -eu
+exec 9> "$root/.lock"
+flock 9
+if [ ! -d "$root/home" ]; then
+  rm -rf "$root/home.partial"
+  cp -a "$home" "$root/home.partial"
+  mv "$root/home.partial" "$root/home"
+fi
+mountpoint -q "$home" || mount --bind "$root/home" "$home"
+SH
+chmod 0755 "$boot"
+"$boot"
+sprite-env services create ` + LocalDiskService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
+`
+
+const rebindLocalDisk = `if [ -x ` + localDiskBoot + ` ]; then
+  sudo -n ` + localDiskBoot + `
+  sprite-env services start ` + LocalDiskService + ` --duration 1ms
+fi
 `
 
 const stagePlugins = `set -eu
@@ -343,6 +379,21 @@ func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ..
 func (s Scripts) InstallPackagesOnline(ctx context.Context, exec Exec, digest string) error {
 	if err := exec(ctx, []string{"sudo", "bash", "-s", digest}, strings.NewReader(installPackagesOnline)); err != nil {
 		return fmt.Errorf("install packages online: %w", err)
+	}
+	return nil
+}
+
+func (s Scripts) MoveToLocalDisk(ctx context.Context, exec Exec, disk string) error {
+	// sudo's secure_path drops /.sprite/bin, where the script finds sprite-env.
+	if err := exec(ctx, []string{"sudo", "--preserve-env=PATH", "bash", "-s", disk}, strings.NewReader(moveToLocalDisk)); err != nil {
+		return fmt.Errorf("move to the local disk %s: %w", disk, err)
+	}
+	return nil
+}
+
+func (s Scripts) RebindLocalDisk(ctx context.Context, exec Exec) error {
+	if err := exec(ctx, []string{"sh", "-c", rebindLocalDisk}, nil); err != nil {
+		return fmt.Errorf("bind the home on the local disk again: %w", err)
 	}
 	return nil
 }

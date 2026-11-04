@@ -100,8 +100,20 @@ against their digests and remounts the files at boot, before dependent inventory
 services. With `apt.payload`, it skips the loop-device check for a mount that
 the payload phase admitted during the current boot.
 
-Startup runs `provision.sh prerequisites` on machines provisioned in place, then
-runs these lanes concurrently:
+A provider whose home sits on a slower disk than one attached to the machine
+names that disk as its `LocalDisk` trait. On Sprites the home and every other
+path under the root filesystem are on `nbd0`, a network disk, and `/tmp` is the
+local `vdb`. Before anything else runs, create copies the home onto that disk,
+binds the copy over the home, and links `/var/lib/cc-remote`, which holds the
+payload and packages archives, to the same disk. Every install, checkout, cache
+and database then lands there at its usual path, with no tool configured for it.
+The `cc-remote-local-disk` service binds the copy again after every boot, and a resume or reuse binds it itself before it reads the tools, since a suspend stops that service. A bind
+keeps the home's path canonical, which `capt-hookd` and the payload's manifest
+require and a symlink would not. A home is bound only on a machine created this
+way: moving a used one in place would split the databases its daemons hold open.
+
+Startup then runs `provision.sh prerequisites` on machines provisioned in place,
+and these lanes concurrently:
 
 | Lane | Order |
 | --- | --- |
