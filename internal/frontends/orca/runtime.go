@@ -68,6 +68,7 @@ type Agent struct {
 	Effort string   `json:"effort"`
 	Tier   string   `json:"serviceTier,omitempty"`
 	MCP    []string `json:"mcp,omitempty"`
+	Env    []string `json:"env,omitempty"`
 }
 
 const KeyDirScript = `set -eu
@@ -321,11 +322,11 @@ func (a Agent) Argv(policy ShellPolicy) []string {
 }
 
 func (a Agent) exports() []string {
-	judge := "CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind)
+	exports := append([]string{"CAPT_HOOK_ACTOR_JUDGE=" + remote.Quote(a.Kind)}, quoted(a.Env)...)
 	if a.Kind == AgentCodex {
-		return []string{judge}
+		return exports
 	}
-	return []string{judge, "DISABLE_AUTOUPDATER=1"}
+	return append(exports, "DISABLE_AUTOUPDATER=1")
 }
 
 func (a Agent) judge() Agent {
