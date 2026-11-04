@@ -53,6 +53,17 @@ const (
 	PackagesResident = "resident"
 )
 
+const BaseDriftListing = "(-payload +machine); rebuild the payload on this base:\n"
+
+const installPackagesOnline = `set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+dir=` + PackagesStore + `/"$1"
+mapfile -t debs < <(jq -r --arg dir "$dir" '.debs[] | $dir + "/" + .file' "$dir/debs.json")
+apt-get update -qq < /dev/null
+apt-get install -y -qq --no-install-recommends "${debs[@]}" < /dev/null > /dev/null
+tar -cf "$dir.tar.admitted" -C "$dir" .
+`
+
 const stagePlugins = `set -eu
 mkdir -p "$HOME/.cc-remote"
 cat > "` + PluginsPath + `.tmp"
@@ -325,6 +336,13 @@ func (s Scripts) Provision(ctx context.Context, exec Exec, phase string, args ..
 	argv := slices.Concat(sudo, []string{"bash", "-s", phase}, args)
 	if err := exec(ctx, argv, bytes.NewReader(s.ProvisionScript)); err != nil {
 		return fmt.Errorf("provision %s: %w", phase, err)
+	}
+	return nil
+}
+
+func (s Scripts) InstallPackagesOnline(ctx context.Context, exec Exec, digest string) error {
+	if err := exec(ctx, []string{"sudo", "bash", "-s", digest}, strings.NewReader(installPackagesOnline)); err != nil {
+		return fmt.Errorf("install packages online: %w", err)
 	}
 	return nil
 }

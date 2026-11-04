@@ -692,12 +692,31 @@ func (s *Session) installPackages(ctx context.Context, machine string, stage tra
 		mode = []string{images.PackagesResident}
 	}
 	if err := s.timed(ctx, lanePackages, "packages", machine, func() error {
-		return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...)
+		err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...)
+		if err == nil || !s.closure {
+			return err
+		}
+		return s.installPackagesOnline(ctx, machine, err, mode)
 	}); err != nil {
 		return err
 	}
 	s.Log.Info("installed the packages", "machine", machine)
 	return nil
+}
+
+func (s *Session) installPackagesOnline(ctx context.Context, machine string, failed error, mode []string) error {
+	_, differs, drifted := strings.Cut(failed.Error(), images.BaseDriftListing)
+	if !drifted {
+		return failed
+	}
+	said := "cc-remote: the resident packages did not install offline, so they install online once, and the packages on this machine differ from the base its payload captured them against " + images.BaseDriftListing + differs + "\n"
+	if err := s.writeStderr([]byte(said)); err != nil {
+		return err
+	}
+	if err := s.Scripts.InstallPackagesOnline(ctx, s.exec(machine), s.payload.Packages.SHA256); err != nil {
+		return errors.Join(failed, err)
+	}
+	return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...)
 }
 
 func (s *Session) registerClosure(ctx context.Context, machine string) error {

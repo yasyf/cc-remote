@@ -126,9 +126,8 @@ uncaptured() {
   awk -F= -v list="$tmp_dir/captured" 'BEGIN { while ((getline name < list) > 0) captured[name] } !($1 in captured)'
 }
 
-install_online_over_base_drift() {
+explain_base_drift() {
   local status="$1" manifest="$2" drift
-  shift 2
   {
     jq -r '.debs[].package, .artifacts[].package' "$manifest"
 {{- if $.Apt.Remove}}
@@ -138,13 +137,11 @@ install_online_over_base_drift() {
   jq -r '.base[]' "$manifest" | uncaptured > "$tmp_dir/base.payload" || exit
   base_packages | uncaptured > "$tmp_dir/base.machine" || exit
   drift="$(LC_ALL=C comm -3 "$tmp_dir/base.payload" "$tmp_dir/base.machine" | sed -e 's/^\t/+/' -e t -e 's/^/-/')" || exit
-  if [ -z "$drift" ]; then
-    exit "$status"
+  if [ -n "$drift" ]; then
+    echo "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:" >&2
+    printf '%s\n' "$drift" >&2
   fi
-  echo "cc-remote: the resident packages did not install offline, so they install online once, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:" >&2
-  printf '%s\n' "$drift" >&2
-  apt-get update -qq
-  apt-get install -y -qq --no-install-recommends "$@" > /dev/null
+  exit "$status"
 }
 
 unpack_eatmydata() {
@@ -225,7 +222,7 @@ provision_packages() {
       captured+=("$deb_dir/$file")
     done < "$tmp_dir/debs"
     unpack_eatmydata "$manifest"
-    LD_PRELOAD="$eatmydata" without_man_db_auto_update apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || install_online_over_base_drift "$?" "$manifest" "${captured[@]}"
+    LD_PRELOAD="$eatmydata" without_man_db_auto_update apt-get install -y -qq "${deb_flags[@]}" --no-install-recommends -o Dir::Cache::Archives="$tmp_dir/apt-archives/" "${captured[@]}" > /dev/null || explain_base_drift "$?" "$manifest"
   else
     apt-get update -qq
     mapfile -t t64_packages < <(t64{{range $.Apt.T64}} {{q .}}{{end}})
