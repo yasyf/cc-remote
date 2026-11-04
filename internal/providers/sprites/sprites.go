@@ -42,6 +42,10 @@ const (
 	StepRecord    CreateStep = "create.record"
 )
 
+const startFailure = "Error: failed to start sprite command: failed to connect"
+
+var startWaits = []time.Duration{2 * time.Second, 8 * time.Second}
+
 type Config struct {
 	Org      string `yaml:"org"`
 	CLI      string `yaml:"cli"`
@@ -339,12 +343,40 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	if stdin == nil {
 		args = append(args, "--no-stdin")
 	}
-	result, err := p.Runner.Run(ctx, p.command(stdin, append(append(args, "--"), cmd...)...))
+	command := append(append(args, "--"), cmd...)
+	result, err := p.Runner.Run(ctx, p.command(stdin, command...))
+	for _, wait := range startWaits {
+		if err != nil || !neverStarted(result) || !rewound(stdin) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-time.After(wait):
+		}
+		result, err = p.Runner.Run(ctx, p.command(stdin, command...))
+	}
 	if err != nil || result.ExitCode == 0 {
 		return result, err
 	}
 	_, err = p.Get(ctx, id)
 	return result, err
+}
+
+func neverStarted(result providers.Result) bool {
+	return result.ExitCode != 0 && len(result.Stdout) == 0 && bytes.HasPrefix(result.Stderr, []byte(startFailure))
+}
+
+func rewound(stdin io.Reader) bool {
+	if stdin == nil {
+		return true
+	}
+	seeker, ok := stdin.(io.Seeker)
+	if !ok {
+		return false
+	}
+	_, err := seeker.Seek(0, io.SeekStart)
+	return err == nil
 }
 
 func (p *Provider) Download(ctx context.Context, id, path string, w io.Writer) error {

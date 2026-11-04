@@ -66,6 +66,71 @@ func TestSpritesSatisfiesTheContract(t *testing.T) {
 	})
 }
 
+type startFailures struct {
+	providers.Runner
+	left   int
+	failed providers.Result
+	stdins []string
+}
+
+func (s *startFailures) Run(ctx context.Context, cmd providers.Command) (providers.Result, error) {
+	if cmd.Args[0] != "exec" {
+		return s.Runner.Run(ctx, cmd)
+	}
+	read, err := io.ReadAll(cmd.Stdin)
+	if err != nil {
+		return providers.Result{}, err
+	}
+	s.stdins = append(s.stdins, string(read))
+	if s.left == 0 {
+		return providers.Result{Stdout: []byte("ran")}, nil
+	}
+	s.left--
+	return s.failed, nil
+}
+
+type onlyReader struct{ io.Reader }
+
+func TestExecRunsAgainOnlyWhenTheCLINeverStartedTheCommandAndItsInputCanBeReadAgain(t *testing.T) {
+	waits := startWaits
+	startWaits = []time.Duration{0, 0}
+	t.Cleanup(func() { startWaits = waits })
+	neverRan := providers.Result{Stderr: []byte(startFailure + ": read tcp: operation timed out\n"), ExitCode: 1}
+	tests := []struct {
+		name       string
+		failures   int
+		failed     providers.Result
+		stdin      func() io.Reader
+		wantStdins []string
+		wantExit   int
+	}{
+		{name: "one failed connect runs again with the whole input", failures: 1, failed: neverRan, stdin: func() io.Reader { return strings.NewReader("input") }, wantStdins: []string{"input", "input"}},
+		{name: "two failed connects still run", failures: 2, failed: neverRan, stdin: func() io.Reader { return strings.NewReader("input") }, wantStdins: []string{"input", "input", "input"}},
+		{name: "three failed connects end in the failure", failures: 3, failed: neverRan, stdin: func() io.Reader { return strings.NewReader("input") }, wantStdins: []string{"input", "input", "input"}, wantExit: 1},
+		{name: "input that cannot be read again never runs twice", failures: 1, failed: neverRan, stdin: func() io.Reader { return onlyReader{strings.NewReader("input")} }, wantStdins: []string{"input"}, wantExit: 1},
+		{name: "a command that ran and printed the same words never runs twice", failures: 1, failed: providers.Result{Stderr: []byte("wrote the row\n" + startFailure + "\n"), ExitCode: 1}, stdin: func() io.Reader { return strings.NewReader("input") }, wantStdins: []string{"input"}, wantExit: 1},
+		{name: "a command that printed output and then those words never runs twice", failures: 1, failed: providers.Result{Stdout: []byte("wrote"), Stderr: neverRan.Stderr, ExitCode: 1}, stdin: func() io.Reader { return strings.NewReader("input") }, wantStdins: []string{"input"}, wantExit: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, fake := newProvider(t)
+			fake.sprites["s1"] = &fakeSprite{status: "running"}
+			runner := &startFailures{Runner: p.Runner, left: tt.failures, failed: tt.failed}
+			p.Runner = runner
+			result, err := p.Exec(context.Background(), "s1", []string{"true"}, tt.stdin())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ExitCode != tt.wantExit {
+				t.Errorf("exit %d, want %d", result.ExitCode, tt.wantExit)
+			}
+			if !slices.Equal(runner.stdins, tt.wantStdins) {
+				t.Errorf("runs read %q, want %q", runner.stdins, tt.wantStdins)
+			}
+		})
+	}
+}
+
 func TestExecChecksTheAPIOnlyAfterANonzeroCommandResult(t *testing.T) {
 	tests := []struct {
 		name, id, script, message string
