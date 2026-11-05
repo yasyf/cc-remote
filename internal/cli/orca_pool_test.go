@@ -315,6 +315,55 @@ func TestWarmPrepareCreatesTheLaneWorkspaceWhenThePoolIsEmpty(t *testing.T) {
 	}
 }
 
+func TestALaneWhoseOwnWorkspaceStoppedRelaunchesOnAWarmSpare(t *testing.T) {
+	w := newWarmPool(t, "pool-a")
+	standInFill(t)
+	t.Setenv("REMOTE_HOME", w.local.Home("lane-a"))
+	created, _ := w.nativeAs("lane-a")
+	if err := w.warm(t.Context(), w.session, created, io.Discard, "lane-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	w.free("lane-a")
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
+	}, "lane-a already has an Orca task under "+string(w.session.Config.State())+" whose worker started; a lane gets one first worker until cc-remote orca stop lane-a stops it")
+
+	dir := w.session.Config.State()
+	task, err := loadTask(dir, "lane-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Stopped = true
+	if err := state.Save(dir.Orca("lane-a"), task); err != nil {
+		t.Fatal(err)
+	}
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
+	}, "lane lane-a's own workspace lane-a keeps its earlier Orca task, so with no warm workspace ready the relaunch cannot create one under the lane's name")
+
+	pool := openPool(w.session)
+	if fill, err := pool.fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-a"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
+	}
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
+	native, commands := w.nativeAs("pool-a")
+	var out bytes.Buffer
+	if err := w.warm(t.Context(), w.session, native, &out, "lane-a", ""); err != nil {
+		t.Fatalf("relaunch = %v, want lane-a prepared on pool-a after its own workspace stopped", err)
+	}
+	if allocation := w.allocation(out.Bytes()); allocation.Lane != "lane-a" || allocation.Workspace != "pool-a" || allocation.Allocation != allocationWarm || allocation.Task == nil || allocation.Task.Terminal != "term-1" {
+		t.Errorf("allocation = %+v, want lane-a started on pool-a", allocation)
+	}
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant one worker's\n%q", native.calls, commands)
+	}
+	if workspace, err := pool.workspaceOf("lane-a"); err != nil || workspace != "pool-a" {
+		t.Errorf("lane-a runs on %q, %v; want pool-a, not its stopped own workspace", workspace, err)
+	}
+	w.free("pool-a")
+	w.free("lane-a")
+}
+
 func TestSimultaneousWarmClaimsTakeDistinctSpares(t *testing.T) {
 	w := newWarmPool(t)
 	pool := openPool(w.session)
@@ -767,6 +816,30 @@ func TestWarmClaimFailsWithoutClaimingWhenTheProviderCannotAnswer(t *testing.T) 
 		t.Errorf("pool-a = %+v, want it still unclaimed", got)
 	}
 	w.free("pool-a")
+}
+
+func TestAClaimPassesASpareTheProviderCannotAnswerForAndTakesTheNext(t *testing.T) {
+	w := newWarmPool(t)
+	pool := openPool(w.session)
+	w.spare(pool, "pool-a")
+	w.spare(pool, "pool-b")
+	session := w.over(&observing{Fake: w.provider, on: "pool-a", err: &sprites.StatusError{Status: 503}})
+	member, release, err := openPool(session).claim(t.Context(), "lane-a", "main")
+	if err != nil || member == nil || member.Name != "pool-b" || member.Lane != "lane-a" {
+		t.Fatalf("claim = %+v, %v; want pool-b past the unanswered pool-a", member, err)
+	}
+	release()
+	if got := w.member("pool-a"); got.State != memberReady || got.Lane != "" || got.Reason != "" {
+		t.Errorf("pool-a = %+v, want it left ready for a later claim", got)
+	}
+	if member, _, err := openPool(session).claim(t.Context(), "lane-b", "main"); err == nil || member != nil || !strings.Contains(err.Error(), "observe warm workspace pool-a before claiming it") {
+		t.Errorf("claim with only the unanswered spare left = %+v, %v; want it to fail naming pool-a", member, err)
+	}
+	if got := w.member("pool-a"); got.State != memberReady || got.Lane != "" {
+		t.Errorf("pool-a = %+v, want it still ready after the failed claim", got)
+	}
+	w.free("pool-a")
+	w.free("pool-b")
 }
 
 func TestWarmPoolNeverOffersAClaimedFinishedFailedOrUnfinishedSpareAgain(t *testing.T) {

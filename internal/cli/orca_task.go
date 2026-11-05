@@ -64,6 +64,7 @@ type orcaTask struct {
 	Bootstrap     []string       `json:"bootstrap,omitempty"`
 	Receipts      []orca.Receipt `json:"receipts,omitempty"`
 	Prepared      bool           `json:"prepared,omitempty"`
+	Stopped       bool           `json:"stopped,omitempty"`
 	Brief         *orcaArtifact  `json:"brief,omitempty"`
 	BaseCommit    string         `json:"baseCommit,omitempty"`
 	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
