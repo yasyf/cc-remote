@@ -66,6 +66,30 @@ func TestCheckoutScriptClonesShallowThenSwitchesRefWithoutKeepingTheToken(t *tes
 	}
 }
 
+func TestCheckoutScriptPointsOriginHeadAtTheRemoteDefaultBranch(t *testing.T) {
+	repository := workspacetest.GitRepository(t)
+	origin := strings.TrimPrefix(repository, "file://")
+	for name, source := range map[string]workspace.Source{
+		"default ref": {Ref: "main"},
+		"other ref":   {Ref: "feature"},
+		"pinned":      {Ref: "feature", Head: git(t, origin, "rev-parse", "feature"), Branch: "orca/ws-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			root := filepath.Join(home, "app")
+			if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, source, true), workspacetest.Token+"\n"); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if head := git(t, root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); head != "origin/main" {
+				t.Errorf("origin/HEAD names %q, not the remote's default branch", head)
+			}
+			if git(t, root, "rev-parse", "origin/HEAD") != git(t, origin, "rev-parse", "main") {
+				t.Error("origin/HEAD does not resolve to the default branch's tip")
+			}
+		})
+	}
+}
+
 func TestCheckoutScriptNeverPutsTheTokenInArgv(t *testing.T) {
 	script := workspace.CheckoutScript("/home/x/app", "https://github.com/example/app", workspace.Source{Ref: "main"}, true)
 	if strings.Contains(script, "x-access-token:") || !strings.Contains(script, "IFS= read -r token") || !strings.Contains(script, "GIT_ASKPASS") || !strings.Contains(script, "GIT_TERMINAL_PROMPT=0") {

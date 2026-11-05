@@ -56,7 +56,7 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 		"ref="+remote.Quote(source.Ref),
 	)
 	if source.pinned() {
-		return remote.Script(append(lines,
+		return remote.Script(append(append(lines,
 			"head="+remote.Quote(source.Head),
 			`if [ ! -d "$root/.git" ]; then`,
 			`  mkdir -p "$(dirname "$root")"`,
@@ -65,9 +65,9 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 			"fi",
 			`git "$@" -C "$root" fetch --quiet`+depth+` origin "$head" || { echo "`+remote.Prefix+`: $ref no longer offers the pinned commit $head" >&2; exit 1; }`,
 			`git -C "$root" checkout --quiet --force -B `+remote.Quote(source.Branch)+` "$head"`,
-		)...)
+		), trackDefaultBranch(depth)...)...)
 	}
-	return remote.Script(append(lines,
+	return remote.Script(append(append(lines,
 		`if [ ! -d "$root/.git" ]; then`,
 		`  mkdir -p "$(dirname "$root")"`,
 		`  git "$@" clone --quiet`+depth+` --branch "$ref" --single-branch `+remote.Quote(repository)+` "$root"`,
@@ -76,7 +76,15 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 		`  git -C "$root" checkout --quiet --force -B "$ref" FETCH_HEAD`,
 		"fi",
 		`if git -C "$root" rev-parse --quiet --verify "refs/remotes/origin/$ref" > /dev/null; then git -C "$root" branch --quiet --set-upstream-to "origin/$ref"; fi`,
-	)...)
+	), trackDefaultBranch(depth)...)...)
+}
+
+func trackDefaultBranch(depth string) []string {
+	return []string{
+		`trunk="$(git "$@" -C "$root" ls-remote --symref origin HEAD | awk '$1 == "ref:" { sub("^refs/heads/", "", $2); print $2 }')"`,
+		`git "$@" -C "$root" fetch --quiet` + depth + ` origin "+refs/heads/$trunk:refs/remotes/origin/$trunk"`,
+		`git -C "$root" remote set-head origin "$trunk"`,
+	}
 }
 
 func HooksScript(root, repository, ref string) string {
