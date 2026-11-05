@@ -64,6 +64,7 @@ type orcaTask struct {
 	Bootstrap     []string       `json:"bootstrap,omitempty"`
 	Receipts      []orca.Receipt `json:"receipts,omitempty"`
 	Prepared      bool           `json:"prepared,omitempty"`
+	Stopped       bool           `json:"stopped,omitempty"`
 	Brief         *orcaArtifact  `json:"brief,omitempty"`
 	BaseCommit    string         `json:"baseCommit,omitempty"`
 	Pregrant      *orca.Pregrant `json:"pregrant,omitempty"`
@@ -1036,7 +1037,10 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 		dropped := task.dropKey(ctx, dir)
 		return terminal.Handle, errors.Join(err, dropped)
 	}
-	task.WorktreeID = terminal.WorktreeID
+	task.Terminal, task.WorktreeID = terminal.Handle, terminal.WorktreeID
+	if err := d.save(task); err != nil {
+		return terminal.Handle, errors.Join(err, task.dropKey(ctx, dir))
+	}
 	payload := keys.payload(task.author)
 	defer clear(payload)
 	write, cancel := context.WithTimeout(ctx, keyPipeTimeout)

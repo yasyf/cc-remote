@@ -134,6 +134,11 @@ func TestStopClosesTheForwardRemovesTheEnvironmentAndSuspendsTheWorkspaceEachLan
 	if member := w.member("pool-b"); member.State != memberStopped || member.Lane != "lane-b" {
 		t.Errorf("pool record after stop = %+v, want it kept as lane-b's, stopped", member)
 	}
+	for _, name := range []string{"lane-a", "pool-b"} {
+		if task, err := loadTask(w.session.Config.State(), name); err != nil || !task.Stopped {
+			t.Errorf("%s task after stop = %+v, %v; want it recorded stopped", name, task, err)
+		}
+	}
 	if !slices.Equal(environments.removed, []string{"env-a", "env-b"}) || !slices.Equal(environments.saved, []orca.Environment{{ID: "env-c", Name: "pool-c"}}) {
 		t.Errorf("Orca environments removed %q, left %+v; want lane-a's and pool-b's removed and pool-c's kept", environments.removed, environments.saved)
 	}

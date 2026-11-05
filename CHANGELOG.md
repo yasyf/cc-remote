@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A warm claim moves past a spare the provider cannot answer for.** One
+  ready Sprite whose lookup answered 503 ended the whole `prepare --warm`, even
+  with other spares ready. That spare now stays ready and the claim takes the
+  next one. The claim fails only when no ready spare could be observed.
+- **A lane whose own workspace stopped can be relaunched.** A lane that made
+  its own workspace on an empty pool was refused on every relaunch, because its
+  task record stayed under the lane's name. `orca stop` now records that task
+  as stopped. A relaunch is admitted when the task is stopped or never started
+  a worker, and it claims a warm workspace. With none ready, the refusal names
+  the cause and says to wait for a pool fill.
 - **A lane can be relaunched after a failed launch or a stop.**
   `prepare --warm` refused any lane that had ever claimed a pool workspace. That
   included a claim whose preparation failed before its worker's terminal

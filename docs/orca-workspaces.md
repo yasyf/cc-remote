@@ -384,6 +384,20 @@ one `cc-remote orca stop` stopped. A launcher whose own steps fail after
 `prepare` and before it hands the worker its task stops the lane, so the
 relaunch is admitted and the idle worker does not hold its machine awake.
 
+The lane's own workspace, made when the pool was empty, follows the same rule.
+Its task record turns `stopped` when `cc-remote orca stop` stops it, and a
+relaunch is admitted once that record is stopped or never recorded a terminal.
+The relaunch then claims a warm workspace. The first worker on a machine never
+adopts the runtime state an earlier one left, so the relaunch does not reuse
+the lane's own workspace. With no warm workspace ready it is refused, because
+it cannot create a second workspace under the lane's name; wait for a pool
+fill to ready one, then launch again.
+
+A ready workspace the provider cannot answer for while it is being claimed,
+such as a Sprites 503, stays ready, and the claim moves to the next one. The
+claim fails with each unanswered lookup only when none of the ready workspaces
+could be observed.
+
 #### Keep the pool filled
 
 `orca.pool.ready` sets how many unused workspaces to keep, `1` by default. It's

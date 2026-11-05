@@ -30,8 +30,8 @@ func newOrcaStopCmd(runner orca.Runner) *cobra.Command {
 warm pool workspace the lane claimed, releases the task so orca keep no longer reopens its forward,
 closes that SSH forward, removes the Orca environment paired with it, and suspends the machine. A suspended machine's runtime never answers that pairing
 again, and Orca retries a saved environment that does not answer without end. Its disk, workspace
-record, task record, and pool record stay, and the pool record turns stopped, so prepare --warm
-admits the lane again and claims it a fresh workspace. A warm pool workspace's own name is refused,
+record, task record, and pool record stay, and the task and pool records turn stopped, so prepare
+--warm admits the lane again and claims it a fresh workspace. A warm pool workspace's own name is refused,
 so stop reaches only a workspace a lane claimed. A claim that failed before its worker started, or
 one already stopped, is not where the lane runs, so stop passes over it.
 
