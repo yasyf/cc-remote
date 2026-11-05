@@ -352,7 +352,9 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		case openExisting:
 			err = owned(ctx, session.Provider, record, name)
 		case openSpare:
-			err = checkUnused(ctx, session, record)
+			within, cancel := context.WithTimeout(ctx, spareAnswersWithin)
+			defer cancel()
+			err = checkUnused(within, session, record)
 		}
 		if err != nil {
 			return err

@@ -477,6 +477,53 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	}, "pool-b already has an Orca task")
 }
 
+type unanswering struct {
+	*providertest.Fake
+	on string
+}
+
+func (u *unanswering) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {
+	if id != u.on {
+		return u.Fake.Exec(ctx, id, cmd, stdin)
+	}
+	<-ctx.Done()
+	return providers.Result{}, fmt.Errorf("sprite: %w", ctx.Err())
+}
+
+func TestASpareThatDoesNotAnswerLosesTheLaneOnlyItsDeadline(t *testing.T) {
+	waited := spareAnswersWithin
+	spareAnswersWithin = 50 * time.Millisecond
+	t.Cleanup(func() { spareAnswersWithin = waited })
+	w := newWarmPool(t, "pool-a", "pool-b")
+	w.oneExecAtATime()
+	*w.session.Config.Orca.Pool.Ready = 2
+	standInFill(t)
+	if fill, err := openPool(w.session).fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-b"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
+	}
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-b"))
+	session := w.over(&unanswering{Fake: w.provider, on: "pool-a"})
+	session.Token = w.session.Token
+	session.Stderr = io.Discard
+	if err := session.Poolable(); err != nil {
+		t.Fatal(err)
+	}
+	native, _ := w.nativeAs("pool-b")
+	var out bytes.Buffer
+	if err := w.warm(t.Context(), session, native, &out, "lane-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if allocation := w.allocation(out.Bytes()); allocation.Workspace != "pool-b" {
+		t.Errorf("allocation = %+v, want the lane started on pool-b", allocation)
+	}
+	if member := w.member("pool-a"); member.State != memberFailed || member.Failure == nil || member.Failure.Class != classDeadline {
+		t.Errorf("pool-a = %+v, want it failed on the deadline", member)
+	}
+	w.free("pool-a")
+	w.free("pool-b")
+	w.free("lane-a")
+}
+
 func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T) {
 	w := newWarmPool(t, "pool-a")
 	standInFill(t)
