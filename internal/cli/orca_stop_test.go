@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -129,8 +131,8 @@ func TestStopClosesTheForwardRemovesTheEnvironmentAndSuspendsTheWorkspaceEachLan
 	if lines := strings.Split(strings.TrimSpace(string(closed)), "\n"); len(lines) != 2 || !strings.HasSuffix(lines[0], " lane-a") || !strings.HasSuffix(lines[1], " pool-b") {
 		t.Errorf("forward exits = %q, want one for lane-a and one for pool-b", lines)
 	}
-	if member := w.member("pool-b"); member.State != memberPrepared || member.Lane != "lane-b" {
-		t.Errorf("pool record after stop = %+v, want it kept as lane-b's", member)
+	if member := w.member("pool-b"); member.State != memberStopped || member.Lane != "lane-b" {
+		t.Errorf("pool record after stop = %+v, want it kept as lane-b's, stopped", member)
 	}
 	if !slices.Equal(environments.removed, []string{"env-a", "env-b"}) || !slices.Equal(environments.saved, []orca.Environment{{ID: "env-c", Name: "pool-c"}}) {
 		t.Errorf("Orca environments removed %q, left %+v; want lane-a's and pool-b's removed and pool-c's kept", environments.removed, environments.saved)
@@ -140,6 +142,54 @@ func TestStopClosesTheForwardRemovesTheEnvironmentAndSuspendsTheWorkspaceEachLan
 	}
 	if len(environments.removed) != 2 {
 		t.Errorf("a second stop removed %q, want nothing more", environments.removed[2:])
+	}
+}
+
+func TestAStoppedLaneIsAdmittedAgainOnAFreshSpareAndRefusedWhileThatWorkerRuns(t *testing.T) {
+	w := newWarmPool(t, "pool-b")
+	stubForward(t)
+	standInFill(t)
+	pool := openPool(w.session)
+	w.claimedBy(pool, "pool-a", "lane-a", memberPrepared)
+	w.forwardedTask("pool-a")
+	if fill, err := pool.fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-b"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
+	}
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
+	}, "lane lane-a already claimed warm workspace pool-a, now prepared; a lane gets one first worker until cc-remote orca stop lane-a stops it")
+
+	if stopped, err := stopLane(t.Context(), w.session, newSavedEnvironments(t, orca.Environment{ID: "env-a", Name: "pool-a"}).client(), "lane-a"); err != nil || stopped.Workspace != "pool-a" {
+		t.Fatalf("stop lane-a = %+v, %v; want pool-a stopped", stopped, err)
+	}
+	if workspace, err := pool.workspaceOf("lane-a"); err != nil || workspace != "lane-a" {
+		t.Errorf("a stopped lane runs on %q, %v; want the lane's own name, so a workspace created under it is the one a later stop reaches", workspace, err)
+	}
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-b"))
+	native, commands := w.nativeAs("pool-b")
+	var out bytes.Buffer
+	if err := w.warm(t.Context(), w.session, native, &out, "lane-a", ""); err != nil {
+		t.Fatalf("relaunch = %v, want lane-a prepared on a fresh spare after its stop", err)
+	}
+	if allocation := w.allocation(out.Bytes()); allocation.Lane != "lane-a" || allocation.Workspace != "pool-b" || allocation.Task == nil || allocation.Task.Terminal != "term-1" {
+		t.Errorf("allocation = %+v, want lane-a started on pool-b", allocation)
+	}
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant one worker's\n%q", native.calls, commands)
+	}
+	for name, want := range map[string]memberState{"pool-a": memberStopped, "pool-b": memberPrepared} {
+		if member := w.member(name); member.State != want || member.Lane != "lane-a" {
+			t.Errorf("%s = %+v, want it %s for lane-a", name, member, want)
+		}
+	}
+	w.free("pool-a")
+	w.free("pool-b")
+	w.free("lane-a")
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
+	}, "lane lane-a already claimed warm workspace pool-b, now prepared")
+	if workspace, err := pool.workspaceOf("lane-a"); err != nil || workspace != "pool-b" {
+		t.Errorf("lane-a runs on %q, %v; want pool-b, not its stopped pool-a", workspace, err)
 	}
 }
 

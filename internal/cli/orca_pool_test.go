@@ -471,7 +471,7 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	w.free("lane-a")
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
-	}, "lane lane-a already claimed warm workspace pool-a, now failed")
+	}, "lane lane-a already claimed warm workspace pool-b, now prepared")
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "pool-b", "")
 	}, "pool-b already has an Orca task")
@@ -695,7 +695,7 @@ func TestWarmClaimRefusesUnverifiedOrIncompatibleSparesWithoutTouchingThem(t *te
 	}
 }
 
-func TestALaneStopsAfterTwoFailedClaimsAndLeavesTheNextSpareReady(t *testing.T) {
+func TestALaneStopsAfterTwoFailedClaimsAndItsRelaunchPreparesTheNextSpare(t *testing.T) {
 	w := newWarmPool(t, "pool-a", "pool-b", "pool-c")
 	w.oneExecAtATime()
 	*w.session.Config.Orca.Pool.Ready = 3
@@ -712,7 +712,7 @@ func TestALaneStopsAfterTwoFailedClaimsAndLeavesTheNextSpareReady(t *testing.T) 
 		return handle(id, cmd, stdin)
 	}
 	calls := len(w.provider.Calls())
-	native, _ := w.nativeAs("pool-c")
+	native, commands := w.nativeAs("pool-c")
 	err := w.warm(t.Context(), w.session, native, io.Discard, "lane-a", "")
 	if err == nil || !strings.Contains(err.Error(), "warm workspace pool-a") || !strings.Contains(err.Error(), "warm workspace pool-b") {
 		t.Fatalf("err = %v, want both failed claims", err)
@@ -730,10 +730,28 @@ func TestALaneStopsAfterTwoFailedClaimsAndLeavesTheNextSpareReady(t *testing.T) 
 			t.Errorf("the lane created a workspace after its second failed try: %q", call)
 		}
 	}
+	w.provider.Handle = handle
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-c"))
+	var out bytes.Buffer
+	if err := w.warm(t.Context(), w.session, native, &out, "lane-a", ""); err != nil {
+		t.Fatalf("relaunch = %v, want lane-a prepared past the claims whose workers never started", err)
+	}
+	if allocation := w.allocation(out.Bytes()); allocation.Lane != "lane-a" || allocation.Workspace != "pool-c" || allocation.Allocation != allocationWarm || allocation.Task == nil || allocation.Task.Terminal != "term-1" {
+		t.Errorf("allocation = %+v, want lane-a started on pool-c", allocation)
+	}
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant one worker's\n%q", native.calls, commands)
+	}
+	if member := w.member("pool-c"); member.State != memberPrepared || member.Lane != "lane-a" {
+		t.Errorf("pool-c = %+v, want it prepared for lane-a", member)
+	}
 	w.free("pool-a")
 	w.free("pool-b")
 	w.free("pool-c")
 	w.free("lane-a")
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
+	}, "lane lane-a already claimed warm workspace pool-c, now prepared")
 }
 
 func TestWarmClaimFailsWithoutClaimingWhenTheProviderCannotAnswer(t *testing.T) {
