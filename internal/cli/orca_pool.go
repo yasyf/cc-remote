@@ -136,6 +136,8 @@ type orcaPoolStatus struct {
 }
 
 var (
+	spareAnswersWithin = time.Minute
+
 	spareName   = func() string { return "pool-" + strings.ToLower(rand.Text()[:16]) }
 	fillCommand = func(config, provider, profile string) (*exec.Cmd, error) {
 		helper, err := os.Executable()
