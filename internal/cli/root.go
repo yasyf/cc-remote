@@ -10,6 +10,7 @@ import (
 )
 
 func NewRootCmd() *cobra.Command {
+	runner := orca.ExecRunner{Command: orca.CLICommand(os.Getenv, runtime.GOOS)}
 	root := &cobra.Command{
 		Use:               "cc-remote",
 		Short:             "Create and manage remote agent workspaces",
@@ -22,7 +23,7 @@ func NewRootCmd() *cobra.Command {
 		newCreateCmd(),
 		newResumeCmd(),
 		newSuspendCmd(),
-		newDestroyCmd(),
+		newDestroyCmd(runner),
 		newExtendCmd(),
 		newStatusCmd(),
 		newVerifyCmd(),
@@ -30,7 +31,7 @@ func NewRootCmd() *cobra.Command {
 		newImagesCmd(),
 		newPayloadCmd(),
 		newJobsCmd(),
-		newOrcaCmd(orca.ExecRunner{Command: orca.CLICommand(os.Getenv, runtime.GOOS)}),
+		newOrcaCmd(runner),
 	)
 	return root
 }

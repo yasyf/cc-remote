@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
 	"github.com/yasyf/cc-remote/internal/state"
@@ -36,6 +38,40 @@ func (w *firstWorker) forwardedTask(name string) {
 	}
 }
 
+type savedEnvironments struct {
+	t       *testing.T
+	saved   []orca.Environment
+	removed []string
+	calls   int
+}
+
+func newSavedEnvironments(t *testing.T, saved ...orca.Environment) *savedEnvironments {
+	return &savedEnvironments{t: t, saved: saved}
+}
+
+func (s *savedEnvironments) client() orca.Client { return orca.NewClient(s) }
+
+func (s *savedEnvironments) Run(_ context.Context, args ...string) ([]byte, error) {
+	s.calls++
+	command := strings.Join(args, " ")
+	if command == "environment list --json" {
+		listed, err := json.Marshal(map[string][]orca.Environment{"environments": s.saved})
+		if err != nil {
+			return nil, err
+		}
+		return []byte(`{"id":"local","ok":true,"result":` + string(listed) + `,"_meta":{"runtimeId":"local"}}`), nil
+	}
+	id, ok := strings.CutPrefix(command, "environment rm --environment ")
+	id, suffixed := strings.CutSuffix(id, " --json")
+	if !ok || !suffixed {
+		s.t.Errorf("unexpected orca call: %s", command)
+		return nil, fmt.Errorf("unexpected orca call: %s", command)
+	}
+	s.saved = slices.DeleteFunc(s.saved, func(environment orca.Environment) bool { return environment.ID == id })
+	s.removed = append(s.removed, id)
+	return []byte(`{"id":"local","ok":true,"result":{"removed":{"id":"` + id + `"}},"_meta":{"runtimeId":"local"}}`), nil
+}
+
 func stubForward(t *testing.T) string {
 	t.Helper()
 	bin, exits := t.TempDir(), filepath.Join(t.TempDir(), "exits")
@@ -47,7 +83,7 @@ func stubForward(t *testing.T) string {
 	return exits
 }
 
-func TestStopClosesTheForwardAndSuspendsTheWorkspaceEachLaneRunsOn(t *testing.T) {
+func TestStopClosesTheForwardRemovesTheEnvironmentAndSuspendsTheWorkspaceEachLaneRunsOn(t *testing.T) {
 	w := newWarmPool(t)
 	exits := stubForward(t)
 	pool := openPool(w.session)
@@ -60,9 +96,10 @@ func TestStopClosesTheForwardAndSuspendsTheWorkspaceEachLaneRunsOn(t *testing.T)
 	}
 	w.forwardedTask("lane-a")
 	w.forwardedTask("pool-b")
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-a", Name: "lane-a"}, orca.Environment{ID: "env-b", Name: "pool-b"}, orca.Environment{ID: "env-c", Name: "pool-c"})
 
 	for _, lane := range []string{"lane-a", "lane-b"} {
-		stopped, err := stopLane(t.Context(), w.session, lane)
+		stopped, err := stopLane(t.Context(), w.session, environments.client(), lane)
 		if err != nil {
 			t.Fatalf("stop %s = %v", lane, err)
 		}
@@ -95,6 +132,15 @@ func TestStopClosesTheForwardAndSuspendsTheWorkspaceEachLaneRunsOn(t *testing.T)
 	if member := w.member("pool-b"); member.State != memberPrepared || member.Lane != "lane-b" {
 		t.Errorf("pool record after stop = %+v, want it kept as lane-b's", member)
 	}
+	if !slices.Equal(environments.removed, []string{"env-a", "env-b"}) || !slices.Equal(environments.saved, []orca.Environment{{ID: "env-c", Name: "pool-c"}}) {
+		t.Errorf("Orca environments removed %q, left %+v; want lane-a's and pool-b's removed and pool-c's kept", environments.removed, environments.saved)
+	}
+	if again, err := stopLane(t.Context(), w.session, environments.client(), "lane-a"); err != nil || again.Found != "" {
+		t.Errorf("a second stop of lane-a = %+v, %v; want it stopped again with nothing left to remove", again, err)
+	}
+	if len(environments.removed) != 2 {
+		t.Errorf("a second stop removed %q, want nothing more", environments.removed[2:])
+	}
 }
 
 func (w *firstWorker) claimedBy(pool *orcaPool, name, lane string, claim memberState) {
@@ -120,9 +166,10 @@ func TestStopSuspendsTheWorkspaceTheWorkerRunsOnNotAClaimThatFailedBeforeIt(t *t
 		t.Fatal(err)
 	}
 	before := len(w.provider.Calls())
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-a", Name: "pool-a"}, orca.Environment{ID: "env-d", Name: "pool-d"})
 
 	for lane, want := range map[string]string{"lane-moved": "pool-b", "lane-created": "lane-created", "lane-late": "pool-d"} {
-		stopped, err := stopLane(t.Context(), w.session, lane)
+		stopped, err := stopLane(t.Context(), w.session, environments.client(), lane)
 		if err != nil {
 			t.Fatalf("stop %s = %v", lane, err)
 		}
@@ -136,6 +183,9 @@ func TestStopSuspendsTheWorkspaceTheWorkerRunsOnNotAClaimThatFailedBeforeIt(t *t
 	if want := []string{"suspend lane-created", "suspend pool-b", "suspend pool-d"}; !slices.Equal(calls, want) {
 		t.Errorf("provider calls = %q, want %q", calls, want)
 	}
+	if !slices.Equal(environments.removed, []string{"env-d"}) {
+		t.Errorf("Orca environments removed %q, want only pool-d's, not the failed claim pool-a's", environments.removed)
+	}
 }
 
 func TestStopNeverTouchesAWarmPoolWorkspaceNoLaneClaimed(t *testing.T) {
@@ -143,10 +193,14 @@ func TestStopNeverTouchesAWarmPoolWorkspaceNoLaneClaimed(t *testing.T) {
 	exits := stubForward(t)
 	w.spare(openPool(w.session), "pool-c")
 	before := len(w.provider.Calls())
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-c", Name: "pool-c"})
 
-	_, err := stopLane(t.Context(), w.session, "pool-c")
+	_, err := stopLane(t.Context(), w.session, environments.client(), "pool-c")
 	if err == nil || !strings.Contains(err.Error(), "pool-c names a warm pool workspace, not a lane") {
 		t.Errorf("stop pool-c = %v, want a refusal naming the warm pool workspace", err)
+	}
+	if environments.calls != 0 {
+		t.Errorf("a refused stop reached Orca %d times", environments.calls)
 	}
 
 	if calls := w.provider.Calls()[before:]; len(calls) != 0 {
@@ -194,10 +248,14 @@ func (w *firstWorker) recordsOf(name string) []string {
 func TestStopSuspendsALaneWorkspaceThatHasNoTaskRecord(t *testing.T) {
 	w := newWarmPool(t)
 	w.laneWorkspace("lane-d")
+	environments := newSavedEnvironments(t)
 
-	stopped, err := stopLane(t.Context(), w.session, "lane-d")
+	stopped, err := stopLane(t.Context(), w.session, environments.client(), "lane-d")
 	if err != nil {
 		t.Fatalf("stop lane-d = %v", err)
+	}
+	if environments.calls != 0 {
+		t.Errorf("a stop with no task record reached Orca %d times", environments.calls)
 	}
 	if *stopped != (orcaStopped{Lane: "lane-d", Workspace: "lane-d"}) {
 		t.Errorf("stop lane-d = %+v, want a plain stop", stopped)
@@ -231,13 +289,14 @@ func TestStopSucceedsAndCleansRecordsForALaneWithNothingLeftToStop(t *testing.T)
 		}
 	}
 	before := len(w.provider.Calls())
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-f", Name: "lane-f"})
 
 	for lane, cases := range map[string]struct{ workspace, found string }{
 		"lane-e": {"pool-e", "no workspace is recorded for pool-e"},
 		"lane-f": {"lane-f", "machine not found"},
 		"lane-z": {"lane-z", "no workspace is recorded for lane-z"},
 	} {
-		stopped, err := stopLane(t.Context(), w.session, lane)
+		stopped, err := stopLane(t.Context(), w.session, environments.client(), lane)
 		if err != nil {
 			t.Fatalf("stop %s = %v, want it already stopped", lane, err)
 		}
@@ -256,7 +315,10 @@ func TestStopSucceedsAndCleansRecordsForALaneWithNothingLeftToStop(t *testing.T)
 	if err != nil || !strings.HasSuffix(strings.TrimSpace(string(closed)), " lane-f") {
 		t.Errorf("forward exits = %q, %v; want lane-f's forward closed", closed, err)
 	}
-	if again, err := stopLane(t.Context(), w.session, "lane-f"); err != nil || again.Found == "" {
+	if !slices.Equal(environments.removed, []string{"env-f"}) {
+		t.Errorf("Orca environments removed %q, want lane-f's", environments.removed)
+	}
+	if again, err := stopLane(t.Context(), w.session, environments.client(), "lane-f"); err != nil || again.Found == "" {
 		t.Errorf("a second stop of lane-f = %+v, %v; want it already stopped", again, err)
 	}
 }
@@ -268,7 +330,7 @@ func TestStopFailsWhenTheMachineRefusesToSuspend(t *testing.T) {
 	stubForward(t)
 	session := w.over(refusing{w.provider})
 
-	if _, err := stopLane(t.Context(), session, "lane-g"); err == nil || !strings.Contains(err.Error(), "answered 500") {
+	if _, err := stopLane(t.Context(), session, newSavedEnvironments(t).client(), "lane-g"); err == nil || !strings.Contains(err.Error(), "answered 500") {
 		t.Errorf("stop lane-g = %v, want the provider's refusal", err)
 	}
 	if left := w.recordsOf("lane-g"); !slices.Equal(left, []string{"workspaces", "orca"}) {
@@ -285,10 +347,14 @@ func TestStopOfAMachineWhoseStorageIsGoneSucceedsAndKeepsItsRecords(t *testing.T
 	w.forwardedTask("lane-h")
 	stubForward(t)
 	session := w.over(storageless{w.provider})
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-h", Name: "lane-h"})
 
-	stopped, err := stopLane(t.Context(), session, "lane-h")
+	stopped, err := stopLane(t.Context(), session, environments.client(), "lane-h")
 	if err != nil {
 		t.Fatalf("stop lane-h = %v, want it already stopped", err)
+	}
+	if !slices.Equal(environments.removed, []string{"env-h"}) {
+		t.Errorf("Orca environments removed %q, want lane-h's, since its machine runs nothing again", environments.removed)
 	}
 	if stopped.Workspace != "lane-h" || !strings.Contains(stopped.Found, "Storage not ready") {
 		t.Errorf("stop lane-h = %+v, want the missing storage named under found", stopped)
@@ -298,5 +364,35 @@ func TestStopOfAMachineWhoseStorageIsGoneSucceedsAndKeepsItsRecords(t *testing.T
 	}
 	if _, err := w.provider.Get(t.Context(), "lane-h"); err != nil {
 		t.Errorf("lane-h after the stop = %v, want the machine left in place", err)
+	}
+}
+
+func TestDestroyRemovesTheOrcaEnvironmentOfAWorkspaceWithATask(t *testing.T) {
+	w := newWarmPool(t)
+	exits := stubForward(t)
+	w.laneWorkspace("lane-x")
+	w.forwardedTask("lane-x")
+	w.laneWorkspace("lane-y")
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-x", Name: "lane-x"}, orca.Environment{ID: "env-z", Name: "lane-z"})
+
+	if err := destroyWorkspace(t.Context(), w.session, environments.client(), "lane-x"); err != nil {
+		t.Fatalf("destroy lane-x = %v", err)
+	}
+	if _, err := w.provider.Get(t.Context(), "lane-x"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("lane-x after destroy = %v, want it gone", err)
+	}
+	if !slices.Equal(environments.removed, []string{"env-x"}) || !slices.Equal(environments.saved, []orca.Environment{{ID: "env-z", Name: "lane-z"}}) {
+		t.Errorf("Orca environments removed %q, left %+v; want lane-x's removed and lane-z's kept", environments.removed, environments.saved)
+	}
+	if closed, err := os.ReadFile(exits); err != nil || !strings.HasSuffix(strings.TrimSpace(string(closed)), " lane-x") {
+		t.Errorf("forward exits = %q, %v; want lane-x's forward closed", closed, err)
+	}
+
+	calls := environments.calls
+	if err := destroyWorkspace(t.Context(), w.session, environments.client(), "lane-y"); err != nil {
+		t.Fatalf("destroy lane-y = %v", err)
+	}
+	if environments.calls != calls {
+		t.Errorf("destroying lane-y, which has no task record, reached Orca %d times", environments.calls-calls)
 	}
 }
