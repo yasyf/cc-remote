@@ -1165,11 +1165,11 @@ func captainPins(inventory images.Inventory) []orca.Pin {
 }
 
 type secrets struct {
-	key, judge, typesafe, github, trunk []byte
+	key, judge, typesafe, github, trunk, gemini []byte
 }
 
 func (s secrets) payload(launcher author) []byte {
-	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk}
+	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini}
 	return append(bytes.Join(lines, []byte{'\n'}), '\n')
 }
 
@@ -1179,6 +1179,7 @@ func (s secrets) clear() {
 	clear(s.typesafe)
 	clear(s.github)
 	clear(s.trunk)
+	clear(s.gemini)
 }
 
 func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
@@ -1209,6 +1210,12 @@ func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent
 		if captured.trunk, err = captureKey(ctx, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("trunk %w", err)
+		}
+	}
+	if command, ok := keys[config.KeyGemini]; ok {
+		if captured.gemini, err = captureKey(ctx, command); err != nil {
+			captured.clear()
+			return secrets{}, fmt.Errorf("gemini %w", err)
 		}
 	}
 	return captured, nil

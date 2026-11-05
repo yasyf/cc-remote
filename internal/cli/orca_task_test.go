@@ -147,7 +147,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
-			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n"
+			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n"
 			if payload := string(got.payload(firstAuthor)); payload != want {
 				t.Errorf("payload = %q, want %q", payload, want)
 			}
@@ -179,7 +179,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 }
 
-func TestCaptureKeysDeliversAndClearsTheOptionalTrunkKey(t *testing.T) {
+func TestCaptureKeysDeliversAndClearsTheOptionalTrunkAndGeminiKeys(t *testing.T) {
 	dir := t.TempDir()
 	script := func(name, line string) []string {
 		path := filepath.Join(dir, name)
@@ -190,22 +190,22 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkKey(t *testing.T) {
 	}
 	for _, kind := range []string{orca.AgentClaude, orca.AgentCodex} {
 		agent := orca.Agent{Kind: kind}
-		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel")}
+		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel"), config.KeyGemini: script("gemini", "gemini-sentinel")}
 		got, err := captureKeys(t.Context(), keys, agent)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(got.trunk) != "trunk-sentinel" {
-			t.Fatalf("Trunk key = %q", got.trunk)
+		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" {
+			t.Fatalf("Trunk key = %q, Gemini key = %q", got.trunk, got.gemini)
 		}
-		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\n"
+		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\n"
 		if payload := string(got.payload(firstAuthor)); payload != want {
 			t.Errorf("payload = %q, want %q", payload, want)
 		}
-		token := got.trunk
+		trunk, gemini := got.trunk, got.gemini
 		got.clear()
-		if bytes.Count(token, []byte{0}) != len(token) {
-			t.Error("Trunk key bytes survived clear")
+		if bytes.Count(trunk, []byte{0}) != len(trunk) || bytes.Count(gemini, []byte{0}) != len(gemini) {
+			t.Error("Trunk or Gemini key bytes survived clear")
 		}
 		failing := filepath.Join(dir, "failing")
 		if err := os.WriteFile(failing, []byte("#!/bin/sh\necho trunk-leaked-sentinel; exit 3\n"), 0o700); err != nil {
@@ -1411,7 +1411,7 @@ func TestPrepareSendsTheLaunchersIdentityAndTrunkKeyOnlyDownTheKeyPipe(t *testin
 	}
 	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
 	w.prepared(out.Bytes())
-	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n" {
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n" {
 		t.Errorf("key pipe = %q, %v", sent, err)
 	}
 	kept := w.effects()
