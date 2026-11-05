@@ -217,6 +217,77 @@ func TestHookProbeAcceptsOnlyCaptainHookOnAManagedServer(t *testing.T) {
 	}
 }
 
+func formedHooks(t *testing.T, root string) string {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/orca-1.4.247-hooks.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ReplaceAll(string(raw), "/home/sprite/.claude/plugins/cache/captain-hook/captain-hook/12.117.0", root)
+}
+
+func newFormedHome(t *testing.T, server orca.Server) *hookHome {
+	t.Helper()
+	h := newProbeHome(t)
+	h.server = server
+	h.rawHooks = formedHooks(t, h.root)
+	return h
+}
+
+func TestHookProbeAcceptsTheHooksOrca1247WritesOnEitherServer(t *testing.T) {
+	for _, server := range []orca.Server{orca.ServerManaged, orca.ServerElectron} {
+		t.Run(string(server), func(t *testing.T) {
+			h := newFormedHome(t, server)
+			_, hooks, probe, err := h.run(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(hooks)
+			if probe.Definitions != 14 || len(probe.Events) != 9 || probe.HooksSHA256 != hex.EncodeToString(sum[:]) {
+				t.Errorf("probe = %+v", probe)
+			}
+			for _, event := range append(slices.Clone(probeNative), "Interrupt") {
+				want := 1
+				if slices.Contains(probeCaptains, event) {
+					want = 2
+				}
+				if probe.Events[event] != want {
+					t.Errorf("%s multiplicity %d, want %d", event, probe.Events[event], want)
+				}
+			}
+		})
+	}
+	tests := []struct {
+		name string
+		edit func(string, map[string][]any)
+		want orca.HookRefusal
+	}{
+		{"no Interrupt handler", func(_ string, hooks map[string][]any) { delete(hooks, "Interrupt") }, orca.HookRefusal{Reason: "missing", Event: "Interrupt", Record: 0}},
+		{"Interrupt at the ten-second timeout", func(_ string, hooks map[string][]any) { hooks["Interrupt"] = hooks["Stop"][1:] }, orca.HookRefusal{Reason: "mismatch", Event: "Interrupt", Record: 0}},
+		{"the older shim beside the new form", func(home string, hooks map[string][]any) {
+			hooks["PermissionRequest"] = append(hooks["PermissionRequest"], nativeGroup(home))
+		}, orca.HookRefusal{Reason: "mismatch", Event: "PermissionRequest", Record: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newFormedHome(t, orca.ServerManaged)
+			var document struct {
+				Hooks map[string][]any `json:"hooks"`
+			}
+			if err := json.Unmarshal([]byte(h.rawHooks), &document); err != nil {
+				t.Fatal(err)
+			}
+			tt.edit(h.home, document.Hooks)
+			h.hooks, h.rawHooks = document.Hooks, ""
+			out, _, _, err := h.run(t)
+			var refusal orca.HookRefusal
+			if !errors.As(err, &refusal) || refusal != tt.want {
+				t.Fatalf("probe = %s, %v; want %+v", out, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestHookProbeRefusesChangedDefinitionsAndInputs(t *testing.T) {
 	group := func(h *hookHome, event string, index int) map[string]any {
 		return h.hooks[event][index].(map[string]any)
