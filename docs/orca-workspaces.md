@@ -193,7 +193,9 @@ Sprite to pause, which it does once no session, request, or connection holds
 it. The disk, the workspace record, the task record, and the pool record stay,
 and `reconnect` reopens the forward. It refuses a warm pool workspace's own
 name, so it stops only a workspace a lane claimed, and it exits nonzero with
-the error when the machine does not stop.
+the error when the machine does not stop. A claim that failed before its worker
+started is not where the lane runs, so stop passes over it and reaches the
+workspace the lane moved on to.
 
 A lane with no task record has no forward to close, so stop suspends its
 workspace alone. A lane is already stopped when no workspace is recorded for it

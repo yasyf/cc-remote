@@ -28,7 +28,8 @@ func newOrcaStopCmd() *cobra.Command {
 		Long: `stop finds the workspace a lane runs on, the one prepare created under the lane's name or the
 warm pool workspace the lane claimed, closes the task's SSH forward, and suspends the machine. Its
 disk, workspace record, task record, and pool record stay. A warm pool workspace's own name is
-refused, so stop reaches only a workspace a lane claimed.
+refused, so stop reaches only a workspace a lane claimed. A claim that failed before its worker
+started is not where the lane runs, so stop passes over it.
 
 A lane with no task record has no forward to close. A lane with no workspace record, or whose
 machine the provider no longer has, is already stopped: stop removes the records left for it, as
@@ -93,8 +94,17 @@ func (p *orcaPool) workspaceOf(lane string) (string, error) {
 		switch {
 		case member.Name == lane:
 			return "", fmt.Errorf("%s names a warm pool workspace, not a lane; a workspace is stopped only through the lane that claimed it", lane)
-		case member.Lane == lane:
+		case member.Lane != lane:
+		case member.State != memberFailed:
 			return member.Name, nil
+		default:
+			task, err := loadTask(p.dir, member.Name)
+			if err != nil && !errors.Is(err, errNoTask) {
+				return "", err
+			}
+			if err == nil && task.Terminal != "" {
+				return member.Name, nil
+			}
 		}
 	}
 	return lane, nil

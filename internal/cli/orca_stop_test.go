@@ -96,6 +96,47 @@ func TestStopClosesTheForwardAndSuspendsTheWorkspaceEachLaneRunsOn(t *testing.T)
 	}
 }
 
+func (w *firstWorker) claimedBy(pool *orcaPool, name, lane string, claim memberState) {
+	w.t.Helper()
+	w.spare(pool, name)
+	member := w.member(name)
+	member.State, member.Lane = claim, lane
+	if err := pool.save(member); err != nil {
+		w.t.Fatal(err)
+	}
+}
+
+func TestStopSuspendsTheWorkspaceTheWorkerRunsOnNotAClaimThatFailedBeforeIt(t *testing.T) {
+	w := newWarmPool(t)
+	stubForward(t)
+	pool := openPool(w.session)
+	w.claimedBy(pool, "pool-a", "lane-moved", memberFailed)
+	w.claimedBy(pool, "pool-b", "lane-moved", memberPrepared)
+	w.claimedBy(pool, "pool-c", "lane-created", memberFailed)
+	w.laneWorkspace("lane-created")
+	w.claimedBy(pool, "pool-d", "lane-late", memberFailed)
+	if err := state.Save(w.session.Config.State().Orca("pool-d"), &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "pool-d", Provider: "fake", Profile: "lean", Machine: "pool-d", Environment: "pool-d", Terminal: "term-d"}); err != nil {
+		t.Fatal(err)
+	}
+	before := len(w.provider.Calls())
+
+	for lane, want := range map[string]string{"lane-moved": "pool-b", "lane-created": "lane-created", "lane-late": "pool-d"} {
+		stopped, err := stopLane(t.Context(), w.session, lane)
+		if err != nil {
+			t.Fatalf("stop %s = %v", lane, err)
+		}
+		if stopped.Workspace != want {
+			t.Errorf("stop %s reached %s, want %s", lane, stopped.Workspace, want)
+		}
+	}
+
+	calls := w.provider.Calls()[before:]
+	slices.Sort(calls)
+	if want := []string{"suspend lane-created", "suspend pool-b", "suspend pool-d"}; !slices.Equal(calls, want) {
+		t.Errorf("provider calls = %q, want %q", calls, want)
+	}
+}
+
 func TestStopNeverTouchesAWarmPoolWorkspaceNoLaneClaimed(t *testing.T) {
 	w := newWarmPool(t)
 	exits := stubForward(t)
