@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **`cc-remote orca stop` succeeds on a Sprite whose storage is gone.** A
+  Sprite the provider answers 503 `Storage not ready` for never runs again, and
+  stop failed on it every time, so the supervisor kept a stop blocker open. stop
+  now names the answer under `found` and exits zero, destroying nothing.
 - **`cc-remote orca stop <lane>` reaches the workspace the worker runs on.** A
   lane that moved past a warm workspace that failed during launch holds two pool
   records, and stop read the older one, so it suspended the failed workspace and

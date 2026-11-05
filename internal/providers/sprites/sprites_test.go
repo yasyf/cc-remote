@@ -475,6 +475,23 @@ func TestSuspendOfASpriteSomethingStillHoldsFailsNamingTheHold(t *testing.T) {
 	}
 }
 
+func TestSuspendOfASpriteWhoseStorageIsNotReadyIsNoStorage(t *testing.T) {
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	fake.sprites["alpha"].services = map[string]string{"sshd": "running"}
+	fake.sprites["alpha"].noStorage = true
+	if err := p.Suspend(t.Context(), "alpha"); !errors.Is(err, providers.ErrNoStorage) {
+		t.Errorf("Suspend = %v, want ErrNoStorage", err)
+	}
+	for _, call := range fake.calls {
+		if call[0] == "api" && slices.Contains(call, "POST") {
+			t.Errorf("Suspend called %q on a sprite with no storage", call)
+		}
+	}
+}
+
 func TestCreateLosingARaceIsAmbiguous(t *testing.T) {
 	p, fake := newProvider(t)
 	fake.takenAtCreate = true

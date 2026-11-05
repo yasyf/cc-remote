@@ -32,6 +32,7 @@ var (
 	ErrNotFound  = errors.New("machine not found")
 	ErrExists    = errors.New("machine already exists")
 	ErrAmbiguous = errors.New("the create failed after the machine came to exist")
+	ErrNoStorage = errors.New("the provider cannot reach the machine's storage, so nothing runs on it")
 )
 
 type TailnetMode string

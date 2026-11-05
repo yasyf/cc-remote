@@ -33,7 +33,9 @@ started is not where the lane runs, so stop passes over it.
 
 A lane with no task record has no forward to close. A lane with no workspace record, or whose
 machine the provider no longer has, is already stopped: stop removes the records left for it, as
-destroy would, names what it found under "found", and succeeds.`,
+destroy would, names what it found under "found", and succeeds. A machine whose storage the
+provider cannot reach runs nothing again, so it is stopped too: stop names that under
+"found" and succeeds, and destroys nothing, so its records stay.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			session, err := flags.open()
@@ -70,6 +72,10 @@ func stopLane(ctx context.Context, session *workspace.Session, lane string) (*or
 	stopped := &orcaStopped{Lane: lane, Workspace: name}
 	err = session.Suspend(ctx, name)
 	if err == nil {
+		return stopped, nil
+	}
+	if errors.Is(err, providers.ErrNoStorage) {
+		stopped.Found = err.Error()
 		return stopped, nil
 	}
 	if !errors.Is(err, workspace.ErrNotRecorded) && !errors.Is(err, providers.ErrNotFound) {

@@ -26,6 +26,7 @@ type fakeSprite struct {
 	authorized []string
 	services   map[string]string
 	held       bool
+	noStorage  bool
 }
 
 type fakeSprites struct {
@@ -135,6 +136,8 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 		switch service, verb, _ := strings.Cut(strings.TrimPrefix(sub, "services/"), "/"); {
 		case sub == "" && !post:
 			return respond(200, f.resource(name, sprite))
+		case sub == "services" && !post && sprite.noStorage:
+			return providers.Result{Stdout: []byte(storageNotReady + "\n503")}, nil
 		case sub == "services" && !post:
 			listed := []map[string]any{}
 			for _, named := range slices.Sorted(maps.Keys(sprite.services)) {
