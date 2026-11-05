@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -170,6 +171,14 @@ func (r refusing) Suspend(context.Context, string) error {
 	return errors.New("sprites api answered 500 stopping service claude")
 }
 
+type storageless struct {
+	*providertest.Fake
+}
+
+func (storageless) Suspend(_ context.Context, id string) error {
+	return fmt.Errorf("suspending sprite %s: %w: listing its services answered 503 Storage not ready", id, providers.ErrNoStorage)
+}
+
 func (w *firstWorker) recordsOf(name string) []string {
 	w.t.Helper()
 	dir := w.session.Config.State()
@@ -267,5 +276,27 @@ func TestStopFailsWhenTheMachineRefusesToSuspend(t *testing.T) {
 	}
 	if machine, err := w.provider.Get(t.Context(), "lane-g"); err != nil || machine.State != providers.StateRunning {
 		t.Errorf("lane-g after the refusal = %+v, %v; want it running", machine, err)
+	}
+}
+
+func TestStopOfAMachineWhoseStorageIsGoneSucceedsAndKeepsItsRecords(t *testing.T) {
+	w := newWarmPool(t)
+	w.laneWorkspace("lane-h")
+	w.forwardedTask("lane-h")
+	stubForward(t)
+	session := w.over(storageless{w.provider})
+
+	stopped, err := stopLane(t.Context(), session, "lane-h")
+	if err != nil {
+		t.Fatalf("stop lane-h = %v, want it already stopped", err)
+	}
+	if stopped.Workspace != "lane-h" || !strings.Contains(stopped.Found, "Storage not ready") {
+		t.Errorf("stop lane-h = %+v, want the missing storage named under found", stopped)
+	}
+	if left := w.recordsOf("lane-h"); !slices.Equal(left, []string{"workspaces", "orca"}) {
+		t.Errorf("records for lane-h after the stop = %q, want its workspace and task kept", left)
+	}
+	if _, err := w.provider.Get(t.Context(), "lane-h"); err != nil {
+		t.Errorf("lane-h after the stop = %v, want the machine left in place", err)
 	}
 }

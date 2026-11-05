@@ -203,6 +203,12 @@ or the provider no longer has its machine: stop removes the workspace, SSH,
 pool, and task records left for it, prints what it found under `found`, and
 exits zero.
 
+A Sprite whose services listing answers 503 `Storage not ready` has lost its
+storage at the provider: nothing runs on it again, and its record still reads a
+normal cold. stop counts it as stopped, prints the provider's answer under
+`found`, and exits zero. It destroys nothing, so the machine and its records stay
+for whoever recovers its disk.
+
 `reconnect` restores only the transport to an existing runtime. It does not
 resume a machine, restart a runtime, or recover a worker after process loss.
 The recorded runtime and receipt identities remain unchanged.

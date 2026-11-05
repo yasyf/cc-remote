@@ -42,7 +42,10 @@ const (
 	StepRecord    CreateStep = "create.record"
 )
 
-const startFailure = "Error: failed to start sprite command: failed to connect"
+const (
+	startFailure    = "Error: failed to start sprite command: failed to connect"
+	storageNotReady = "Storage not ready"
+)
 
 var startWaits = []time.Duration{2 * time.Second, 8 * time.Second}
 
@@ -275,6 +278,9 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 	status, body, err := p.api(ctx, services)
 	if err != nil {
 		return err
+	}
+	if status == 503 && string(bytes.TrimSpace(body)) == storageNotReady {
+		return fmt.Errorf("suspending sprite %s: %w: listing its services answered 503 %s", id, providers.ErrNoStorage, storageNotReady)
 	}
 	if status != 200 {
 		return fmt.Errorf("suspending sprite %s: %w listing its services: %s", id, &StatusError{Status: status}, bytes.TrimSpace(body))
