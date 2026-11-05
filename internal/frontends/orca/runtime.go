@@ -209,6 +209,8 @@ const typesafeVariable = "TYPESAFE_API_KEY"
 
 const trunkVariable = "TRUNK_MERGE_API_KEY"
 
+const geminiVariable = "GEMINI_API_KEY"
+
 var githubVariables = []string{"GH_TOKEN", "GITHUB_TOKEN"}
 
 const authorIdentity = `export GIT_CONFIG_COUNT=2 ` +
@@ -349,15 +351,16 @@ func (a Agent) JudgeKeyProvider() string {
 func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
-		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable}, githubVariables), " "),
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable}, githubVariables), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
 		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
 		authorIdentity,
 		`{ test -z "$github" || ` + githubCredentials + `; }`,
 		`{ test -z "$trunk" || export ` + trunkVariable + `="$trunk"; }`,
-		"unset key judge typesafe github trunk name email",
+		`{ test -z "$gemini" || export ` + geminiVariable + `="$gemini"; }`,
+		"unset key judge typesafe github trunk gemini name email",
 		"export " + strings.Join(a.exports(), " "),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")

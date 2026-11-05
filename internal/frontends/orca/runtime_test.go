@@ -446,18 +446,20 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 	tests := []struct {
 		name, kind, payload, want string
 	}{
-		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset|unset|unset|unset|unset"},
-		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset|unset|unset|unset|unset|unset"},
-		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset|unset|unset|unset|unset|unset"},
-		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset|unset|unset|unset|unset|unset"},
-		{"claude with a judge and a TypeSafe key", orca.AgentClaude, "sk-test-key\nsk-judge-key\nts-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|ts-key|unset|unset|unset|unset"},
-		{"codex with only a TypeSafe key", orca.AgentCodex, "sk-test-key\n\nts-key\n", "unset|unset|unset|sk-test-key|unset|ts-key|unset|unset|unset|unset"},
-		{"claude with a GitHub token", orca.AgentClaude, "sk-test-key\nsk-judge-key\n\ngho-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset|gho-key|unset|unset|!gh auth git-credential"},
-		{"codex with only a GitHub token", orca.AgentCodex, "sk-test-key\n\n\ngho-key\n", "unset|unset|unset|sk-test-key|unset|unset|gho-key|unset|unset|!gh auth git-credential"},
-		{"claude with a Trunk key", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\ntrunk-sentinel\n", "sk-test-key|unset|unset|unset|unset|unset|gho-key|unset|trunk-sentinel|!gh auth git-credential"},
-		{"codex with only a Trunk key", orca.AgentCodex, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\n", "unset|unset|unset|sk-test-key|unset|unset|unset|unset|trunk-sentinel|unset"},
+		{"claude with an OpenAI judge key", orca.AgentClaude, "sk-test-key\nsk-judge-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset|unset|unset|unset|unset|unset"},
+		{"claude without one", orca.AgentClaude, "sk-test-key\n", "sk-test-key|unset|unset|unset|unset|unset|unset|unset|unset|unset|unset"},
+		{"codex with an Anthropic judge key", orca.AgentCodex, "sk-test-key\nsk-judge-key\n", "sk-judge-key|unset|unset|sk-test-key|unset|unset|unset|unset|unset|unset|unset"},
+		{"codex without one", orca.AgentCodex, "sk-test-key\n", "unset|unset|unset|sk-test-key|unset|unset|unset|unset|unset|unset|unset"},
+		{"claude with a judge and a TypeSafe key", orca.AgentClaude, "sk-test-key\nsk-judge-key\nts-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|ts-key|unset|unset|unset|unset|unset"},
+		{"codex with only a TypeSafe key", orca.AgentCodex, "sk-test-key\n\nts-key\n", "unset|unset|unset|sk-test-key|unset|ts-key|unset|unset|unset|unset|unset"},
+		{"claude with a GitHub token", orca.AgentClaude, "sk-test-key\nsk-judge-key\n\ngho-key\n", "sk-test-key|unset|unset|sk-judge-key|unset|unset|gho-key|unset|unset|unset|!gh auth git-credential"},
+		{"codex with only a GitHub token", orca.AgentCodex, "sk-test-key\n\n\ngho-key\n", "unset|unset|unset|sk-test-key|unset|unset|gho-key|unset|unset|unset|!gh auth git-credential"},
+		{"claude with a Trunk key", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\ntrunk-sentinel\n", "sk-test-key|unset|unset|unset|unset|unset|gho-key|unset|trunk-sentinel|unset|!gh auth git-credential"},
+		{"codex with only a Trunk key", orca.AgentCodex, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\n", "unset|unset|unset|sk-test-key|unset|unset|unset|unset|trunk-sentinel|unset|unset"},
+		{"claude with a Gemini key", orca.AgentClaude, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n\ngemini-sentinel\n", "sk-test-key|unset|unset|unset|unset|unset|unset|unset|unset|gemini-sentinel|unset"},
+		{"codex with a Trunk and a Gemini key", orca.AgentCodex, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\n", "unset|unset|unset|sk-test-key|unset|unset|unset|unset|trunk-sentinel|gemini-sentinel|unset"},
 	}
-	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "TYPESAFE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "TRUNK_MERGE_API_KEY"}
+	names := []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "TYPESAFE_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "TRUNK_MERGE_API_KEY", "GEMINI_API_KEY"}
 	report, stale := make([]string, 0, len(names)+1), make([]string, 0, len(names))
 	for _, name := range names {
 		report = append(report, `"${`+name+`-unset}"`)
