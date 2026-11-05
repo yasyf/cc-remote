@@ -30,9 +30,10 @@ func newOrcaStopCmd(runner orca.Runner) *cobra.Command {
 warm pool workspace the lane claimed, releases the task so orca keep no longer reopens its forward,
 closes that SSH forward, removes the Orca environment paired with it, and suspends the machine. A suspended machine's runtime never answers that pairing
 again, and Orca retries a saved environment that does not answer without end. Its disk, workspace
-record, task record, and pool record stay. A warm pool workspace's own name is refused, so stop
-reaches only a workspace a lane claimed. A claim that failed before its worker started is not where
-the lane runs, so stop passes over it.
+record, task record, and pool record stay, and the pool record turns stopped, so prepare --warm
+admits the lane again and claims it a fresh workspace. A warm pool workspace's own name is refused,
+so stop reaches only a workspace a lane claimed. A claim that failed before its worker started, or
+one already stopped, is not where the lane runs, so stop passes over it.
 
 A lane with no task record has no forward to close. A lane with no workspace record, or whose
 machine the provider no longer has, is already stopped: stop removes the records left for it, as
@@ -57,7 +58,8 @@ provider cannot reach runs nothing again, so it is stopped too: stop names that 
 }
 
 func stopLane(ctx context.Context, session *workspace.Session, client orca.Client, lane string) (*orcaStopped, error) {
-	name, err := openPool(session).workspaceOf(lane)
+	pool := openPool(session)
+	name, err := pool.workspaceOf(lane)
 	if err != nil {
 		return nil, err
 	}
@@ -68,11 +70,11 @@ func stopLane(ctx context.Context, session *workspace.Session, client orca.Clien
 	stopped := &orcaStopped{Lane: lane, Workspace: name}
 	err = session.Suspend(ctx, name)
 	if err == nil {
-		return stopped, nil
+		return stopped, pool.stop(name)
 	}
 	if errors.Is(err, providers.ErrNoStorage) {
 		stopped.Found = err.Error()
-		return stopped, nil
+		return stopped, pool.stop(name)
 	}
 	if !errors.Is(err, workspace.ErrNotRecorded) && !errors.Is(err, providers.ErrNotFound) {
 		return nil, err
@@ -111,20 +113,18 @@ func (p *orcaPool) workspaceOf(lane string) (string, error) {
 		return "", err
 	}
 	for _, member := range records {
-		switch {
-		case member.Name == lane:
+		if member.Name == lane {
 			return "", fmt.Errorf("%s names a warm pool workspace, not a lane; a workspace is stopped only through the lane that claimed it", lane)
-		case member.Lane != lane:
-		case member.State != memberFailed:
+		}
+		if member.Lane != lane || member.State == memberStopped {
+			continue
+		}
+		started, err := p.startedWorker(member)
+		if err != nil {
+			return "", err
+		}
+		if started {
 			return member.Name, nil
-		default:
-			task, err := loadTask(p.dir, member.Name)
-			if err != nil && !errors.Is(err, errNoTask) {
-				return "", err
-			}
-			if err == nil && task.Terminal != "" {
-				return member.Name, nil
-			}
 		}
 	}
 	return lane, nil

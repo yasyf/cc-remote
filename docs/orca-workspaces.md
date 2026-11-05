@@ -195,11 +195,12 @@ so on a Sprite it stops every service and waits up to two minutes for the
 Sprite to pause, which it does once no session, request, or connection holds
 it. The disk, the workspace record, the task record, and the pool record stay.
 A warm claim pairs its own environment, so no stopped workspace needs its old
-one back. It refuses a warm pool workspace's own
-name, so it stops only a workspace a lane claimed, and it exits nonzero with
+one back. A warm pool claim's record turns `stopped`, so `prepare --warm`
+admits the lane again and claims it a fresh workspace. It refuses a warm pool
+workspace's own name, so it stops only a workspace a lane claimed, and it exits nonzero with
 the error when the machine does not stop. A claim that failed before its worker
-started is not where the lane runs, so stop passes over it and reaches the
-workspace the lane moved on to.
+started is not where the lane runs, and neither is a claim already stopped, so
+stop passes over both and reaches the workspace the lane moved on to.
 
 A lane with no task record has no forward to close, so stop suspends its
 workspace alone. A lane is already stopped when no workspace is recorded for it
@@ -376,7 +377,12 @@ failure after the terminal starts ends the command. A command that
 dies leaves its workspace `claimed`.
 A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
 first worker, so `--warm` refuses a lane that already has an Orca task, already
-claimed a workspace, or names a pool workspace.
+claimed a workspace its worker started on, or names a pool workspace. Two
+claims do not count, and a relaunch of the lane claims the next unused
+workspace past them: one that failed before its worker's terminal started, and
+one `cc-remote orca stop` stopped. A launcher whose own steps fail after
+`prepare` and before it hands the worker its task stops the lane, so the
+relaunch is admitted and the idle worker does not hold its machine awake.
 
 #### Keep the pool filled
 

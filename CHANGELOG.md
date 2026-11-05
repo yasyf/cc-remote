@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A lane can be relaunched after a failed launch or a stop.**
+  `prepare --warm` refused any lane that had ever claimed a pool workspace. That
+  included a claim whose preparation failed before its worker's terminal
+  started, and a lane that `cc-remote orca stop` had already stopped, so neither
+  could be relaunched. Neither claim holds the lane now: `orca stop` records the
+  claim `stopped`, and the relaunch claims the next unused workspace. A lane
+  whose worker still runs is refused, and the refusal names the stop that
+  frees it.
 - **`cc-remote orca stop` succeeds on a Sprite whose storage is gone.** A
   Sprite the provider answers 503 `Storage not ready` for never runs again, and
   stop failed on it every time, so the supervisor kept a stop blocker open. stop

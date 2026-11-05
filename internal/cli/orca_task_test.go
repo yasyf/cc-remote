@@ -587,8 +587,8 @@ func TestLaunchDeliversTheKeyOnlyToTheVerifiedPrimaryTerminal(t *testing.T) {
 				t.Errorf("task terminal %q, worktree %q, repo %q; want %q, %q, repo-1", task.Terminal, task.WorktreeID, task.RepoID, tt.handle, wantWorktree)
 			}
 			loaded, err := loadTask(driver.state, "task-a")
-			if err != nil || loaded.RepoID != "repo-1" || loaded.WorktreeID != wantWorktree {
-				t.Errorf("stored task = %+v, %v", loaded, err)
+			if err != nil || loaded.RepoID != "repo-1" || loaded.WorktreeID != wantWorktree || loaded.Terminal != tt.handle {
+				t.Errorf("stored task = %+v, %v; want terminal %q recorded even when its key was dropped", loaded, err, tt.handle)
 			}
 		})
 	}

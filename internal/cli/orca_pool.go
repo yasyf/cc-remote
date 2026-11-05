@@ -46,6 +46,7 @@ const (
 	memberReady        memberState = "ready"
 	memberClaimed      memberState = "claimed"
 	memberPrepared     memberState = "prepared"
+	memberStopped      memberState = "stopped"
 	memberFailed       memberState = "failed"
 	memberAbandoned    memberState = "abandoned"
 	memberRefused      memberState = "refused"
@@ -285,14 +286,46 @@ func (p *orcaPool) admit(lane string) error {
 		return err
 	}
 	for _, member := range records {
-		switch {
-		case member.Name == lane:
+		if member.Name == lane {
 			return fmt.Errorf("%s names a warm pool workspace, not a lane; request the worker under a lane name of its own", lane)
-		case member.Lane == lane:
-			return fmt.Errorf("lane %s already claimed warm workspace %s, now %s; a lane gets one first worker", lane, member.Name, member.State)
+		}
+		if member.Lane != lane {
+			continue
+		}
+		started, err := p.startedWorker(member)
+		if err != nil {
+			return err
+		}
+		if started && member.State != memberStopped {
+			return fmt.Errorf("lane %s already claimed warm workspace %s, now %s; a lane gets one first worker until cc-remote orca stop %s stops it", lane, member.Name, member.State, lane)
 		}
 	}
 	return nil
+}
+
+func (p *orcaPool) stop(name string) error {
+	return p.locked(func() error {
+		member, err := p.load(name)
+		if err != nil || member == nil {
+			return err
+		}
+		member.State = memberStopped
+		return p.save(member)
+	})
+}
+
+func (p *orcaPool) startedWorker(member *orcaMember) (bool, error) {
+	if member.State != memberFailed {
+		return true, nil
+	}
+	task, err := loadTask(p.dir, member.Name)
+	switch {
+	case errors.Is(err, errNoTask):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return task.Terminal != "", nil
 }
 
 func (p *orcaPool) claim(ctx context.Context, lane, ref string) (*orcaMember, func(), error) {

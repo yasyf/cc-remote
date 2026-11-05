@@ -894,7 +894,7 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 		task.BeforeWorker = string(said)
 	}
 	if task.Terminal, err = d.worker(ctx, native, task, repo, title, keys, policy); err != nil {
-		return err
+		return errors.Join(err, d.save(task))
 	}
 	if err := d.save(task); err != nil {
 		return err
