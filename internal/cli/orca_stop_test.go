@@ -147,11 +147,9 @@ func TestStopClosesTheForwardRemovesTheEnvironmentAndSuspendsTheWorkspaceEachLan
 
 func TestAStoppedLaneIsAdmittedAgainOnAFreshSpareAndRefusedWhileThatWorkerRuns(t *testing.T) {
 	w := newWarmPool(t, "pool-b")
-	stubForward(t)
 	standInFill(t)
 	pool := openPool(w.session)
 	w.claimedBy(pool, "pool-a", "lane-a", memberPrepared)
-	w.forwardedTask("pool-a")
 	if fill, err := pool.fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-b"}) {
 		t.Fatalf("fill = %+v, %v", fill, err)
 	}
@@ -159,7 +157,7 @@ func TestAStoppedLaneIsAdmittedAgainOnAFreshSpareAndRefusedWhileThatWorkerRuns(t
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "lane-a", "")
 	}, "lane lane-a already claimed warm workspace pool-a, now prepared; a lane gets one first worker until cc-remote orca stop lane-a stops it")
 
-	if stopped, err := stopLane(t.Context(), w.session, newSavedEnvironments(t, orca.Environment{ID: "env-a", Name: "pool-a"}).client(), "lane-a"); err != nil || stopped.Workspace != "pool-a" {
+	if stopped, err := stopLane(t.Context(), w.session, newSavedEnvironments(t).client(), "lane-a"); err != nil || stopped.Workspace != "pool-a" {
 		t.Fatalf("stop lane-a = %+v, %v; want pool-a stopped", stopped, err)
 	}
 	if workspace, err := pool.workspaceOf("lane-a"); err != nil || workspace != "lane-a" {
