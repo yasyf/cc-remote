@@ -217,6 +217,17 @@ for whoever recovers its disk.
 resume a machine, restart a runtime, or recover a worker after process loss.
 The recorded runtime and receipt identities remain unchanged.
 
+An SSH forward can exit on its own while its worker keeps running, for example
+after 45 seconds without an answer from the Sprite. Once `create`, `prepare`, or
+`reconnect` has a worker answering over an SSH forward, it keeps the task and
+starts `cc-remote orca keep` in the background. One keep runs per state
+directory, so a Mac runs one however many lanes it holds. Every 30 seconds it
+reopens each kept forward that has exited, the way `reconnect` does, and it
+exits once no task is kept. `orca stop` and `destroy` release the task before
+they close its forward, so keep never reopens a stopped lane's forward. A task
+launched by a release without keep is not kept until `reconnect` runs on it.
+keep logs to `orca/keeper.log` in the state directory.
+
 ## Prepare a worker for a Mac Run
 
 `cc-remote orca prepare` runs the same steps as `create` and sends no prompt.

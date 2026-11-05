@@ -27,8 +27,8 @@ func newOrcaStopCmd(runner orca.Runner) *cobra.Command {
 		Use:   "stop <lane>",
 		Short: "Close a lane's forward, remove its Orca environment, and suspend the workspace it runs on",
 		Long: `stop finds the workspace a lane runs on, the one prepare created under the lane's name or the
-warm pool workspace the lane claimed, closes the task's SSH forward, removes the Orca environment
-paired with it, and suspends the machine. A suspended machine's runtime never answers that pairing
+warm pool workspace the lane claimed, releases the task so orca keep no longer reopens its forward,
+closes that SSH forward, removes the Orca environment paired with it, and suspends the machine. A suspended machine's runtime never answers that pairing
 again, and Orca retries a saved environment that does not answer without end. Its disk, workspace
 record, task record, and pool record stay. A warm pool workspace's own name is refused, so stop
 reaches only a workspace a lane claimed. A claim that failed before its worker started is not where
@@ -88,6 +88,9 @@ func stopLane(ctx context.Context, session *workspace.Session, client orca.Clien
 }
 
 func disconnect(ctx context.Context, dir state.Dir, client orca.Client, name string) error {
+	if err := state.Remove(dir.OrcaKept(name)); err != nil {
+		return err
+	}
 	task, err := loadTask(dir, name)
 	switch {
 	case errors.Is(err, errNoTask):

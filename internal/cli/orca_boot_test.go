@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -52,6 +53,7 @@ func TestACreatedLaneStartsItsRuntimeWhileTheCreateConfigures(t *testing.T) {
 	w := newFirstWorker(t, nil, false)
 	w.waitForRuntime("plugins.sh configure")
 	native, commands := w.native()
+	keepers := standInKeeper(t)
 	var out bytes.Buffer
 	if err := w.prepare(t.Context(), w.session, native, &out, "task-a", false); err != nil {
 		t.Fatal(err)
@@ -60,6 +62,9 @@ func TestACreatedLaneStartsItsRuntimeWhileTheCreateConfigures(t *testing.T) {
 	task := w.prepared(out.Bytes())
 	if ports := w.servedPorts(); len(ports) != 1 || ports[0] != task.Port || task.RuntimeID != "rt-1" {
 		t.Errorf("runtime starts on ports %v for a task on port %d with runtime %q; want one start on the task's port", ports, task.Port, task.RuntimeID)
+	}
+	if _, err := os.Stat(w.session.Config.State().OrcaKept("task-a")); err != nil || keepers.Load() != 1 {
+		t.Errorf("a created lane is kept: %v, with %d keeper starts; want it kept and one start", err, keepers.Load())
 	}
 	if !slices.Equal(native.calls, commands) {
 		t.Errorf("orca calls =\n%q\nwant\n%q", native.calls, commands)
