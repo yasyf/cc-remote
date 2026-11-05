@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **`cc-remote orca stop <lane>` reaches the workspace the worker runs on.** A
+  lane that moved past a warm workspace that failed during launch holds two pool
+  records, and stop read the older one, so it suspended the failed workspace and
+  left the worker's running.
 - **`cc-remote orca stop` succeeds on a lane that is already gone.** A lane
   with no Orca task record failed with "no Orca task is recorded", and a lane
   whose Sprite no longer existed failed on the suspend. A missing task record
