@@ -428,6 +428,33 @@ func TestHookGrantFinalOnAManagedServerKeepsTheClaimedFive(t *testing.T) {
 	}
 }
 
+func TestHookGrantFinalSeesTheFiveBesideTheHandlersOrca1247Writes(t *testing.T) {
+	for _, server := range []orca.Server{orca.ServerManaged, orca.ServerElectron} {
+		t.Run(string(server), func(t *testing.T) {
+			h := newGrantHome(t)
+			fill, err := h.run(t, orca.GrantFill, "20")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.log(t)
+			h.rawHooks = formedHooks(t, h.root)
+			h.stage(t)
+			trustOrcasOwn(t, h)
+			grant := orca.HookGrant{Captain: []orca.Pin{{ID: probeCaptain, Version: probeVersion}}, Codex: "0.159.2", Project: h.project, Exec: func(_ context.Context, argv []string) ([]byte, error) {
+				cmd := exec.Command(argv[0], argv[1:]...)
+				cmd.Env = h.env
+				return cmd.Output()
+			}}
+			if err := grant.Final(context.Background(), orca.Pregrant{Project: h.project, Hooks: fill.Hooks}, server); err != nil {
+				t.Fatalf("the five beside Orca 1.4.247's handlers were refused: %v", err)
+			}
+			if writes := h.log(t).writes; len(writes) != 0 {
+				t.Errorf("the final verification wrote %v", writes)
+			}
+		})
+	}
+}
+
 func trustOrcasOwn(t *testing.T, h *grantHome) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(h.bin, "state.json"))

@@ -33,6 +33,7 @@ const (
 var (
 	captainPins  = []orca.Pin{{ID: "captain-hook@captain-hook", Version: "12.79.15"}}
 	exactProbe   = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":13,"events":{"SessionStart":2,"UserPromptSubmit":2,"PreToolUse":2,"PermissionRequest":1,"PostToolUse":2,"SubagentStart":1,"SubagentStop":1,"Stop":2}}`
+	formedProbe  = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":14,"events":{"SessionStart":2,"UserPromptSubmit":2,"PreToolUse":2,"PermissionRequest":1,"PostToolUse":2,"SubagentStart":1,"SubagentStop":1,"Stop":2,"Interrupt":1}}`
 	managedProbe = `{"schema":1,"outcome":"exact","reason":"","event":"","record":-1,"home":"` + probeHome + `","root":"` + probeRoot + `","hooksSha256":"` + probeDigest + `","definitions":5,"events":{"SessionStart":1,"UserPromptSubmit":1,"PreToolUse":1,"PostToolUse":1,"Stop":1}}`
 	codexBanner  = []string{"  >_ OpenAI Codex (v0.159.2)", "     ~/app", "  permissions: YOLO mode"}
 	codexReady   = append(slices.Clone(codexBanner), "  › Ask Codex anything")
@@ -70,6 +71,21 @@ var acceptedRows = []browserRow{
 	{"SubagentStop", 1, 1, 0, "Right before a subagent ends its turn"},
 	{"Stop", 2, 1, 1, "Right before Codex ends its turn"},
 	{"Interrupt", 0, 0, 0, "Right before an interrupted turn is aborted"},
+}
+
+var formedRows = []browserRow{
+	{"PreToolUse", 2, 1, 1, "Before a tool executes"},
+	{"PermissionRequest", 1, 1, 0, "When permission is requested"},
+	{"PostToolUse", 2, 1, 1, "After a tool executes"},
+	{"PreCompact", 0, 0, 0, "Before context compaction"},
+	{"PostCompact", 0, 0, 0, "After context compaction"},
+	{"SessionStart", 2, 1, 1, "When a new session starts"},
+	{"SessionEnd", 0, 0, 0, "Right before a session ends"},
+	{"UserPromptSubmit", 2, 1, 1, "When the user submits a prompt"},
+	{"SubagentStart", 1, 1, 0, "When a subagent is created"},
+	{"SubagentStop", 1, 1, 0, "Right before a subagent ends its turn"},
+	{"Stop", 2, 1, 1, "Right before Codex ends its turn"},
+	{"Interrupt", 1, 1, 0, "Right before an interrupted turn is aborted"},
 }
 
 var managedRows = []browserRow{
@@ -392,6 +408,9 @@ func TestCodexReviewAcceptsTheSetOfTheServerOrcaReports(t *testing.T) {
 		{"managed server with Orca's handlers in the browser", orca.ServerManaged, acceptedRows, managedProbe, "PreToolUse with 2 installed, 1 active and 1 to review, not 1, 0 and 1", browsed},
 		{"Electron without Orca's handlers in the hooks file", orca.ServerElectron, acceptedRows, managedProbe, "another set of definitions", refused},
 		{"Electron without Orca's handlers in the browser", orca.ServerElectron, managedRows, exactProbe, "PreToolUse with 1 installed, 0 active and 1 to review, not 2, 1 and 1", browsed},
+		{"managed server with Orca 1.4.247's handlers", orca.ServerManaged, formedRows, formedProbe, "", map[string]int{sendEnter: 1, sendTrust: 1, sendEscape: 1, waitIdle: 1}},
+		{"Electron with Orca 1.4.247's handlers", orca.ServerElectron, formedRows, formedProbe, "", map[string]int{sendEnter: 1, sendTrust: 1, sendEscape: 1, waitIdle: 1}},
+		{"Orca 1.4.247's hooks file without its Interrupt row", orca.ServerManaged, acceptedRows, formedProbe, "Interrupt with 0 installed, 0 active and 0 to review, not 1, 1 and 0", browsed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

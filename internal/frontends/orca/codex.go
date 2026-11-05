@@ -43,6 +43,9 @@ import tomllib
 
 CAPTAIN = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 NATIVE = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "Stop")
+FORMED = NATIVE + ("Interrupt",)
+FORM_MARKER = ": orca-agent-hook-form=1;"
+FORM = FORM_MARKER + ' if [ -n "${ORCA_PANE_KEY-}" ] && [ -n "${ORCA_AGENT_HOOK_ROOT-}" ] && [ -f "${ORCA_AGENT_HOOK_ROOT-}/agent-hooks/codex-hook.sh" ]; then /bin/sh "${ORCA_AGENT_HOOK_ROOT-}/agent-hooks/codex-hook.sh" || :; elif [ -z "${ORCA_AGENT_HOOK_ROOT-}" ] && [ -n "${ORCA_PANE_KEY-}" ] && [ -n "${ORCA_AGENT_HOOK_PORT-}" ] && [ -f "${HOME-}/.orca/agent-hooks/codex-hook.sh" ]; then /bin/sh "${HOME-}/.orca/agent-hooks/codex-hook.sh" || :; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi'
 BOOKKEEPING = {"state", "enabled"}
 
 
@@ -129,15 +132,20 @@ def definitions(plugin, version, native):
     if not isinstance(document, dict) or set(document) != {"hooks"} or not isinstance(document["hooks"], dict):
         raise Refusal("hooks")
     table = document["hooks"]
-    order = NATIVE if native else CAPTAIN
-    if set(table) - set(order):
-        raise Refusal("unexpected-event")
     script = quote(home + "/.orca/agent-hooks/codex-hook.sh")
     shim = {"hooks": [{"type": "command", "command": "if [ -f " + script + " ] && [ -r " + script + " ] && [ -x " + script + " ]; then /bin/sh " + script + "; else { command -p cat 2>/dev/null || cat; } >/dev/null 2>&1 || :; fi", "timeout": 10}]}
+    orca = {}
+    if FORM_MARKER.encode() in raw:
+        orca = {event: {"hooks": [{"type": "command", "command": FORM, "timeout": 3 if event == "Interrupt" else 10}]} for event in FORMED}
+    elif native:
+        orca = {event: shim for event in NATIVE}
+    order = [event for event in FORMED if event in orca or event in CAPTAIN]
+    if set(table) - set(order):
+        raise Refusal("unexpected-event")
     events = {}
     handlers = []
     for event in order:
-        want = [shim] if native else []
+        want = [orca[event]] if event in orca else []
         if event in CAPTAIN:
             want.append({"hooks": [{"type": "command", "command": "CAPT_HOOK_PROVIDER=codex " + quote(hook) + " run " + event}]})
         groups = table.get(event)
@@ -179,6 +187,7 @@ main()
 
 var (
 	nativeHookEvents  = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "Stop"}
+	formedHookEvents  = append(slices.Clone(nativeHookEvents), "Interrupt")
 	captainHookEvents = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
 	browserEvents     = []string{"PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt"}
 	probeRefusals     = []string{"home", "metadata", "manifest", "executable", "config", "inline-hooks", "hooks", "duplicate-key", "unexpected-event", "mismatch", "missing", "probe-error"}
@@ -292,7 +301,7 @@ func ParseHookProbe(out []byte, pin Pin, server Server) (HookProbe, error) {
 	}
 	switch probe.Outcome {
 	case "refused":
-		if !slices.Contains(probeRefusals, probe.Reason) || (probe.Event != "" && !slices.Contains(nativeHookEvents, probe.Event)) {
+		if !slices.Contains(probeRefusals, probe.Reason) || (probe.Event != "" && !slices.Contains(formedHookEvents, probe.Event)) {
 			return HookProbe{}, errors.New("the Codex hook probe refused for an unrecognized reason")
 		}
 		return HookProbe{}, HookRefusal{Reason: probe.Reason, Event: probe.Event, Record: probe.Record}
@@ -301,7 +310,7 @@ func ParseHookProbe(out []byte, pin Pin, server Server) (HookProbe, error) {
 		return HookProbe{}, errors.New("the Codex hook probe reported an unrecognized outcome")
 	}
 	name, market, _ := strings.Cut(pin.ID, "@")
-	counts := server.multiplicity()
+	counts := multiplicity(server.orca(probe.Events))
 	switch {
 	case !path.IsAbs(probe.Home) || path.Clean(probe.Home) != probe.Home:
 		return HookProbe{}, errors.New("the Codex hook probe reported no absolute runtime home")
@@ -315,24 +324,27 @@ func ParseHookProbe(out []byte, pin Pin, server Server) (HookProbe, error) {
 	return probe, nil
 }
 
-func (s Server) native() []string {
+func (s Server) orca(events map[string]int) []string {
+	if _, formed := events["Interrupt"]; formed {
+		return formedHookEvents
+	}
 	if s == ServerElectron {
 		return nativeHookEvents
 	}
 	return nil
 }
 
-func (s Server) multiplicity() map[string]int {
+func multiplicity(orca []string) map[string]int {
 	counts := map[string]int{}
-	for _, event := range slices.Concat(s.native(), captainHookEvents) {
-		counts[event] = s.row(event).Installed
+	for _, event := range slices.Concat(orca, captainHookEvents) {
+		counts[event] = expectedRow(orca, event).Installed
 	}
 	return counts
 }
 
-func (s Server) row(event string) hookRow {
+func expectedRow(orca []string, event string) hookRow {
 	row := hookRow{Event: event}
-	if slices.Contains(s.native(), event) {
+	if slices.Contains(orca, event) {
 		row.Installed, row.Active = 1, 1
 	}
 	if slices.Contains(captainHookEvents, event) {
@@ -515,8 +527,9 @@ func (h *hookRows) add(view hookBrowser, pending int) error {
 
 func (h hookRows) check(probe HookProbe, server Server) error {
 	var installed, active, review int
+	orca := server.orca(probe.Events)
 	for _, event := range browserEvents {
-		want := server.row(event)
+		want := expectedRow(orca, event)
 		row, seen := h.counts[event]
 		switch {
 		case !seen:
@@ -531,7 +544,7 @@ func (h hookRows) check(probe HookProbe, server Server) error {
 	if !slices.Equal(h.order, browserEvents) {
 		return errors.New("the hooks browser lists its events out of the supported order")
 	}
-	if installed != probe.Definitions || active != len(server.native()) || review != len(captainHookEvents) {
+	if installed != probe.Definitions || active != len(orca) || review != len(captainHookEvents) {
 		return fmt.Errorf("the hooks browser totals %d installed, %d active and %d to review", installed, active, review)
 	}
 	return nil

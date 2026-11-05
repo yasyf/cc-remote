@@ -380,10 +380,11 @@ func (g HookGrant) Claim(ctx context.Context, prior Pregrant) error {
 }
 
 func (g HookGrant) Final(ctx context.Context, prior Pregrant, server Server) error {
+	mode := GrantFinal
 	if server == ServerManaged {
-		return g.Claim(ctx, prior)
+		mode = GrantClaim
 	}
-	result, err := g.Run(ctx, GrantFinal)
+	result, err := g.Run(ctx, mode)
 	if err != nil {
 		return err
 	}
@@ -411,7 +412,7 @@ func ParseHookGrant(out []byte, pin Pin, mode GrantMode, project string) (HookGr
 	}
 	switch result.Outcome {
 	case "refused":
-		if !slices.Contains(grantRefusals, result.Reason) || (result.Event != "" && !slices.Contains(nativeHookEvents, result.Event)) || !slices.Contains(grantSteps, result.Step) {
+		if !slices.Contains(grantRefusals, result.Reason) || (result.Event != "" && !slices.Contains(formedHookEvents, result.Event)) || !slices.Contains(grantSteps, result.Step) {
 			return HookGrantResult{}, errors.New("the Codex trust grant refused for an unrecognized reason")
 		}
 		return HookGrantResult{}, GrantRefusal{Mode: mode, Reason: result.Reason, Event: result.Event, Record: result.Record, Step: result.Step}
@@ -419,14 +420,12 @@ func ParseHookGrant(out []byte, pin Pin, mode GrantMode, project string) (HookGr
 	default:
 		return HookGrantResult{}, errors.New("the Codex trust grant reported an unrecognized outcome")
 	}
-	counts := map[string]int{}
-	for _, event := range captainHookEvents {
-		counts[event] = 1
-	}
-	writable := len(captainHookEvents)
+	installed := ServerManaged
 	if mode == GrantFinal {
-		counts = ServerElectron.multiplicity()
+		installed = ServerElectron
 	}
+	counts := multiplicity(installed.orca(result.Events))
+	writable := len(captainHookEvents)
 	if mode != GrantFill {
 		writable = 0
 	}

@@ -48,6 +48,11 @@ func grantDoc(t *testing.T, mode orca.GrantMode, edit func(map[string]any)) stri
 	return string(raw)
 }
 
+func formedDoc(d map[string]any) {
+	d["events"] = map[string]any{"SessionStart": 2, "UserPromptSubmit": 2, "PreToolUse": 2, "PermissionRequest": 1, "PostToolUse": 2, "SubagentStart": 1, "SubagentStop": 1, "Stop": 2, "Interrupt": 1}
+	d["definitions"], d["hooks"] = 14, grantHooks(14)
+}
+
 func refusedDoc(mode orca.GrantMode, reason, event string, record int, step string) string {
 	return fmt.Sprintf(`{"schema":1,"mode":%q,"outcome":"refused","reason":%q,"event":%q,"record":%d,"step":%q}`, mode, reason, event, record, step)
 }
@@ -63,6 +68,14 @@ func TestParseHookGrantAcceptsOnlyTheExactDocument(t *testing.T) {
 		{"fill that wrote", orca.GrantFill, grantDoc(t, orca.GrantFill, func(d map[string]any) { d["projectWrite"], d["hookWrites"] = true, 5 }), ""},
 		{"claim without writes", orca.GrantClaim, grantDoc(t, orca.GrantClaim, nil), ""},
 		{"final thirteen", orca.GrantFinal, grantDoc(t, orca.GrantFinal, nil), ""},
+		{"claim beside Orca 1.4.247's handlers", orca.GrantClaim, grantDoc(t, orca.GrantClaim, formedDoc), ""},
+		{"final beside Orca 1.4.247's handlers", orca.GrantFinal, grantDoc(t, orca.GrantFinal, formedDoc), ""},
+		{"Orca 1.4.247's handlers without Interrupt", orca.GrantClaim, grantDoc(t, orca.GrantClaim, func(d map[string]any) {
+			formedDoc(d)
+			delete(d["events"].(map[string]any), "Interrupt")
+			d["definitions"], d["hooks"] = 13, grantHooks(13)
+		}), "another set of definitions"},
+		{"refusal at Interrupt", orca.GrantClaim, refusedDoc(orca.GrantClaim, "missing", "Interrupt", 0, ""), "the claim grant of the worker's Codex trust refused: missing at Interrupt record 0"},
 		{"claim that wrote trust", orca.GrantClaim, grantDoc(t, orca.GrantClaim, func(d map[string]any) { d["projectWrite"] = true }), "wrote more than its mode allows"},
 		{"final that granted", orca.GrantFinal, grantDoc(t, orca.GrantFinal, func(d map[string]any) { d["hookWrites"] = 1 }), "wrote more than its mode allows"},
 		{"fill beyond five", orca.GrantFill, grantDoc(t, orca.GrantFill, func(d map[string]any) { d["hookWrites"] = 6 }), "wrote more than its mode allows"},
@@ -179,6 +192,9 @@ func TestHookGrantBindsClaimAndFinalToThePregrant(t *testing.T) {
 	}
 	if err := answer(grantDoc(t, orca.GrantClaim, nil)).Final(context.Background(), prior, orca.ServerManaged); err != nil {
 		t.Errorf("a managed server's unchanged five were refused: %v", err)
+	}
+	if err := answer(grantDoc(t, orca.GrantClaim, formedDoc)).Final(context.Background(), prior, orca.ServerManaged); err != nil {
+		t.Errorf("a managed server's five beside Orca 1.4.247's handlers were refused: %v", err)
 	}
 	for name, out := range map[string]string{"Orca's handlers": grantDoc(t, orca.GrantFinal, nil), "a hash its pregrant never trusted": drifted} {
 		if err := answer(out).Final(context.Background(), prior, orca.ServerManaged); err == nil {
