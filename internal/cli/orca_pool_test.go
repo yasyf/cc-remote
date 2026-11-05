@@ -695,6 +695,47 @@ func TestWarmClaimRefusesUnverifiedOrIncompatibleSparesWithoutTouchingThem(t *te
 	}
 }
 
+func TestALaneStopsAfterTwoFailedClaimsAndLeavesTheNextSpareReady(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b", "pool-c")
+	w.oneExecAtATime()
+	*w.session.Config.Orca.Pool.Ready = 3
+	standInFill(t)
+	pool := openPool(w.session)
+	if fill, err := pool.fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-b", "pool-c"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
+	}
+	handle := w.provider.Handle
+	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
+		if strings.Contains(cmd[len(cmd)-1], "fetch --quiet --prune --depth 1 origin") {
+			return providers.Result{ExitCode: 1, Stderr: []byte("fatal: failed to connect\n")}
+		}
+		return handle(id, cmd, stdin)
+	}
+	calls := len(w.provider.Calls())
+	native, _ := w.nativeAs("pool-c")
+	err := w.warm(t.Context(), w.session, native, io.Discard, "lane-a", "")
+	if err == nil || !strings.Contains(err.Error(), "warm workspace pool-a") || !strings.Contains(err.Error(), "warm workspace pool-b") {
+		t.Fatalf("err = %v, want both failed claims", err)
+	}
+	for _, name := range []string{"pool-a", "pool-b"} {
+		if member := w.member(name); member.State != memberFailed || member.Lane != "lane-a" {
+			t.Errorf("%s = %+v, want it failed for lane-a", name, member)
+		}
+	}
+	if member := w.member("pool-c"); member.State != memberReady || member.Lane != "" {
+		t.Errorf("pool-c = %+v, want a third spare left ready", member)
+	}
+	for _, call := range w.provider.Calls()[calls:] {
+		if strings.HasPrefix(call, "create ") {
+			t.Errorf("the lane created a workspace after its second failed try: %q", call)
+		}
+	}
+	w.free("pool-a")
+	w.free("pool-b")
+	w.free("pool-c")
+	w.free("lane-a")
+}
+
 func TestWarmClaimFailsWithoutClaimingWhenTheProviderCannotAnswer(t *testing.T) {
 	w := newWarmPool(t)
 	pool := openPool(w.session)
