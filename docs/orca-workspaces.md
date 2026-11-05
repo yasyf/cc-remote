@@ -355,8 +355,9 @@ error's class, the exit code when one was observed, the HTTP status when a
 provider lookup answered one, and the message's byte length and SHA-256, never
 its text. When that happens before the worker's terminal starts, the command
 logs a warning, claims the next unused workspace, and creates the lane's own
-workspace once none is left; a failed launch reports every workspace that
-failed. A failure after the terminal starts ends the command. A command that
+workspace once none is left. A lane stops after two failed claims and reports
+both, so a preparation that fails on every workspace cannot consume the pool. A
+failure after the terminal starts ends the command. A command that
 dies leaves its workspace `claimed`.
 A worker that starts is recorded `prepared` with its HEAD. Each lane gets one
 first worker, so `--warm` refuses a lane that already has an Orca task, already

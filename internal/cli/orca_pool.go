@@ -36,6 +36,7 @@ const (
 	allocationWarm       = "warm"
 	allocationCreated    = "created"
 	fillTimeout          = 20 * time.Minute
+	laneTries            = 2
 )
 
 type memberState string
@@ -201,6 +202,9 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 		}
 		session.Log.Warn("a claimed warm workspace failed before its worker started, so the lane tries the next", "lane", lane, "workspace", member.Name, "failure", failureOf(err).describe())
 		failed = append(failed, fmt.Errorf("lane %s claimed warm workspace %s, which stays claimed as failed: %w", lane, member.Name, err))
+		if len(failed) == laneTries {
+			return errors.Join(failed...)
+		}
 	}
 	allocation.Workspace, allocation.Allocation = lane, allocationCreated
 	task, err := l.prime(ctx, session, runner, runtime, lane, openCreated, nil, finish)
