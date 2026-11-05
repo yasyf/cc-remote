@@ -78,6 +78,18 @@ func (d Dir) OrcaForwardLog(name string) string {
 	return filepath.Join(string(d), "orca", name+".forward.log")
 }
 
+func (d Dir) OrcaKept(name string) string {
+	return filepath.Join(string(d), "orca-kept", name)
+}
+
+func (d Dir) OrcaKeeper() string {
+	return filepath.Join(string(d), "orca", "keeper.lock")
+}
+
+func (d Dir) OrcaKeeperLog() string {
+	return filepath.Join(string(d), "orca", "keeper.log")
+}
+
 func (d Dir) OrcaGatewayLock(name, instance string) string {
 	return filepath.Join(string(d), "orca", name+"."+instance+".gateway.lock")
 }

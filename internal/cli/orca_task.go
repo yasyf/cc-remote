@@ -473,6 +473,7 @@ func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
 		newOrcaForwardCmd(),
 		newOrcaPoolCmd(),
 		newOrcaStopCmd(runner),
+		newOrcaKeepCmd(),
 	}
 }
 
@@ -656,8 +657,9 @@ func newOrcaReconnectCmd(runner orca.Runner) *cobra.Command {
 		Use:   "reconnect <name>",
 		Short: "Restore a task's SSH forward to its recorded live Orca runtime",
 		Long: `reconnect reopens the recorded SSH forward when it is down and confirms the paired environment
-answers from the recorded live runtime. It does not resume a machine or start a runtime or worker.
-Recovery after a runtime exits or a machine loses its processes is not supported by this command.`,
+answers from the recorded live runtime, then keeps the task so orca keep reopens its forward if it
+exits again. It does not resume a machine or start a runtime or worker. Recovery after a runtime
+exits or a machine loses its processes is not supported by this command.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := flags.load()
@@ -671,10 +673,14 @@ Recovery after a runtime exits or a machine loses its processes is not supported
 			if err := task.ensure(cmd.Context(), cfg.Path); err != nil {
 				return err
 			}
-			if err := (orcaDriver{state: cfg.State()}).save(task); err != nil {
+			driver := orcaDriver{state: cfg.State(), log: slog.Default()}
+			if err := driver.save(task); err != nil {
 				return err
 			}
 			if _, err := orca.NewClient(runner).On(task.Environment, task.RuntimeID).Status(cmd.Context()); err != nil {
+				return err
+			}
+			if err := driver.keep(task, cfg.Path); err != nil {
 				return err
 			}
 			return emit(cmd.OutOrStdout(), task)
@@ -891,6 +897,9 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 		return err
 	}
 	if err := d.save(task); err != nil {
+		return err
+	}
+	if err := d.keep(task, session.Config.Path); err != nil {
 		return err
 	}
 	d.log.Info("started the worker", "terminal", task.Terminal, "agent", task.Agent.Kind, "model", task.Agent.Model)
