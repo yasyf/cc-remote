@@ -1037,7 +1037,10 @@ func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTa
 		dropped := task.dropKey(ctx, dir)
 		return terminal.Handle, errors.Join(err, dropped)
 	}
-	task.WorktreeID = terminal.WorktreeID
+	task.Terminal, task.WorktreeID = terminal.Handle, terminal.WorktreeID
+	if err := d.save(task); err != nil {
+		return terminal.Handle, errors.Join(err, task.dropKey(ctx, dir))
+	}
 	payload := keys.payload(task.author)
 	defer clear(payload)
 	write, cancel := context.WithTimeout(ctx, keyPipeTimeout)

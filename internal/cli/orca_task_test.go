@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -562,9 +563,37 @@ func TestLaunchDeliversTheKeyOnlyToTheVerifiedPrimaryTerminal(t *testing.T) {
 				Service: orca.RuntimeService, Port: 7001, Environment: "task-a", Agent: agent,
 				Forward: &orcaTunnel{Host: "task-a", Config: "/state/ssh/task-a.ssh", Control: control, Log: filepath.Join(t.TempDir(), "forward.log")},
 			}
+			keyed := make(chan string, 1)
+			if tt.want == "" {
+				fifo := filepath.Join(t.TempDir(), "key")
+				if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("KEY_PIPE", fifo)
+				go func() {
+					pipe, err := os.Open(fifo)
+					if err != nil {
+						keyed <- err.Error()
+						return
+					}
+					defer func() { _ = pipe.Close() }()
+					stored, err := loadTask(driver.state, "task-a")
+					_, _ = io.Copy(io.Discard, pipe)
+					if err != nil {
+						keyed <- err.Error()
+						return
+					}
+					keyed <- stored.Terminal
+				}()
+			}
 			err = driver.launch(t.Context(), session, task, runtime, secrets{key: []byte("sk-test-key")}, "task-a")
 			if tt.want == "" && err != nil || tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Fatalf("launch = %v, want %q", err, tt.want)
+			}
+			if tt.want == "" {
+				if stored := <-keyed; stored != "term-1" {
+					t.Errorf("the task record held terminal %q while the key was delivered, want term-1 saved first", stored)
+				}
 			}
 			calls := commands[:4]
 			if tt.want == "" {
