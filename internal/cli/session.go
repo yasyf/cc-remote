@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/cc-remote/internal/config"
+	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/registry"
 	"github.com/yasyf/cc-remote/internal/tailnet"
@@ -255,12 +257,12 @@ cc-remote orca forward holds it, so cc-remote orca stop closes that forward firs
 	return cmd
 }
 
-func newDestroyCmd() *cobra.Command {
+func newDestroyCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
 	var connection string
 	cmd := &cobra.Command{
 		Use:   "destroy [name]",
-		Short: "Leave the tailnet, destroy the machine, and remove its workspace record",
+		Short: "Close its Orca forward and environment, leave the tailnet, destroy the machine, and remove its workspace record",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, err := orcaTarget(cmd, args, connection)
@@ -271,12 +273,19 @@ func newDestroyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return session.Destroy(cmd.Context(), name)
+			return destroyWorkspace(cmd.Context(), session, orca.NewClient(runner), name)
 		},
 	}
 	flags.bind(cmd)
 	bindConnection(cmd, &connection)
 	return cmd
+}
+
+func destroyWorkspace(ctx context.Context, session *workspace.Session, client orca.Client, name string) error {
+	if err := disconnect(ctx, session.Config.State(), client, name); err != nil {
+		return err
+	}
+	return session.Destroy(ctx, name)
 }
 
 type extended struct {

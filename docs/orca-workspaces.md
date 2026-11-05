@@ -186,12 +186,16 @@ machine; use `cc-remote orca stop`, `cc-remote suspend`, and `cc-remote destroy`
 
 `cc-remote orca stop lane-name` stops the workspace a lane runs on: the one
 `prepare` created under the lane's name, or the warm pool workspace the lane
-claimed. It closes the task's SSH forward and suspends the machine, then prints
-the lane and workspace. A Namespace instance stops. Sprites has no stop verb,
+claimed. It closes the task's SSH forward, removes the Orca environment saved
+under the workspace's name, and suspends the machine, then prints the lane and
+workspace. The stopped runtime never answers that environment again, and Orca
+retries a saved environment that does not answer about every 1.5 seconds for
+as long as it stays saved. A Namespace instance stops. Sprites has no stop verb,
 so on a Sprite it stops every service and waits up to two minutes for the
 Sprite to pause, which it does once no session, request, or connection holds
-it. The disk, the workspace record, the task record, and the pool record stay,
-and `reconnect` reopens the forward. It refuses a warm pool workspace's own
+it. The disk, the workspace record, the task record, and the pool record stay.
+A warm claim pairs its own environment, so no stopped workspace needs its old
+one back. It refuses a warm pool workspace's own
 name, so it stops only a workspace a lane claimed, and it exits nonzero with
 the error when the machine does not stop. A claim that failed before its worker
 started is not where the lane runs, so stop passes over it and reaches the
@@ -421,7 +425,8 @@ found the name already taken, which removes it.
 `refused`.
 
 `cc-remote destroy <name>` removes the name's pool record with its workspace
-record. When a name has a pool record but no workspace record, destroy removes
+record. When the name has a task record, destroy first closes its SSH forward
+and removes its Orca environment, as `orca stop` does. When a name has a pool record but no workspace record, destroy removes
 the pool record, logs that it touched no machine, and exits zero, so a record
 whose machine is long gone can be cleared by name. `status` and `fill` never
 remove a record on their own.

@@ -129,6 +129,26 @@ func (c Client) AddEnvironment(ctx context.Context, name, pairing string) (Envir
 	return result.Environment, nil
 }
 
+func (c Client) ForgetEnvironment(ctx context.Context, name string) error {
+	out, runErr := c.runner.Run(ctx, "environment", "list", "--json")
+	saved, err := decode[struct {
+		Environments []Environment `json:"environments"`
+	}](out, "orca environment list", LocalRuntime)
+	if err != nil {
+		return errors.Join(runErr, err)
+	}
+	for _, environment := range saved.Environments {
+		if environment.Name != name {
+			continue
+		}
+		out, runErr := c.runner.Run(ctx, "environment", "rm", "--environment", environment.ID, "--json")
+		if _, err := decode[json.RawMessage](out, "orca environment rm --environment "+environment.ID, LocalRuntime); err != nil {
+			return errors.Join(runErr, err)
+		}
+	}
+	return nil
+}
+
 func (c Client) On(environment, runtimeID string) Remote {
 	return Remote{client: c, Environment: environment, RuntimeID: runtimeID}
 }

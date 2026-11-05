@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
@@ -20,16 +21,18 @@ type orcaStopped struct {
 	Found     string `json:"found,omitempty"`
 }
 
-func newOrcaStopCmd() *cobra.Command {
+func newOrcaStopCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "stop <lane>",
-		Short: "Close a lane's forward and suspend the workspace it runs on",
+		Short: "Close a lane's forward, remove its Orca environment, and suspend the workspace it runs on",
 		Long: `stop finds the workspace a lane runs on, the one prepare created under the lane's name or the
-warm pool workspace the lane claimed, closes the task's SSH forward, and suspends the machine. Its
-disk, workspace record, task record, and pool record stay. A warm pool workspace's own name is
-refused, so stop reaches only a workspace a lane claimed. A claim that failed before its worker
-started is not where the lane runs, so stop passes over it.
+warm pool workspace the lane claimed, closes the task's SSH forward, removes the Orca environment
+paired with it, and suspends the machine. A suspended machine's runtime never answers that pairing
+again, and Orca retries a saved environment that does not answer without end. Its disk, workspace
+record, task record, and pool record stay. A warm pool workspace's own name is refused, so stop
+reaches only a workspace a lane claimed. A claim that failed before its worker started is not where
+the lane runs, so stop passes over it.
 
 A lane with no task record has no forward to close. A lane with no workspace record, or whose
 machine the provider no longer has, is already stopped: stop removes the records left for it, as
@@ -42,7 +45,7 @@ provider cannot reach runs nothing again, so it is stopped too: stop names that 
 			if err != nil {
 				return err
 			}
-			stopped, err := stopLane(cmd.Context(), session, args[0])
+			stopped, err := stopLane(cmd.Context(), session, orca.NewClient(runner), args[0])
 			if err != nil {
 				return err
 			}
@@ -53,21 +56,14 @@ provider cannot reach runs nothing again, so it is stopped too: stop names that 
 	return cmd
 }
 
-func stopLane(ctx context.Context, session *workspace.Session, lane string) (*orcaStopped, error) {
+func stopLane(ctx context.Context, session *workspace.Session, client orca.Client, lane string) (*orcaStopped, error) {
 	name, err := openPool(session).workspaceOf(lane)
 	if err != nil {
 		return nil, err
 	}
 	dir := session.Config.State()
-	task, err := loadTask(dir, name)
-	switch {
-	case errors.Is(err, errNoTask):
-	case err != nil:
+	if err := disconnect(ctx, dir, client, name); err != nil {
 		return nil, err
-	case task.Forward != nil:
-		if err := task.Forward.close(ctx); err != nil {
-			return nil, err
-		}
 	}
 	stopped := &orcaStopped{Lane: lane, Workspace: name}
 	err = session.Suspend(ctx, name)
@@ -89,6 +85,21 @@ func stopLane(ctx context.Context, session *workspace.Session, lane string) (*or
 		return nil, err
 	}
 	return stopped, nil
+}
+
+func disconnect(ctx context.Context, dir state.Dir, client orca.Client, name string) error {
+	task, err := loadTask(dir, name)
+	switch {
+	case errors.Is(err, errNoTask):
+		return nil
+	case err != nil:
+		return err
+	case task.Forward != nil:
+		if err := task.Forward.close(ctx); err != nil {
+			return err
+		}
+	}
+	return client.ForgetEnvironment(ctx, task.Environment)
 }
 
 func (p *orcaPool) workspaceOf(lane string) (string, error) {
