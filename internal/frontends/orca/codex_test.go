@@ -48,6 +48,7 @@ var (
 		"  2. Quit",
 		"  enter continue · esc quit",
 	}
+	folderCommandCenter = slices.Concat(folderShown[:6], []string{"  2. Back to Agent Command Center", "  enter continue · esc back"})
 )
 
 type browserRow struct {
@@ -581,6 +582,7 @@ func TestCodexFolderTrustEntersOnlyTheVerifiedChoice(t *testing.T) {
 	}{
 		{"already ready", [][]string{codexReady}, nil, "", 0, 0},
 		{"trust selected", [][]string{folderShown, codexReady}, []string{"trust"}, "", 0, 1},
+		{"trust selected beside the command center", [][]string{folderCommandCenter, codexReady}, []string{"trust"}, "", 0, 1},
 		{"quit selected", [][]string{folderAccess(quitChoice), folderAccess(trustChoice), codexReady}, []string{"trust"}, "", 1, 1},
 		{"never reaches trust", [][]string{folderAccess(quitChoice), other, folderAccess(quitChoice), other, folderAccess(quitChoice)}, nil, "trust: 4 moves never selected", 4, 0},
 		{"no selection", [][]string{folderAccess("")}, nil, "matched no known startup state", 1, 0},

@@ -199,7 +199,7 @@ var (
 	reviewRow         = regexp.MustCompile(`^(›| ) ([A-Za-z]+) +(\d+) +(\d+) +(\d+) +\S.*$`)
 	trustedRow        = regexp.MustCompile(`^(›| ) ([A-Za-z]+) +(\d+) +(\d+) +\S.*$`)
 	sha256Hex         = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	folderTrust       = Gate{Name: "trust", Screen: regexp.MustCompile(`(?ms)^ *Folder access *$.*^ *Trust this folder\? Codex can read.*^ *enter continue · esc quit *$`), Choice: regexp.MustCompile(`^1\. Trust and continue$`), Move: KeyUp, Trust: true}
+	folderTrust       = Gate{Name: "trust", Screen: regexp.MustCompile(`(?ms)^ *Folder access *$.*^ *Trust this folder\? Codex can read.*^ *enter continue · esc (?:quit|back) *$`), Choice: regexp.MustCompile(`^1\. Trust and continue$`), Move: KeyUp, Trust: true}
 )
 
 type Pin struct {

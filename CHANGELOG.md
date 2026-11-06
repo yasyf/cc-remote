@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finds its merge base. A blobless profile can keep a warm pool too.
 
 ### Fixed
+- **A Codex 0.167 worker gets past its folder-trust screen.** Codex 0.167
+  ends that screen with `esc back` and offers "Back to Agent Command Center"
+  in place of "Quit", so the startup gate matched nothing and `prepare` timed
+  out with "matched no known startup state". The gate now accepts either
+  footer and still enters only "1. Trust and continue".
 - **A failed warm claim no longer leaves its machine running.** A claim that
   failed before its worker started stayed `failed` with its Sprite running, and
   those Sprites filled the organization's Sprite limit. The claim now checks
