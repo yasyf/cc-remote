@@ -26,6 +26,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/sprites"
+	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
@@ -102,6 +103,10 @@ type unobserved struct {
 	err  error
 }
 
+type unconfirmed struct {
+	err error
+}
+
 type orcaPool struct {
 	session *workspace.Session
 	dir     state.Dir
@@ -144,6 +149,9 @@ type orcaPoolStatus struct {
 
 var (
 	spareAnswersWithin = time.Minute
+	failedStopWithin   = 4 * time.Minute
+	agentProcesses     = remote.Script(`processes=$(ps -eo comm=)`, `for name in $processes; do case "$name" in `+orca.AgentCodex+`|`+orca.AgentClaude+`) exit `+strconv.Itoa(exitAgentRunning)+` ;; esac; done`)
+	agentRefusals      = map[int]string{exitAgentRunning: "an agent process runs there"}
 
 	spareName   = func() string { return "pool-" + strings.ToLower(rand.Text()[:16]) }
 	fillCommand = func(config, provider, profile string) (*exec.Cmd, error) {
@@ -202,13 +210,18 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 		allocation.Workspace, allocation.Allocation = member.Name, allocationWarm
 		allocation.Task, err = l.prime(ctx, session, runner, runtime, member.Name, openSpare, member.Pregrant, finish)
 		err = errors.Join(err, pool.settle(member, allocation.Task, err))
-		release()
 		if err == nil || allocation.Task != nil && allocation.Task.Terminal != "" {
+			release()
 			allocation.Head, allocation.HookDrift = allocation.Task.BaseCommit, allocation.Task.drift
 			return errors.Join(withEarlier(failed, err), emit(out, allocation))
 		}
-		session.Log.Warn("a claimed warm workspace failed before its worker started, so the lane tries the next", "lane", lane, "workspace", member.Name, "failure", failureOf(err).describe())
-		failed = append(failed, fmt.Errorf("lane %s claimed warm workspace %s, which stays claimed as failed: %w", lane, member.Name, err))
+		session.Log.Warn("a claimed warm workspace failed before its worker started, so the lane stops it and tries the next", "lane", lane, "workspace", member.Name, "failure", failureOf(err).describe())
+		stopErr := pool.stopUnstarted(context.WithoutCancel(ctx), orca.NewClient(runner), member.Name, err)
+		release()
+		if stopErr != nil {
+			session.Log.Warn("a failed warm workspace stays running", "lane", lane, "workspace", member.Name, "failure", failureOf(stopErr).describe())
+		}
+		failed = append(failed, errors.Join(fmt.Errorf("lane %s claimed warm workspace %s, which failed before its worker started: %w", lane, member.Name, err), stopErr))
 		if len(failed) == laneTries {
 			return errors.Join(failed...)
 		}
@@ -345,6 +358,31 @@ func (p *orcaPool) stop(name string) error {
 		member.State = memberStopped
 		return p.save(member)
 	})
+}
+
+func (p *orcaPool) stopUnstarted(ctx context.Context, client orca.Client, name string, cause error) error {
+	if errors.As(cause, new(*unconfirmed)) {
+		return fmt.Errorf("warm workspace %s stays running as failed, since its claim never confirmed it unused", name)
+	}
+	record, err := p.session.Recorded(name)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, failedStopWithin)
+	defer cancel()
+	within, cancelCheck := context.WithTimeout(ctx, spareAnswersWithin)
+	defer cancelCheck()
+	ran, err := p.session.Provider.Exec(within, record.Machine, []string{"sh", "-c", agentProcesses}, nil)
+	if _, err := answered("check for a running agent", name, agentRefusals, ran, err); err != nil {
+		return fmt.Errorf("warm workspace %s stays running as failed: %w", name, err)
+	}
+	if err := disconnect(ctx, p.dir, client, name); err != nil {
+		return err
+	}
+	if err := p.session.Suspend(ctx, name); err != nil && !errors.Is(err, providers.ErrNoStorage) {
+		return fmt.Errorf("stop failed warm workspace %s: %w", name, err)
+	}
+	return p.stop(name)
 }
 
 func (p *orcaPool) startedWorker(member *orcaMember) (bool, error) {
@@ -713,6 +751,10 @@ func (u *unobserved) Error() string {
 }
 
 func (u *unobserved) Unwrap() error { return u.err }
+
+func (u *unconfirmed) Error() string { return u.err.Error() }
+
+func (u *unconfirmed) Unwrap() error { return u.err }
 
 func (e *spareFailure) Error() string {
 	return "create warm workspace " + e.member.Name + " failed with " + e.member.Failure.describe() + " and is kept only as that metadata in orca pool status"
