@@ -370,8 +370,16 @@ recorded `failed` with its error's metadata only: the step that failed, the
 error's class, the exit code when one was observed, the HTTP status when a
 provider lookup answered one, and the message's byte length and SHA-256, never
 its text. When that happens before the worker's terminal starts, the command
-logs a warning, claims the next unused workspace, and creates the lane's own
-workspace once none is left. A lane stops after two failed claims and reports
+logs a warning and stops that workspace's machine. It first checks that no
+agent process runs there, then removes the workspace's Orca environment,
+suspends the machine as `cc-remote orca stop` does, and records the claim
+`stopped`, keeping its disk and records. A machine where an agent runs, or one
+that does not answer the check, stays running and `failed`. So does one the
+claim never confirmed unused, such as a checkout that cannot be read or a
+machine that already holds Orca runtime state, because the claim did not make
+what runs there. The command then
+claims the next unused workspace, and creates the lane's own workspace once
+none is left. A lane stops after two failed claims and reports
 both, so a preparation that fails on every workspace cannot consume the pool. A
 failure after the terminal starts ends the command. A command that
 dies leaves its workspace `claimed`.

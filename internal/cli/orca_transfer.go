@@ -37,6 +37,7 @@ const (
 	exitOtherOrigin    = 6
 	exitPriorRuntime   = 7
 	exitNotClean       = 8
+	exitAgentRunning   = 9
 )
 
 var (
@@ -118,7 +119,10 @@ func checkRetained(ctx context.Context, session *workspace.Session, result *work
 }
 
 func checkUnused(ctx context.Context, session *workspace.Session, record *workspace.Record) error {
-	return checkClean(ctx, session, "check the unused checkout", record.Name, record.Machine)
+	if err := checkClean(ctx, session, "check the unused checkout", record.Name, record.Machine); err != nil {
+		return &unconfirmed{err: err}
+	}
+	return nil
 }
 
 func checkClean(ctx context.Context, session *workspace.Session, step, name, machine string) error {

@@ -956,6 +956,9 @@ func (w *firstWorker) handle(id string, cmd []string, stdin []byte) providers.Re
 		w.paused.hold()
 	}
 	script := cmd[len(cmd)-1]
+	if script == agentProcesses {
+		return providers.Result{}
+	}
 	if serve := serveCommand.FindStringSubmatch(script); serve != nil {
 		return providers.Result{Stdout: []byte("starting\n" + readyAt(serve[1], cmp.Or(serve[2], serve[1])) + "\n")}
 	}

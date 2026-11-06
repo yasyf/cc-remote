@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Fixed
+- **A failed warm claim no longer leaves its machine running.** A claim that
+  failed before its worker started stayed `failed` with its Sprite running, and
+  those Sprites filled the organization's Sprite limit. The claim now checks
+  that no agent process runs on the machine, removes its Orca environment,
+  suspends it, and records it `stopped`. A machine where an agent runs, one
+  that does not answer the check, or one the claim never confirmed unused stays
+  running.
 - **A warm claim moves past a spare the provider cannot answer for.** One
   ready Sprite whose lookup answered 503 ended the whole `prepare --warm`, even
   with other spares ready. That spare now stays ready and the claim takes the

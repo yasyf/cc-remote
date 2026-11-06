@@ -471,7 +471,7 @@ func TestCompetingRequestsAreRefusedBeforeTheClaimedSpareIsTouched(t *testing.T)
 	w.free("lane-a")
 }
 
-func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
+func TestAFailedClaimIsStoppedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	w := newWarmPool(t, "pool-a", "pool-b")
 	w.oneExecAtATime()
 	*w.session.Config.Orca.Pool.Ready = 2
@@ -500,8 +500,11 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	if !slices.Equal(native.calls, commands) {
 		t.Errorf("orca calls =\n%q\nwant\n%q", native.calls, commands)
 	}
-	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
-		t.Errorf("pool-a = %+v, want it failed for lane-a with error metadata", member)
+	if member := w.member("pool-a"); member.State != memberStopped || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
+		t.Errorf("pool-a = %+v, want it stopped for lane-a with its failure's metadata", member)
+	}
+	if machine, err := w.provider.Get(t.Context(), "pool-a"); err != nil || machine.State != providers.StateSuspended {
+		t.Errorf("pool-a's machine after its failed claim = %+v, %v; want it stopped, not running", machine, err)
 	}
 	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("failed to connect")) {
 		t.Errorf("the pool record kept error text: %s, %v", stored, err)
@@ -510,8 +513,8 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 		t.Errorf("pool-b = %+v, want it prepared for lane-a", member)
 	}
 	for _, call := range w.provider.Calls()[calls:] {
-		if strings.HasPrefix(call, "create ") {
-			t.Errorf("the lane created a workspace while a spare was ready: %q", call)
+		if strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") {
+			t.Errorf("the lane created or destroyed a workspace while a spare was ready: %q", call)
 		}
 	}
 	if fills.Load() != 2 {
@@ -526,6 +529,87 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.warm(t.Context(), w.contender(), runner, io.Discard, "pool-b", "")
 	}, "pool-b already has an Orca task")
+}
+
+func TestAFailedClaimWhereAnAgentRunsStaysRunning(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b")
+	w.oneExecAtATime()
+	*w.session.Config.Orca.Pool.Ready = 2
+	standInFill(t)
+	if fill, err := openPool(w.session).fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-b"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
+	}
+	handle := w.provider.Handle
+	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
+		if id == "pool-a" && cmd[len(cmd)-1] == agentProcesses {
+			return providers.Result{ExitCode: exitAgentRunning}
+		}
+		return handle(id, cmd, stdin)
+	}
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-b"))
+	calls := len(w.provider.Calls())
+	native, commands := w.nativeAs("pool-b")
+	pairing := taskOrcaRunner(func(ctx context.Context, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") == "environment add --name pool-a --pairing-code orca://pair?code=private --json" {
+			return nil, errors.New("pool-a's runtime never paired")
+		}
+		return native.Run(ctx, args...)
+	})
+	var out bytes.Buffer
+	if err := w.warm(t.Context(), w.session, pairing, &out, "lane-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if allocation := w.allocation(out.Bytes()); allocation.Workspace != "pool-b" || allocation.Task == nil || allocation.Task.Terminal != "term-1" {
+		t.Errorf("allocation = %+v, want lane-a started on pool-b", allocation)
+	}
+	if !slices.Equal(native.calls, commands) {
+		t.Errorf("orca calls =\n%q\nwant pool-a's environment kept and\n%q", native.calls, commands)
+	}
+	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" {
+		t.Errorf("pool-a = %+v, want it left failed for lane-a", member)
+	}
+	if machine, err := w.provider.Get(t.Context(), "pool-a"); err != nil || machine.State != providers.StateRunning {
+		t.Errorf("pool-a's machine = %+v, %v; want it left running while an agent runs there", machine, err)
+	}
+	for _, call := range w.provider.Calls()[calls:] {
+		if call == "suspend pool-a" || strings.HasPrefix(call, "destroy ") {
+			t.Errorf("a machine with a running agent was stopped: %q", call)
+		}
+	}
+	w.free("pool-a")
+	w.free("pool-b")
+	w.free("lane-a")
+}
+
+func TestTheAgentCheckRefusesOnlyARunningAgent(t *testing.T) {
+	tests := []struct {
+		name string
+		ps   string
+		want int
+	}{
+		{"daemons beside the runtime", "printf 'tini\\norca-ide\\ncodex-ask\\ncapt-hookd\\nsshd-session\\n'", 0},
+		{"a Codex worker", "printf 'orca-ide\\ncodex\\n'", exitAgentRunning},
+		{"a Claude worker", "printf 'claude\\n'", exitAgentRunning},
+		{"no process table", "exit 1", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "ps"), []byte("#!/bin/sh\n"+tt.ps+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			run := exec.Command("/bin/sh", "-c", agentProcesses)
+			run.Env = []string{"PATH=" + bin}
+			err := run.Run()
+			var exit *exec.ExitError
+			switch {
+			case tt.want == 0 && err != nil:
+				t.Fatalf("check = %v, want no agent found", err)
+			case tt.want != 0 && (!errors.As(err, &exit) || exit.ExitCode() != tt.want):
+				t.Fatalf("check = %v, want exit %d", err, tt.want)
+			}
+		})
+	}
 }
 
 type unanswering struct {
@@ -607,6 +691,9 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 	}
 	if member := w.member("pool-a"); member.State != memberFailed || member.Lane != "lane-a" || member.Failure == nil {
 		t.Errorf("pool-a = %+v, want it failed for lane-a", member)
+	}
+	if slices.Contains(lifecycle, "suspend pool-a") {
+		t.Errorf("provider calls = %q, want a spare its claim never confirmed unused left as it is", lifecycle)
 	}
 	w.free("pool-a")
 	w.free("lane-a")
@@ -769,8 +856,11 @@ func TestALaneStopsAfterTwoFailedClaimsAndItsRelaunchPreparesTheNextSpare(t *tes
 		t.Fatalf("err = %v, want both failed claims", err)
 	}
 	for _, name := range []string{"pool-a", "pool-b"} {
-		if member := w.member(name); member.State != memberFailed || member.Lane != "lane-a" {
-			t.Errorf("%s = %+v, want it failed for lane-a", name, member)
+		if member := w.member(name); member.State != memberStopped || member.Lane != "lane-a" || member.Failure == nil {
+			t.Errorf("%s = %+v, want it stopped for lane-a with its failure", name, member)
+		}
+		if machine, err := w.provider.Get(t.Context(), name); err != nil || machine.State != providers.StateSuspended {
+			t.Errorf("%s's machine = %+v, %v; want it stopped", name, machine, err)
 		}
 	}
 	if member := w.member("pool-c"); member.State != memberReady || member.Lane != "" {
