@@ -103,11 +103,22 @@ the payload phase admitted during the current boot.
 A provider whose home sits on a slower disk than one attached to the machine
 names that disk as its `LocalDisk` trait. On Sprites the home and every other
 path under the root filesystem are on `nbd0`, a network disk, and `/tmp` is the
-local `vdb`. Before anything else runs, create copies the home onto that disk,
-binds the copy over the home, and links `/var/lib/cc-remote`, which holds the
-payload and packages archives, to the same disk. Every install, checkout, cache
-and database then lands there at its usual path, with no tool configured for it.
-The `cc-remote-local-disk` service binds the copy again after every boot, and a resume or reuse binds it itself before it reads the tools, since a suspend stops that service. A bind
+local `vdb`. The provider's own storage also lives on that local disk and needs
+room there, so the provider names that need as its `LocalDiskReserve` trait. On
+Sprites it is 6.5 GiB: the block device daemon behind `nbd0` keeps a cache of up
+to 5 GiB on `vdb`, holds every `nbd0` write once `vdb` has less than 512 MiB
+free for 90 seconds, then fails it, and the platform then remounts the root
+filesystem and restarts every process; the last gigabyte covers its database,
+logs and checkpoint state. Before anything else runs, create makes a sparse ext4
+volume file on the local disk as large as the disk's usable space less that
+reserve, and mounts it over the disk's mount point with `discard`, so a deleted
+file returns its space to the disk. Every file written under `/tmp` lands in the
+volume, and a full volume fails that write with `ENOSPC` while the root
+filesystem keeps working. Create then copies the home into the volume, binds the
+copy over the home, and links `/var/lib/cc-remote`, which holds the payload and
+packages archives, to the volume. Every install, checkout, cache and database
+then lands there at its usual path, with no tool configured for it.
+The `cc-remote-local-disk` service mounts the volume and binds the copy again after every boot, and a resume or reuse does both itself before it reads the tools, since a suspend stops that service. When the volume is neither mounted nor on the disk, it fails rather than bind the home onto the bare disk. A bind
 keeps the home's path canonical, which `capt-hookd` and the payload's manifest
 require and a symlink would not. A home is bound only on a machine created this
 way: moving a used one in place would split the databases its daemons hold open.

@@ -71,17 +71,32 @@ tar -cf "$dir.tar.admitted" -C "$dir" .
 
 const moveToLocalDisk = `set -euo pipefail
 disk="$1"
+reserve="$2"
 home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
 boot=` + localDiskBoot + `
 store=/var/lib/cc-remote
+lock=/run/cc-remote-local-disk.lock
+volume="$disk/.cc-remote.img"
 root="$disk/.cc-remote"
-install -d -m 0755 "$root/store" "$(dirname "$boot")"
+read -r block blocks free available < <(stat -f -c '%S %b %f %a' "$disk")
+truncate -s $(( (blocks - free + available) * block - reserve )) "$volume"
+mkfs.ext4 -q -m 0 -E nodiscard "$volume"
+install -d -m 0755 "$(dirname "$boot")"
 ln -s "$root/store" "$store"
 cat > "$boot" <<SH
 #!/bin/sh
 set -eu
-exec 9> "$root/.lock"
+exec 9> "$lock"
 flock 9
+if [ -e "$volume" ]; then
+  mount -o loop,discard,noatime,nosuid,nodev "$volume" "$disk"
+  chmod 1777 "$disk"
+fi
+if ! findmnt -n -o SOURCE --target "$disk" | grep -q '^/dev/loop'; then
+  echo "cc-remote: $volume is not mounted over $disk" >&2
+  exit 1
+fi
+install -d -m 0755 "$root/store"
 if [ ! -d "$root/home" ]; then
   rm -rf "$root/home.partial"
   cp -a "$home" "$root/home.partial"
@@ -383,9 +398,9 @@ func (s Scripts) InstallPackagesOnline(ctx context.Context, exec Exec, digest st
 	return nil
 }
 
-func (s Scripts) MoveToLocalDisk(ctx context.Context, exec Exec, disk string) error {
+func (s Scripts) MoveToLocalDisk(ctx context.Context, exec Exec, disk string, reserve int64) error {
 	// sudo's secure_path drops /.sprite/bin, where the script finds sprite-env.
-	if err := exec(ctx, []string{"sudo", "--preserve-env=PATH", "bash", "-s", disk}, strings.NewReader(moveToLocalDisk)); err != nil {
+	if err := exec(ctx, []string{"sudo", "--preserve-env=PATH", "bash", "-s", disk, strconv.FormatInt(reserve, 10)}, strings.NewReader(moveToLocalDisk)); err != nil {
 		return fmt.Errorf("move to the local disk %s: %w", disk, err)
 	}
 	return nil

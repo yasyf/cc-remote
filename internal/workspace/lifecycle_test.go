@@ -43,7 +43,7 @@ const (
 	prepares       = "cd /home/fake/app\n"
 	noState        = `{"BackendState":"NoState"}`
 	provisions     = "sudo bash -s"
-	movesToDisk    = "sudo --preserve-env=PATH bash -s /fast"
+	movesToDisk    = "sudo --preserve-env=PATH bash -s /fast 7168"
 	prereqsPhase   = "sudo bash -s prerequisites"
 	packagesPhase  = "sudo bash -s packages"
 	toolsPhase     = "sudo bash -s tools"
@@ -589,7 +589,7 @@ func (h *harness) ordered(from int, fragments ...string) []int {
 }
 
 func TestACreateMovesToTheLocalDiskBeforeItWritesAnythingElse(t *testing.T) {
-	h := build(t, true, inventory, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv, LocalDisk: "/fast"})
+	h := build(t, true, inventory, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv, LocalDisk: "/fast", LocalDiskReserve: 7168})
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"}); err != nil {
 		t.Fatal(err)
 	}

@@ -50,11 +50,12 @@ const (
 )
 
 type Traits struct {
-	LocalDisk   string
-	TailnetMode TailnetMode
-	Supervisor  Supervisor
-	Platform    string
-	GoBuildJobs int
+	LocalDisk        string
+	LocalDiskReserve int64
+	TailnetMode      TailnetMode
+	Supervisor       Supervisor
+	Platform         string
+	GoBuildJobs      int
 }
 
 type Spec struct {
