@@ -3,7 +3,7 @@
 
 cc-remote is a repo-agnostic Go CLI for remote agent workspaces, with Sprites and
 Namespace backends and an Orca desktop frontend. The default profile prepares
-agent tools and plugins plus a shallow checkout of the requested commit.
+agent tools and plugins plus a blobless checkout of the requested commit.
 Project dependency installation and platform startup belong to optional
 profile commands. A full platform on Namespace over SSH requires opt-in config.
 
