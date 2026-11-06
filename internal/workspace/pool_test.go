@@ -63,13 +63,14 @@ func TestPoolKeyChangesWithWhatAWarmWorkspaceWasBuiltFrom(t *testing.T) {
 	}
 }
 
-func TestPoolableNeedsAShallowAgentOnlyProfile(t *testing.T) {
+func TestPoolableNeedsALeanAgentOnlyProfile(t *testing.T) {
 	tests := []struct {
 		name    string
 		profile config.Profile
 		want    string
 	}{
 		{"agent only", config.Profile{Checkout: config.Shallow}, ""},
+		{"agent only, blobless", config.Profile{Checkout: config.Blobless}, ""},
 		{"prepare steps", config.Profile{Checkout: config.Shallow, Prepare: []string{"make deps"}}, "profile lean runs prepare steps"},
 		{"full checkout", config.Profile{Checkout: config.Full}, "profile lean keeps a full checkout"},
 	}
@@ -103,8 +104,8 @@ func TestReuseRefreshesTheCheckoutWithoutProvisioningOrPrepareSteps(t *testing.T
 		t.Fatal(err)
 	}
 	reused := strings.Join(h.machine.scripts["ws-1"][before:], "\n")
-	if h.machine.ran("ws-1", checkout) != checkouts+1 || !strings.Contains(reused, "ref=feature\n") || !strings.Contains(reused, "fetch --quiet --prune --filter=blob:none origin") {
-		t.Errorf("reuse did not check out feature blobless: %q", reused)
+	if h.machine.ran("ws-1", checkout) != checkouts+1 || !strings.Contains(reused, "ref=feature\n") || !strings.Contains(reused, "fetch --quiet --prune --depth 1 origin") {
+		t.Errorf("reuse did not check out feature shallowly: %q", reused)
 	}
 	if h.machine.ran("ws-1", prepares) != prepared || !strings.Contains(reused, readies) || strings.Contains(reused, installs) || strings.Contains(reused, publishes) || strings.Contains(reused, provisions) || !strings.Contains(reused, configures) {
 		t.Errorf("reuse ran prepare steps, provisioned, or skipped the ready check or configure: %q", reused)

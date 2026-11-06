@@ -37,8 +37,9 @@ const (
 type Checkout string
 
 const (
-	Shallow Checkout = "shallow"
-	Full    Checkout = "full"
+	Shallow  Checkout = "shallow"
+	Blobless Checkout = "blobless"
+	Full     Checkout = "full"
 )
 
 type Config struct {
@@ -323,8 +324,8 @@ func (c *Config) validate() error {
 		if !Identifier.MatchString(name) {
 			return fmt.Errorf("profile %q: use up to 20 lowercase letters, digits and dashes; the name is part of file paths", name)
 		}
-		if profile.Checkout != Shallow && profile.Checkout != Full {
-			return fmt.Errorf("profile %s: checkout %q is neither shallow nor full", name, profile.Checkout)
+		if profile.Checkout != Shallow && profile.Checkout != Blobless && profile.Checkout != Full {
+			return fmt.Errorf("profile %s: checkout %q is not shallow, blobless or full", name, profile.Checkout)
 		}
 		for kind, machine := range profile.Machine {
 			if _, ok := c.Providers[kind]; !ok {

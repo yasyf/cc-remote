@@ -655,8 +655,8 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if got := h.machine.stdins["ws-1"][source[0]]; got != token {
 		t.Errorf("checkout read %q on stdin", got)
 	}
-	if !strings.Contains(h.machine.scripts["ws-1"][source[0]], "--filter=blob:none") || !strings.Contains(h.machine.scripts["ws-1"][source[0]], "ref=feature") {
-		t.Error("the lean checkout is not a blobless checkout of the requested ref")
+	if !strings.Contains(h.machine.scripts["ws-1"][source[0]], "--depth 1") || !strings.Contains(h.machine.scripts["ws-1"][source[0]], "ref=feature") {
+		t.Error("the lean checkout is not a shallow checkout of the requested ref")
 	}
 	if result.Machine != "ws-1" || !strings.Contains(h.calls(), "create ws-1") || result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Source.Ref != "feature" {
 		t.Errorf("result = %+v", result)

@@ -390,8 +390,8 @@ func (s *Session) Poolable() error {
 	switch {
 	case len(s.profile.Prepare) > 0:
 		return fmt.Errorf("profile %s runs prepare steps, so its workspaces are not agent-only and keep no warm pool", s.Profile)
-	case s.profile.Checkout != config.Shallow:
-		return fmt.Errorf("profile %s keeps a %s checkout, and a warm pool keeps only shallow ones", s.Profile, s.profile.Checkout)
+	case s.profile.Checkout == config.Full:
+		return fmt.Errorf("profile %s keeps a full checkout, and a warm pool keeps only shallow or blobless ones", s.Profile)
 	}
 	return nil
 }
@@ -1025,7 +1025,7 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 		return err
 	}
 	if err := s.timed(ctx, laneCheckout, "checkout", machine, func() error {
-		_, err := s.run(ctx, machine, CheckoutScript(root, s.Config.Repository, record.Source, s.profile.Checkout == config.Shallow), strings.NewReader(token+"\n"))
+		_, err := s.run(ctx, machine, CheckoutScript(root, s.Config.Repository, record.Source, s.profile.Checkout), strings.NewReader(token+"\n"))
 		return err
 	}); err != nil {
 		return err

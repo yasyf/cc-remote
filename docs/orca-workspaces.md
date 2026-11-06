@@ -12,7 +12,11 @@ Start with [examples/config.yaml](../examples/config.yaml), replace its
 placeholders, and save it as `.cc-remote/config.yaml` in the repository. Sign in
 to the selected provider's CLI on the machine running cc-remote.
 
-Choose Sprites over SSH for an agent checkout. Use a blobless checkout and
+Choose Sprites over SSH for an agent checkout. A profile's `checkout` is
+`shallow` by default, a depth-1 clone of the requested ref. `blobless` opts into
+a clone with the whole history but no file contents until a checkout or diff
+needs them, so a rebase onto an older base finds its merge base; it takes about
+twice as long to clone. `full` clones everything. Use a shallow checkout and
 prepare the agent tools and plugins, leaving project dependency installation
 and platform services out of the default profile. Choose a separate Namespace
 profile when the task needs the full platform. The repository's configuration
@@ -306,8 +310,8 @@ cc-remote orca prepare lane-name --warm --config .cc-remote/config.yaml \
 ```
 
 The pool needs the `sprites` provider and an agent-only profile: no `prepare`
-steps and a blobless checkout. The command refuses any other provider or
-profile before it changes anything. `--warm` and `--existing` exclude each
+steps and a `shallow` or `blobless` checkout. The command refuses any other
+provider or profile before it changes anything. `--warm` and `--existing` exclude each
 other, and `--existing` keeps its retained checkout and its refusal of `--ref`.
 
 The command claims the oldest unused workspace in the pool. A candidate has to
@@ -435,7 +439,7 @@ enough new workspaces to bring the ready and in-flight count to
 leaves the pool one short makes exactly one create, and a burst of claims
 refills in about one create's time instead of one after another. Each is a
 plain `create` with a `pool-` name and the pool label, so it holds tools,
-plugins, and a blobless checkout of `config.ref`. A fill starts no Orca runtime,
+plugins, and a shallow checkout of `config.ref`. A fill starts no Orca runtime,
 records no task, starts no worker, and reads no API key. A failed create is
 recorded `failed` with the same error metadata and logged as a warning, and the
 fill reports it; the other creates go on, and the next claim's fill counts the
