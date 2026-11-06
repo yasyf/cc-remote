@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hooks browser, so the review stopped with "the hooks browser selection moved
   from PreToolUse to PostModelRequest, not its other edge". The review now
   expects those two rows, empty, at the end of the list.
+- **A fresh Sprite on Codex 0.159 passes its hook review again.** Since
+  0.27.25 the review expected the two model request rows from every worker, so
+  a cold launch on an inventory that pins Codex 0.159.2 stopped with "the hooks
+  browser selection moved from PreToolUse to Interrupt, not its other edge". A
+  warm claim is pregranted and skips the review, so only cold launches failed.
+  The review now expects the rows of the Codex release the inventory pins:
+  `PreModelRequest` and `PostModelRequest` from 0.164.0 on, when Codex added
+  them.
 - **A failed warm claim no longer leaves its machine running.** A claim that
   failed before its worker started stayed `failed` with its Sprite running, and
   those Sprites filled the organization's Sprite limit. The claim now checks
