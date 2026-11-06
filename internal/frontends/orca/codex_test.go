@@ -238,7 +238,7 @@ func (p *probeRecorder) review(captain []orca.Pin) orca.HookReview {
 }
 
 func (p *probeRecorder) reviewOn(server orca.Server, captain []orca.Pin) orca.HookReview {
-	return orca.HookReview{Captain: captain, Server: server, Exec: func(_ context.Context, argv []string) ([]byte, error) {
+	return orca.HookReview{Captain: captain, Codex: "0.167.0", Server: server, Exec: func(_ context.Context, argv []string) ([]byte, error) {
 		p.calls++
 		if p.fake.called(sendEnter) != p.enters || p.fake.called(sendTrust) != 0 {
 			p.t.Error("the probe ran after review input")
@@ -437,6 +437,42 @@ func TestCodexReviewAcceptsTheSetOfTheServerOrcaReports(t *testing.T) {
 				t.Errorf("probes %d", probe.calls)
 			}
 			assertSent(t, fake, tt.sent)
+		})
+	}
+}
+
+func TestCodexReviewExpectsTheRowsOfThePinnedCodex(t *testing.T) {
+	interruptLast := acceptedRows[:12]
+	tests := []struct {
+		name  string
+		codex string
+		rows  []browserRow
+		want  string
+	}{
+		{"Codex 0.159.2 ends at Interrupt", "0.159.2", interruptLast, ""},
+		{"Codex 0.164.0 adds the model request rows", "0.164.0", acceptedRows, ""},
+		{"Codex 0.167.0 without the model request rows", "0.167.0", interruptLast, "moved from PreToolUse to Interrupt, not its other edge"},
+		{"Codex 0.163.0 with the model request rows", "0.163.0", acceptedRows, "moved from PreToolUse to PostModelRequest, not its other edge"},
+		{"no Codex pin", "", acceptedRows, `pins Codex "", not a release`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := codexFake(t).on(readScreen, historyLost(t, promptScreen(5, "")))
+			for _, screen := range slices.Concat(reviewReads(t, tt.rows, 8, 5), trustedReads(t, trusted(tt.rows), 8, false)) {
+				fake.on(readScreen, screen)
+			}
+			probe := &probeRecorder{t: t, fake: fake, out: exactProbe}
+			review := probe.review(captainPins)
+			review.Codex = tt.codex
+			steps, err := runCodex(t, fake, review, refusalPoll)
+			switch {
+			case tt.want == "" && (err != nil || !slices.Equal(steps, []string{"hooks"})):
+				t.Fatalf("Bootstrap = %v, %v", steps, err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Fatalf("Bootstrap = %v, want %q", err, tt.want)
+			case tt.want != "":
+				assertNoTrust(t, fake)
+			}
 		})
 	}
 }

@@ -22,7 +22,8 @@ const guestSchema = 1
 var guestScrubbed = []string{"ORCA_PAIRING_CODE", "ORCA_REMOTE_PAIRING", "ORCA_ENVIRONMENT", "ORCA_USER_DATA_PATH"}
 
 type GuestReview struct {
-	Captain []Pin `json:"captain"`
+	Captain []Pin  `json:"captain"`
+	Codex   string `json:"codex"`
 }
 
 type GuestGrant struct {
@@ -69,7 +70,7 @@ func NewGuest(platform, runtimeID, terminal, cli string, agent Agent, startup St
 		grant := startup.Granted.Grant
 		guest.Server, guest.Grant = startup.Granted.Server, &GuestGrant{Captain: grant.Captain, Codex: grant.Codex, Project: grant.Project, Prior: startup.Granted.Prior}
 	case startup.Hooks != nil:
-		guest.Server, guest.Review = startup.Hooks.Server, &GuestReview{Captain: startup.Hooks.Captain}
+		guest.Server, guest.Review = startup.Hooks.Server, &GuestReview{Captain: startup.Hooks.Captain, Codex: startup.Hooks.Codex}
 	}
 	return guest
 }
@@ -113,7 +114,7 @@ func (g Guest) startup(local func(context.Context, []string) ([]byte, error)) St
 	case g.Grant != nil:
 		return GrantedCodexStartup(HookGrant{Captain: g.Grant.Captain, Codex: g.Grant.Codex, Project: g.Grant.Project, Exec: local}, g.Grant.Prior, g.Server)
 	case g.Review != nil:
-		return CodexStartup(HookReview{Captain: g.Review.Captain, Server: g.Server, Exec: local})
+		return CodexStartup(HookReview{Captain: g.Review.Captain, Codex: g.Review.Codex, Server: g.Server, Exec: local})
 	}
 	return StartupOf(Agent{Kind: g.Agent})
 }

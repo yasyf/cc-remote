@@ -1102,6 +1102,7 @@ func orcaStartup(session *workspace.Session, task *orcaTask) (orca.Startup, erro
 	}
 	return orca.CodexStartup(orca.HookReview{
 		Captain: captainPins(inventory),
+		Codex:   codexVersion(inventory, session.Profile),
 		Server:  orca.ServerOf(task.ManagedServer),
 		Exec:    machineExec(session, task.Machine, "the Codex hook probe"),
 	}), nil

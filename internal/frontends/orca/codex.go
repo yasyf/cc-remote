@@ -189,7 +189,8 @@ var (
 	nativeHookEvents  = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "Stop"}
 	formedHookEvents  = append(slices.Clone(nativeHookEvents), "Interrupt")
 	captainHookEvents = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
-	browserEvents     = []string{"PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt", "PreModelRequest", "PostModelRequest"}
+	browserEvents     = []string{"PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt"}
+	modelEvents       = []string{"PreModelRequest", "PostModelRequest"}
 	probeRefusals     = []string{"home", "metadata", "manifest", "executable", "config", "inline-hooks", "hooks", "duplicate-key", "unexpected-event", "mismatch", "missing", "probe-error"}
 	promptLines       = []string{"Hooks need review", "", "Hooks can run outside the sandbox after you trust them.", reviewChoice, "2. Trust all and continue", "3. Continue without trusting (hooks won't run)", "enter confirm · esc skip"}
 	promptCount       = regexp.MustCompile(`^(\d+) hooks? (?:are|is) new or changed\.$`)
@@ -209,6 +210,7 @@ type Pin struct {
 
 type HookReview struct {
 	Captain []Pin
+	Codex   string
 	Server  Server
 	Exec    func(ctx context.Context, argv []string) ([]byte, error)
 }
@@ -248,6 +250,7 @@ type hookBrowser struct {
 }
 
 type hookRows struct {
+	events []string
 	order  []string
 	counts map[string]hookRow
 }
@@ -273,6 +276,17 @@ func (h HookReview) captain() (Pin, error) {
 		return Pin{}, errors.New("the accepted Captain Hook pin is not a plugin id and version")
 	}
 	return pin, nil
+}
+
+func (h HookReview) events() ([]string, error) {
+	var major, minor int
+	if _, err := fmt.Sscanf(h.Codex, "%d.%d.", &major, &minor); err != nil {
+		return nil, fmt.Errorf("the hook review pins Codex %q, not a release, so the hooks browser rows are unknown", h.Codex)
+	}
+	if major == 0 && minor < 164 {
+		return browserEvents, nil
+	}
+	return slices.Concat(browserEvents, modelEvents), nil
 }
 
 func (h HookReview) probe(ctx context.Context) (HookProbe, error) {
@@ -487,12 +501,12 @@ func parseBrowser(tail []string, trusted bool) (hookBrowser, error) {
 	return browser, nil
 }
 
-func (b hookBrowser) atFirst() bool {
-	return !b.above && b.selected == browserEvents[0] && b.rows[0].Event == b.selected
+func (b hookBrowser) atFirst(events []string) bool {
+	return !b.above && b.selected == events[0] && b.rows[0].Event == b.selected
 }
 
-func (b hookBrowser) atLast() bool {
-	return !b.below && b.selected == browserEvents[len(browserEvents)-1] && b.rows[len(b.rows)-1].Event == b.selected
+func (b hookBrowser) atLast(events []string) bool {
+	return !b.below && b.selected == events[len(events)-1] && b.rows[len(b.rows)-1].Event == b.selected
 }
 
 func (h *hookRows) add(view hookBrowser, pending int) error {
@@ -501,7 +515,7 @@ func (h *hookRows) add(view hookBrowser, pending int) error {
 	}
 	at := -1
 	for _, row := range view.rows {
-		if !slices.Contains(browserEvents, row.Event) {
+		if !slices.Contains(h.events, row.Event) {
 			return errors.New("the hooks browser lists an unsupported event row")
 		}
 		if prior, seen := h.counts[row.Event]; seen {
@@ -528,7 +542,7 @@ func (h *hookRows) add(view hookBrowser, pending int) error {
 func (h hookRows) check(probe HookProbe, server Server) error {
 	var installed, active, review int
 	orca := server.orca(probe.Events)
-	for _, event := range browserEvents {
+	for _, event := range h.events {
 		want := expectedRow(orca, event)
 		row, seen := h.counts[event]
 		switch {
@@ -541,7 +555,7 @@ func (h hookRows) check(probe HookProbe, server Server) error {
 		}
 		installed, active, review = installed+row.Installed, active+row.Active, review+row.Review
 	}
-	if !slices.Equal(h.order, browserEvents) {
+	if !slices.Equal(h.order, h.events) {
 		return errors.New("the hooks browser lists its events out of the supported order")
 	}
 	if installed != probe.Definitions || active != len(orca) || review != len(captainHookEvents) {
@@ -551,7 +565,7 @@ func (h hookRows) check(probe HookProbe, server Server) error {
 }
 
 func (h hookRows) trusted(after hookRows) error {
-	for _, event := range browserEvents {
+	for _, event := range h.events {
 		want := h.counts[event]
 		row, seen := after.counts[event]
 		switch {
@@ -561,7 +575,7 @@ func (h hookRows) trusted(after hookRows) error {
 			return fmt.Errorf("the trusted hooks browser shows %d of %d %s hooks active", row.Active, row.Installed, event)
 		}
 	}
-	if !slices.Equal(after.order, browserEvents) {
+	if !slices.Equal(after.order, h.events) {
 		return errors.New("the trusted hooks browser lists its events out of the supported order")
 	}
 	return nil
@@ -592,12 +606,12 @@ func (r Remote) browser(ctx context.Context, handle string, p Poll, trusted bool
 	return view, nil
 }
 
-func (r Remote) opposite(ctx context.Context, handle string, p Poll, view hookBrowser, trusted bool) (hookBrowser, error) {
+func (r Remote) opposite(ctx context.Context, handle string, p Poll, view hookBrowser, trusted bool, events []string) (hookBrowser, error) {
 	key, edge := keyEnd, hookBrowser.atLast
 	switch {
-	case view.atLast():
+	case view.atLast(events):
 		key, edge = keyHome, hookBrowser.atFirst
-	case !view.atFirst():
+	case !view.atFirst(events):
 		return hookBrowser{}, fmt.Errorf("the hooks browser selects %s, at neither edge of its events", view.selected)
 	}
 	if err := r.Key(ctx, handle, key); err != nil {
@@ -607,7 +621,7 @@ func (r Remote) opposite(ctx context.Context, handle string, p Poll, view hookBr
 	if err != nil {
 		return hookBrowser{}, fmt.Errorf("the hooks browser selection never moved from %s: %w", view.selected, err)
 	}
-	if !edge(next) {
+	if !edge(next, events) {
 		return hookBrowser{}, fmt.Errorf("the hooks browser selection moved from %s to %s, not its other edge", view.selected, next.selected)
 	}
 	return next, nil
@@ -623,6 +637,10 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 	if err != nil {
 		return err
 	}
+	events, err := review.events()
+	if err != nil {
+		return err
+	}
 	if err := r.Enter(ctx, handle); err != nil {
 		return err
 	}
@@ -630,14 +648,14 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 	if err != nil {
 		return fmt.Errorf("the Review hooks action did not open the hooks browser: %w", err)
 	}
-	if !view.atFirst() {
+	if !view.atFirst(events) {
 		return errors.New("the hooks browser did not open at its first row")
 	}
-	rows := hookRows{counts: map[string]hookRow{}}
+	rows := hookRows{events: events, counts: map[string]hookRow{}}
 	if err := rows.add(view, pending); err != nil {
 		return err
 	}
-	if view, err = r.opposite(ctx, handle, p, view, false); err != nil {
+	if view, err = r.opposite(ctx, handle, p, view, false, events); err != nil {
 		return err
 	}
 	moves++
@@ -653,15 +671,15 @@ func (r Remote) reviewHooks(ctx context.Context, handle string, pending int, rev
 	if view, err = r.browser(ctx, handle, p, true, func(hookBrowser) bool { return true }); err != nil {
 		return fmt.Errorf("the trust key did not produce the trusted hooks browser: %w", err)
 	}
-	other, err := r.opposite(ctx, handle, p, view, true)
+	other, err := r.opposite(ctx, handle, p, view, true, events)
 	if err != nil {
 		return err
 	}
 	moves++
-	if view.atLast() {
+	if view.atLast(events) {
 		view, other = other, view
 	}
-	after := hookRows{counts: map[string]hookRow{}}
+	after := hookRows{events: events, counts: map[string]hookRow{}}
 	for _, edge := range []hookBrowser{view, other} {
 		if err := after.add(edge, 0); err != nil {
 			return err
