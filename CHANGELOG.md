@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in place of "Quit", so the startup gate matched nothing and `prepare` timed
   out with "matched no known startup state". The gate now accepts either
   footer and still enters only "1. Trust and continue".
+- **A Codex 0.167 worker's hook review reaches the last row.** Codex 0.167
+  lists `PreModelRequest` and `PostModelRequest` after `Interrupt` in its
+  hooks browser, so the review stopped with "the hooks browser selection moved
+  from PreToolUse to PostModelRequest, not its other edge". The review now
+  expects those two rows, empty, at the end of the list.
 - **A failed warm claim no longer leaves its machine running.** A claim that
   failed before its worker started stayed `failed` with its Sprite running, and
   those Sprites filled the organization's Sprite limit. The claim now checks

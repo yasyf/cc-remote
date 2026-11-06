@@ -72,6 +72,8 @@ var acceptedRows = []browserRow{
 	{"SubagentStop", 1, 1, 0, "Right before a subagent ends its turn"},
 	{"Stop", 2, 1, 1, "Right before Codex ends its turn"},
 	{"Interrupt", 0, 0, 0, "Right before an interrupted turn is aborted"},
+	{"PreModelRequest", 0, 0, 0, "Before a model request"},
+	{"PostModelRequest", 0, 0, 0, "After a model request, including failures"},
 }
 
 var formedRows = []browserRow{
@@ -87,6 +89,8 @@ var formedRows = []browserRow{
 	{"SubagentStop", 1, 1, 0, "Right before a subagent ends its turn"},
 	{"Stop", 2, 1, 1, "Right before Codex ends its turn"},
 	{"Interrupt", 1, 1, 0, "Right before an interrupted turn is aborted"},
+	{"PreModelRequest", 0, 0, 0, "Before a model request"},
+	{"PostModelRequest", 0, 0, 0, "After a model request, including failures"},
 }
 
 var managedRows = []browserRow{
@@ -102,6 +106,8 @@ var managedRows = []browserRow{
 	{"SubagentStop", 0, 0, 0, "Right before a subagent ends its turn"},
 	{"Stop", 1, 0, 1, "Right before Codex ends its turn"},
 	{"Interrupt", 0, 0, 0, "Right before an interrupted turn is aborted"},
+	{"PreModelRequest", 0, 0, 0, "Before a model request"},
+	{"PostModelRequest", 0, 0, 0, "After a model request, including failures"},
 }
 
 func frameOf(t *testing.T, source string, truncated, limited bool, lines []string) string {
@@ -443,10 +449,10 @@ func TestCodexReviewRequiresOverlappingEdges(t *testing.T) {
 		want   string
 		sent   map[string]int
 	}{
-		{"seven rows overlap by two", 7, 7, "", map[string]int{sendEnd: 1, sendHome: 1, sendTrust: 1, sendEscape: 1, waitIdle: 1}},
-		{"six rows only touch", 6, 6, "showed a new row out of order", map[string]int{sendEnd: 1, sendHome: 0, sendTrust: 0, sendEscape: 0}},
+		{"eight rows overlap by two", 8, 8, "", map[string]int{sendEnd: 1, sendHome: 1, sendTrust: 1, sendEscape: 1, waitIdle: 1}},
+		{"seven rows only touch", 7, 7, "showed a new row out of order", map[string]int{sendEnd: 1, sendHome: 0, sendTrust: 0, sendEscape: 0}},
 		{"four rows leave a gap", 4, 4, "showed a new row out of order", map[string]int{sendEnd: 1, sendHome: 0, sendTrust: 0, sendEscape: 0}},
-		{"trusted rows only touch", 8, 6, "showed a new row out of order", map[string]int{sendEnd: 1, sendHome: 1, sendTrust: 1, sendEscape: 0, waitIdle: 0}},
+		{"trusted rows only touch", 8, 7, "showed a new row out of order", map[string]int{sendEnd: 1, sendHome: 1, sendTrust: 1, sendEscape: 0, waitIdle: 0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -718,8 +724,8 @@ func TestCodexReviewRefusesIncompleteOrChangedBrowsers(t *testing.T) {
 	}
 	extra := slices.Clone(acceptedRows)
 	extra[3] = browserRow{"PreCompact", 1, 0, 1, "Before context compaction"}
-	unknown := append(slices.Clone(acceptedRows[:11]), browserRow{"Notification", 0, 0, 0, "Synthetic"})
-	guessed := slices.Concat(acceptedRows[:8], []browserRow{acceptedRows[10], acceptedRows[8], acceptedRows[9], acceptedRows[11]})
+	unknown := append(slices.Clone(acceptedRows[:13]), browserRow{"Notification", 0, 0, 0, "Synthetic"})
+	guessed := slices.Concat(acceptedRows[:8], []browserRow{acceptedRows[10], acceptedRows[8], acceptedRows[9]}, acceptedRows[11:])
 	pilot := slices.Clone(acceptedRows)
 	for i := range pilot {
 		if pilot[i].installed == 2 {
@@ -727,9 +733,9 @@ func TestCodexReviewRefusesIncompleteOrChangedBrowsers(t *testing.T) {
 		}
 	}
 	changed := slices.Clone(acceptedRows)
-	changed[5] = browserRow{"SessionStart", 2, 2, 0, "When a new session starts"}
+	changed[7] = browserRow{"UserPromptSubmit", 2, 2, 0, "When the user submits a prompt"}
 	swapped := slices.Clone(acceptedRows)
-	swapped[5], swapped[6] = swapped[6], swapped[5]
+	swapped[6], swapped[7] = swapped[7], swapped[6]
 	duplicated := slices.Clone(acceptedRows)
 	duplicated[10] = acceptedRows[9]
 	first := historyLost(t, firstEdge(acceptedRows, 8, 5))
@@ -744,19 +750,20 @@ func TestCodexReviewRefusesIncompleteOrChangedBrowsers(t *testing.T) {
 		{"missing PreCompact row", reviewReads(t, without("PreCompact"), 8, 5), "lists no PreCompact row", 1},
 		{"missing PostCompact row", reviewReads(t, without("PostCompact"), 8, 5), "lists no PostCompact row", 1},
 		{"missing SessionEnd row", reviewReads(t, without("SessionEnd"), 8, 5), "lists no SessionEnd row", 1},
-		{"missing Interrupt row", reviewReads(t, without("Interrupt"), 8, 5), "moved from PreToolUse to Stop, not its other edge", 1},
+		{"missing Interrupt row", reviewReads(t, without("Interrupt"), 8, 5), "lists no Interrupt row", 1},
+		{"missing PostModelRequest row", reviewReads(t, without("PostModelRequest"), 8, 5), "moved from PreToolUse to PreModelRequest, not its other edge", 1},
 		{"guessed row order", reviewReads(t, guessed, 8, 5), "out of the supported order", 1},
 		{"extra nonzero row", reviewReads(t, extra, 8, 5), "PreCompact with 1 installed", 1},
 		{"unknown last row", reviewReads(t, unknown, 8, 5), "moved from PreToolUse to Notification, not its other edge", 1},
-		{"unknown overlap row", []string{first, historyLost(t, browserScreen(slices.Concat(acceptedRows[:4], unknown[11:], acceptedRows[5:]), 4, 11, 8, 5, false))}, "unsupported event row", 1},
+		{"unknown overlap row", []string{first, historyLost(t, browserScreen(slices.Concat(acceptedRows[:6], unknown[13:], acceptedRows[7:]), 6, 13, 8, 5, false))}, "unsupported event row", 1},
 		{"old pilot rows", reviewReads(t, pilot, 8, 5), "PreToolUse with 3 installed", 1},
 		{"browser review total", reviewReads(t, acceptedRows, 8, 10), "counts 10 hooks to review, not 5", 0},
 		{"last edge review total", []string{first, historyLost(t, lastEdge(acceptedRows, 8, 4))}, "counts 4 hooks to review, not 5", 1},
-		{"counts change between edges", []string{first, historyLost(t, lastEdge(changed, 8, 5))}, "changed the SessionStart counts", 1},
+		{"counts change between edges", []string{first, historyLost(t, lastEdge(changed, 8, 5))}, "changed the UserPromptSubmit counts", 1},
 		{"order changes between edges", []string{first, historyLost(t, lastEdge(swapped, 8, 5))}, "changed its row order between views", 1},
 		{"duplicate row at the last edge", []string{first, historyLost(t, lastEdge(duplicated, 8, 5))}, "lists an event twice", 1},
-		{"last edge keeps a lower marker", []string{first, historyLost(t, browserScreen(acceptedRows, 4, 11, 8, 5, true))}, "moved from PreToolUse to Interrupt, not its other edge", 1},
-		{"last edge selects another row", []string{first, historyLost(t, browserScreen(acceptedRows, 4, 10, 8, 5, false))}, "moved from PreToolUse to Stop, not its other edge", 1},
+		{"last edge keeps a lower marker", []string{first, historyLost(t, browserScreen(acceptedRows, 6, 13, 8, 5, true))}, "moved from PreToolUse to PostModelRequest, not its other edge", 1},
+		{"last edge selects another row", []string{first, historyLost(t, browserScreen(acceptedRows, 6, 12, 8, 5, false))}, "moved from PreToolUse to PreModelRequest, not its other edge", 1},
 		{"End opens a detail view", []string{first, detail}, "not the recognized hooks browser", 1},
 		{"End shows the trusted layout", []string{first, historyLost(t, trustedLast(trusted(acceptedRows), 8))}, "not the recognized hooks browser", 1},
 		{"limited last edge", []string{first, frameOf(t, "screen", false, true, lastEdge(acceptedRows, 8, 5))}, "limited screen", 1},
@@ -801,10 +808,10 @@ func TestCodexReviewStopsOnStuckOrUnverifiedEdges(t *testing.T) {
 			f.fail(sendEnd, "", errors.New("connection reset"))
 			return s
 		}, "connection reset", map[string]int{sendEnd: 1, sendTrust: 0}, "hooks.review moves=0 ok=false seconds=0"},
-		{"stuck trusted Home", func(_ *fakeOrca, s []string) []string { return s[:4] }, "selection never moved from Interrupt", map[string]int{sendEnd: 1, sendTrust: 1, sendHome: 1}, "hooks.review moves=1 ok=false seconds=1"},
+		{"stuck trusted Home", func(_ *fakeOrca, s []string) []string { return s[:4] }, "selection never moved from PostModelRequest", map[string]int{sendEnd: 1, sendTrust: 1, sendHome: 1}, "hooks.review moves=1 ok=false seconds=1"},
 		{"trusted Home stops short", func(_ *fakeOrca, s []string) []string {
 			return append(slices.Clone(s[:4]), historyLost(t, trustedScreen(active, 3, 8, 8)))
-		}, "moved from Interrupt to SubagentStart, not its other edge", map[string]int{sendEnd: 1, sendTrust: 1, sendHome: 1}, "hooks.review moves=1 ok=false seconds=0"},
+		}, "moved from PostModelRequest to SubagentStart, not its other edge", map[string]int{sendEnd: 1, sendTrust: 1, sendHome: 1}, "hooks.review moves=1 ok=false seconds=0"},
 		{"ambiguous trusted Home", func(f *fakeOrca, s []string) []string {
 			f.replies[sendHome] = nil
 			f.fail(sendHome, "", errors.New("connection reset"))
@@ -835,7 +842,7 @@ func TestCodexReviewStopsOnStuckOrUnverifiedEdges(t *testing.T) {
 				}
 				assertSent(t, fake, tt.sent)
 				assertSent(t, fake, map[string]int{sendDown: 0, sendUp: 0, sendEscape: 0, waitIdle: 0})
-				reviews := slices.DeleteFunc(timings(t, logs, "connection reset", "Interrupt"), func(line string) bool { return !strings.HasPrefix(line, "hooks.review ") })
+				reviews := slices.DeleteFunc(timings(t, logs, "connection reset", "PostModelRequest"), func(line string) bool { return !strings.HasPrefix(line, "hooks.review ") })
 				if !slices.Equal(reviews, []string{tt.review}) {
 					t.Errorf("review timings = %q, want %q", reviews, tt.review)
 				}
@@ -857,7 +864,7 @@ func TestCodexTrustIsSentOnceAndVerifiedAtBothEdges(t *testing.T) {
 	for _, i := range []int{0, 2, 5, 7} {
 		residual[i].active, residual[i].review = 2, 0
 	}
-	unknown := append(slices.Clone(active[:11]), browserRow{"Notification", 0, 0, 0, "Synthetic"})
+	unknown := append(slices.Clone(active[:13]), browserRow{"Notification", 0, 0, 0, "Synthetic"})
 	swapped := slices.Clone(active)
 	swapped[8], swapped[9] = swapped[9], swapped[8]
 	detail := historyLost(t, slices.Concat(codexBanner, []string{"  PreToolUse hooks", "  Turn hooks on or off. Your changes are saved automatically.", "› [x] Hook 1", "  [x] Hook 2", "  space/enter toggle · esc back"}))
@@ -877,13 +884,13 @@ func TestCodexTrustIsSentOnceAndVerifiedAtBothEdges(t *testing.T) {
 		{"trust opens a detail view", func(*fakeOrca) {}, []string{detail}, "did not produce the trusted hooks browser", 0},
 		{"disabled handler at the last edge", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(edited("Stop", 2, 1), 8)), reads[4]}, "shows 1 of 2 Stop hooks active", 1},
 		{"disabled handler at the first edge", func(*fakeOrca) {}, []string{reads[3], historyLost(t, trustedScreen(edited("PreToolUse", 2, 1), 0, 0, 8))}, "shows 1 of 2 PreToolUse hooks active", 1},
-		{"disabled handler in the overlap", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(edited("SessionStart", 2, 1), 8)), historyLost(t, trustedScreen(edited("SessionStart", 2, 1), 0, 0, 8))}, "shows 1 of 2 SessionStart hooks active", 1},
+		{"disabled handler in the overlap", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(edited("UserPromptSubmit", 2, 1), 8)), historyLost(t, trustedScreen(edited("UserPromptSubmit", 2, 1), 0, 0, 8))}, "shows 1 of 2 UserPromptSubmit hooks active", 1},
 		{"installed count changes", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(edited("Stop", 3, 3), 8)), reads[4]}, "shows 3 of 3 Stop hooks active", 1},
 		{"trusted edges disagree", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(edited("UserPromptSubmit", 2, 1), 8)), reads[4]}, "changed the UserPromptSubmit counts", 1},
 		{"trusted edges reorder rows", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(swapped, 8)), reads[4]}, "out of the supported order", 1},
-		{"trusted view lists an unknown event", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(slices.Concat(active[:4], unknown[11:], active[5:]), 8)), reads[4]}, "unsupported event row", 1},
-		{"trusted view at neither edge after End", func(*fakeOrca) {}, []string{historyLost(t, trustedScreen(active, 4, 10, 8)), reads[4]}, "selects Stop, at neither edge of its events", 0},
-		{"trusted edges list an unknown event", func(*fakeOrca) {}, []string{reads[3], historyLost(t, trustedScreen(slices.Concat(unknown[11:], active[1:]), 0, 0, 8))}, "moved from Interrupt to Notification, not its other edge", 1},
+		{"trusted view lists an unknown event", func(*fakeOrca) {}, []string{historyLost(t, trustedLast(slices.Concat(active[:6], unknown[13:], active[7:]), 8)), reads[4]}, "unsupported event row", 1},
+		{"trusted view at neither edge after End", func(*fakeOrca) {}, []string{historyLost(t, trustedScreen(active, 6, 10, 8)), reads[4]}, "selects Stop, at neither edge of its events", 0},
+		{"trusted edges list an unknown event", func(*fakeOrca) {}, []string{reads[3], historyLost(t, trustedScreen(slices.Concat(unknown[13:], active[1:]), 0, 0, 8))}, "moved from PostModelRequest to Notification, not its other edge", 1},
 		{"trusted first edge is limited", func(*fakeOrca) {}, []string{reads[3], frameOf(t, "screen", false, true, trustedScreen(active, 0, 0, 8))}, "limited screen", 1},
 	}
 	for _, tt := range tests {
