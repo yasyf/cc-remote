@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finds its merge base. A blobless profile can keep a warm pool too.
 
 ### Fixed
+- **A full local disk no longer takes a Sprite's root filesystem down.** The
+  Sprite's block device daemon keeps its cache on the same 20 GB local disk as
+  `/tmp`, and fails every root filesystem write once that disk has less than
+  512 MiB free; the platform then remounts the root filesystem and restarts
+  every process, and answers `Storage not ready` until space returns. Create
+  now mounts a fixed-size volume over the local disk, sized to leave the
+  provider 6.5 GiB, so a lane that fills `/tmp` or its home gets `ENOSPC` in its
+  own files and the Sprite keeps running.
 - **A Codex 0.167 worker gets past its folder-trust screen.** Codex 0.167
   ends that screen with `esc back` and offers "Back to Agent Command Center"
   in place of "Quit", so the startup gate matched nothing and `prepare` timed

@@ -682,12 +682,12 @@ func (s *Session) wake(ctx context.Context, machine string) error {
 }
 
 func (s *Session) moveToLocalDisk(ctx context.Context, machine string) error {
-	disk := s.Provider.Traits().LocalDisk
-	if disk == "" {
+	traits := s.Provider.Traits()
+	if traits.LocalDisk == "" {
 		return nil
 	}
 	return s.timed(ctx, laneMain, "local.disk", machine, func() error {
-		return s.Scripts.MoveToLocalDisk(ctx, s.exec(machine), disk)
+		return s.Scripts.MoveToLocalDisk(ctx, s.exec(machine), traits.LocalDisk, traits.LocalDiskReserve)
 	})
 }
 

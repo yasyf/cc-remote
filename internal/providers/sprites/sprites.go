@@ -29,6 +29,13 @@ const (
 	downloadChunk = 1 << 30
 )
 
+const (
+	blockDeviceCacheLimit = 5 << 30
+	blockDeviceWriteFloor = 512 << 20
+	platformFilesOnDisk   = 1 << 30
+	localDiskReserve      = blockDeviceCacheLimit + blockDeviceWriteFloor + platformFilesOnDisk
+)
+
 var (
 	pauseWithin = 2 * time.Minute
 	pauseEvery  = 5 * time.Second
@@ -93,10 +100,11 @@ func New(config Config) (*Provider, error) {
 
 func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
-		TailnetMode: providers.TailnetKernel,
-		Supervisor:  providers.SupervisorSpriteEnv,
-		GoBuildJobs: 4,
-		LocalDisk:   localDisk,
+		TailnetMode:      providers.TailnetKernel,
+		Supervisor:       providers.SupervisorSpriteEnv,
+		GoBuildJobs:      4,
+		LocalDisk:        localDisk,
+		LocalDiskReserve: localDiskReserve,
 	}
 }
 
