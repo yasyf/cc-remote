@@ -189,7 +189,7 @@ var (
 	nativeHookEvents  = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "Stop"}
 	formedHookEvents  = append(slices.Clone(nativeHookEvents), "Interrupt")
 	captainHookEvents = []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
-	browserEvents     = []string{"PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt"}
+	browserEvents     = []string{"PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt", "PreModelRequest", "PostModelRequest"}
 	probeRefusals     = []string{"home", "metadata", "manifest", "executable", "config", "inline-hooks", "hooks", "duplicate-key", "unexpected-event", "mismatch", "missing", "probe-error"}
 	promptLines       = []string{"Hooks need review", "", "Hooks can run outside the sandbox after you trust them.", reviewChoice, "2. Trust all and continue", "3. Continue without trusting (hooks won't run)", "enter confirm · esc skip"}
 	promptCount       = regexp.MustCompile(`^(\d+) hooks? (?:are|is) new or changed\.$`)
