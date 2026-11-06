@@ -103,8 +103,8 @@ func TestReuseRefreshesTheCheckoutWithoutProvisioningOrPrepareSteps(t *testing.T
 		t.Fatal(err)
 	}
 	reused := strings.Join(h.machine.scripts["ws-1"][before:], "\n")
-	if h.machine.ran("ws-1", checkout) != checkouts+1 || !strings.Contains(reused, "ref=feature\n") || !strings.Contains(reused, "fetch --quiet --prune --depth 1 origin") {
-		t.Errorf("reuse did not check out feature shallowly: %q", reused)
+	if h.machine.ran("ws-1", checkout) != checkouts+1 || !strings.Contains(reused, "ref=feature\n") || !strings.Contains(reused, "fetch --quiet --prune --filter=blob:none origin") {
+		t.Errorf("reuse did not check out feature blobless: %q", reused)
 	}
 	if h.machine.ran("ws-1", prepares) != prepared || !strings.Contains(reused, readies) || strings.Contains(reused, installs) || strings.Contains(reused, publishes) || strings.Contains(reused, provisions) || !strings.Contains(reused, configures) {
 		t.Errorf("reuse ran prepare steps, provisioned, or skipped the ready check or configure: %q", reused)

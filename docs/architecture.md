@@ -46,7 +46,7 @@ infrastructure.
 ## Prepare tools and checkout
 
 The lean profile selects Sprites over SSH with configured tools and plugins and
-a shallow checkout of the requested ref. Project dependency installation and
+a blobless checkout of the requested ref. Project dependency installation and
 platform startup are task-specific actions. A profile can supply those commands
 when needed, including a full-stack Namespace environment.
 
@@ -134,7 +134,7 @@ source, resume runs the URL command again immediately before the reinstall.
 | Part of the lean profile | Task-specific setup |
 | --- | --- |
 | Agent tools and plugins from the inventory | Repository dependency installation |
-| Shallow checkout at the requested commit | Code generation and test workloads |
+| Blobless checkout at the requested commit | Code generation and test workloads |
 | SSH transport and client connection | Platform services and orchestration |
 
 Installing an agent CLI prepares tools. A profile

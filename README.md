@@ -11,7 +11,7 @@ is the desktop frontend. Configuration selects the tools, plugins, checkout,
 provider, and optional project setup commands.
 
 Use Sprites over SSH for agent work. Prepare the tools and plugins, then fetch a
-shallow checkout at the requested commit. Install project dependencies when the
+blobless checkout at the requested commit. Install project dependencies when the
 task needs them. Opt into a separate Namespace profile for a full platform.
 
 Tool preparation targets Linux. The Orca composer flow has source

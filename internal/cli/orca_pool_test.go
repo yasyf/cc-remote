@@ -229,8 +229,8 @@ func TestWarmPrepareClaimsAnUnusedSpareRefreshedToTheMovedRef(t *testing.T) {
 		want string
 	}{
 		{[]string{"rev-parse", "HEAD"}, moved},
-		{[]string{"rev-parse", "--is-shallow-repository"}, "true"},
-		{[]string{"rev-list", "--count", "HEAD"}, "1"},
+		{[]string{"rev-parse", "--is-shallow-repository"}, "false"},
+		{[]string{"rev-list", "--count", "HEAD"}, "2"},
 		{[]string{"status", "--porcelain", "--untracked-files=all"}, ""},
 		{[]string{"config", "--get", "cc-remote.kept"}, "existing"},
 	} {
@@ -245,8 +245,10 @@ func TestWarmPrepareClaimsAnUnusedSpareRefreshedToTheMovedRef(t *testing.T) {
 		t.Errorf("provider calls = %q, want pool-a woken and nothing created or destroyed", lifecycle)
 	}
 	refreshed := w.local.Scripts("pool-a")[scripts:]
-	if !slices.ContainsFunc(refreshed, func(script string) bool { return strings.Contains(script, "fetch --quiet --prune --depth 1 origin") }) {
-		t.Errorf("no shallow fetch refreshed the checkout: %q", refreshed)
+	if !slices.ContainsFunc(refreshed, func(script string) bool {
+		return strings.Contains(script, "fetch --quiet --prune --filter=blob:none origin")
+	}) {
+		t.Errorf("no blobless fetch refreshed the checkout: %q", refreshed)
 	}
 	for _, script := range refreshed {
 		if strings.Contains(script, "plugins.sh install") || strings.Contains(script, "plugins.sh publish") {
@@ -480,7 +482,7 @@ func TestAFailedClaimStaysFailedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	}
 	handle := w.provider.Handle
 	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
-		if id == "pool-a" && strings.Contains(cmd[len(cmd)-1], "fetch --quiet --prune --depth 1 origin") {
+		if id == "pool-a" && strings.Contains(cmd[len(cmd)-1], "fetch --quiet --prune --filter=blob:none origin") {
 			return providers.Result{ExitCode: 1, Stderr: []byte("fatal: sk-leakedsecret failed to connect\n")}
 		}
 		return handle(id, cmd, stdin)
@@ -755,7 +757,7 @@ func TestALaneStopsAfterTwoFailedClaimsAndItsRelaunchPreparesTheNextSpare(t *tes
 	}
 	handle := w.provider.Handle
 	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
-		if strings.Contains(cmd[len(cmd)-1], "fetch --quiet --prune --depth 1 origin") {
+		if strings.Contains(cmd[len(cmd)-1], "fetch --quiet --prune --filter=blob:none origin") {
 			return providers.Result{ExitCode: 1, Stderr: []byte("fatal: failed to connect\n")}
 		}
 		return handle(id, cmd, stdin)
