@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/workspace"
 	"github.com/yasyf/cc-remote/internal/workspace/workspacetest"
 )
@@ -29,41 +30,56 @@ func runScript(t *testing.T, home, script, stdin string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-func TestCheckoutScriptClonesBloblessWithTheWholeHistoryThenSwitchesRefWithoutKeepingTheToken(t *testing.T) {
-	repository := workspacetest.GitRepository(t)
-	origin := strings.TrimPrefix(repository, "file://")
-	git(t, origin, "config", "uploadpack.allowFilter", "true")
-	git(t, origin, "commit", "-q", "--allow-empty", "-m", "second")
-	home := t.TempDir()
-	root := filepath.Join(home, "app")
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, true), workspacetest.Token+"\n"); err != nil {
-		t.Fatalf("%v: %s", err, out)
+func TestCheckoutScriptClonesTheRequestedRefThenSwitchesRefWithoutKeepingTheToken(t *testing.T) {
+	tests := []struct {
+		checkout config.Checkout
+		history  func(t *testing.T, root, origin string) bool
+	}{
+		{config.Shallow, func(t *testing.T, root, _ string) bool {
+			return git(t, root, "rev-parse", "--is-shallow-repository") == "true" && git(t, root, "rev-list", "--count", "HEAD") == "1"
+		}},
+		{config.Blobless, func(t *testing.T, root, origin string) bool {
+			return git(t, root, "rev-parse", "--is-shallow-repository") == "false" && git(t, root, "rev-list", "--count", "HEAD") == git(t, origin, "rev-list", "--count", "main") && git(t, root, "config", "remote.origin.promisor") == "true"
+		}},
 	}
-	if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "main" {
-		t.Error("the clone is not at the requested ref")
-	}
-	if git(t, root, "rev-parse", "--is-shallow-repository") != "false" || git(t, root, "rev-list", "--count", "HEAD") != git(t, origin, "rev-list", "--count", "main") || git(t, root, "config", "remote.origin.promisor") != "true" {
-		t.Error("a lean checkout is not a blobless clone of the whole history, which a rebase onto an older base needs")
-	}
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "feature"}, true), workspacetest.Token+"\n"); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	if git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "feature" || git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "feature") {
-		t.Error("a second checkout did not switch to the requested ref")
-	}
-	git(t, origin, "commit", "-q", "--allow-empty", "-m", "third")
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, false), "\n"); err != nil {
-		t.Fatalf("%v: %s", err, out)
-	}
-	if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") {
-		t.Error("a checkout with no token did not fast-forward")
-	}
-	out, err := exec.Command("grep", "-rl", workspacetest.Token, home).Output()
-	if err == nil {
-		t.Errorf("the token is on disk in %s", out)
-	}
-	if config := git(t, root, "config", "--list"); strings.Contains(config, "token") || strings.Contains(config, "askpass") {
-		t.Errorf("the checkout's config carries %q", config)
+	for _, tt := range tests {
+		t.Run(string(tt.checkout), func(t *testing.T) {
+			repository := workspacetest.GitRepository(t)
+			origin := strings.TrimPrefix(repository, "file://")
+			git(t, origin, "config", "uploadpack.allowFilter", "true")
+			git(t, origin, "commit", "-q", "--allow-empty", "-m", "second")
+			home := t.TempDir()
+			root := filepath.Join(home, "app")
+			if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, tt.checkout), workspacetest.Token+"\n"); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "main" {
+				t.Error("the clone is not at the requested ref")
+			}
+			if !tt.history(t, root, origin) {
+				t.Errorf("a %s checkout does not keep the history that mode names", tt.checkout)
+			}
+			if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "feature"}, tt.checkout), workspacetest.Token+"\n"); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "feature" || git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "feature") {
+				t.Error("a second checkout did not switch to the requested ref")
+			}
+			git(t, origin, "commit", "-q", "--allow-empty", "-m", "third")
+			if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, config.Full), "\n"); err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") {
+				t.Error("a checkout with no token did not fast-forward")
+			}
+			out, err := exec.Command("grep", "-rl", workspacetest.Token, home).Output()
+			if err == nil {
+				t.Errorf("the token is on disk in %s", out)
+			}
+			if config := git(t, root, "config", "--list"); strings.Contains(config, "token") || strings.Contains(config, "askpass") {
+				t.Errorf("the checkout's config carries %q", config)
+			}
+		})
 	}
 }
 
@@ -78,7 +94,7 @@ func TestCheckoutScriptPointsOriginHeadAtTheRemoteDefaultBranch(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			root := filepath.Join(home, "app")
-			if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, source, true), workspacetest.Token+"\n"); err != nil {
+			if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, source, config.Shallow), workspacetest.Token+"\n"); err != nil {
 				t.Fatalf("%v: %s", err, out)
 			}
 			if head := git(t, root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); head != "origin/main" {
@@ -92,7 +108,7 @@ func TestCheckoutScriptPointsOriginHeadAtTheRemoteDefaultBranch(t *testing.T) {
 }
 
 func TestCheckoutScriptNeverPutsTheTokenInArgv(t *testing.T) {
-	script := workspace.CheckoutScript("/home/x/app", "https://github.com/example/app", workspace.Source{Ref: "main"}, true)
+	script := workspace.CheckoutScript("/home/x/app", "https://github.com/example/app", workspace.Source{Ref: "main"}, config.Shallow)
 	if strings.Contains(script, "x-access-token:") || !strings.Contains(script, "IFS= read -r token") || !strings.Contains(script, "GIT_ASKPASS") || !strings.Contains(script, "GIT_TERMINAL_PROMPT=0") {
 		t.Errorf("script = %s", script)
 	}
@@ -144,28 +160,28 @@ func TestCheckoutScriptPinsTheRequestedCommitOnTheRequestedBranch(t *testing.T) 
 	home := t.TempDir()
 	root := filepath.Join(home, "app")
 	pinned := workspace.Source{Ref: "main", Head: head, Branch: "orca/ws-1"}
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, pinned, true), workspacetest.Token+"\n"); err != nil {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, pinned, config.Shallow), workspacetest.Token+"\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "HEAD") != head || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "orca/ws-1" {
 		t.Errorf("checked out %s on %s after the branch advanced past the pin", git(t, root, "rev-parse", "HEAD"), git(t, root, "rev-parse", "--abbrev-ref", "HEAD"))
 	}
-	if git(t, root, "rev-parse", "--is-shallow-repository") != "false" || git(t, root, "rev-list", "--count", "HEAD") != git(t, origin, "rev-list", "--count", head) {
-		t.Error("the pinned checkout lacks the history below its pin")
+	if git(t, root, "rev-parse", "--is-shallow-repository") != "true" || git(t, root, "rev-list", "--count", "HEAD") != "1" {
+		t.Error("the pinned checkout deepened past one commit")
 	}
 	if git(t, root, "remote", "get-url", "origin") != repository {
 		t.Error("the pinned checkout has no origin to refresh from")
 	}
 	git(t, origin, "commit", "-q", "--allow-empty", "-m", "moved again")
 	later := git(t, origin, "rev-parse", "main")
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main", Head: later, Branch: "orca/ws-1"}, true), "\n"); err != nil {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main", Head: later, Branch: "orca/ws-1"}, config.Shallow), "\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "HEAD") != later {
 		t.Error("a second pin on the same clone did not move to the new commit")
 	}
 	gone := workspace.Source{Ref: "main", Head: strings.Repeat("0", 40), Branch: "orca/ws-2"}
-	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, gone, true), "\n"); err == nil || !strings.Contains(string(out), "pinned commit") {
+	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, gone, config.Shallow), "\n"); err == nil || !strings.Contains(string(out), "pinned commit") {
 		t.Errorf("a vanished pin checked out: %v: %s", err, out)
 	}
 	if git(t, root, "rev-parse", "HEAD") != later {
@@ -182,7 +198,7 @@ func TestCheckoutDisablesCredentialHelpersWhileTheTokenIsInUse(t *testing.T) {
 	if out, err := store.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	script := workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, true)
+	script := workspace.CheckoutScript(root, repository, workspace.Source{Ref: "main"}, config.Shallow)
 	if !strings.Contains(script, `set -- -c credential.helper=; else set --; fi`) || !strings.Contains(script, `git "$@" clone`) || !strings.Contains(script, `git "$@" -C "$root" fetch`) {
 		t.Errorf("script = %s", script)
 	}

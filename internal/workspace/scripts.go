@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/remote"
 )
 
@@ -46,11 +47,8 @@ func (s Source) pinned() bool {
 	return s.Head != ""
 }
 
-func CheckoutScript(root, repository string, source Source, lean bool) string {
-	filter := ""
-	if lean {
-		filter = " --filter=blob:none"
-	}
+func CheckoutScript(root, repository string, source Source, checkout config.Checkout) string {
+	filter := map[config.Checkout]string{config.Shallow: " --depth 1", config.Blobless: " --filter=blob:none"}[checkout]
 	lines := append(gitCredentials(),
 		"root="+remote.Quote(root),
 		"ref="+remote.Quote(source.Ref),

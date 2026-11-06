@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an inventory can pin a backported `git` together with the matching `git-man`
   its `Depends` names.
 
+### Changed
+- **A blobless checkout is an opt-in profile value.** A profile's `checkout`
+  stays `shallow` by default, a depth-1 clone of the requested ref.
+  `checkout: blobless` opts into a clone with the whole history and no file
+  contents until a checkout or diff needs them, so a rebase onto an older base
+  finds its merge base. A blobless profile can keep a warm pool too.
+
 ### Fixed
 - **A failed warm claim no longer leaves its machine running.** A claim that
   failed before its worker started stayed `failed` with its Sprite running, and
