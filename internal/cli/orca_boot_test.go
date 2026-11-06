@@ -82,7 +82,7 @@ func TestAWarmClaimStartsItsRuntimeWhileItRefreshesTheCheckout(t *testing.T) {
 		t.Fatalf("the fill started a runtime on ports %v", ports)
 	}
 	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
-	w.waitForRuntime("fetch --quiet --prune --depth 1 origin")
+	w.waitForRuntime("fetch --quiet --prune --filter=blob:none origin")
 	native, commands := w.nativeAs("pool-a")
 	var out bytes.Buffer
 	if err := w.warm(t.Context(), w.session, native, &out, "lane-a", ""); err != nil {

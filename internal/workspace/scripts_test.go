@@ -29,9 +29,10 @@ func runScript(t *testing.T, home, script, stdin string) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
 
-func TestCheckoutScriptClonesShallowThenSwitchesRefWithoutKeepingTheToken(t *testing.T) {
+func TestCheckoutScriptClonesBloblessWithTheWholeHistoryThenSwitchesRefWithoutKeepingTheToken(t *testing.T) {
 	repository := workspacetest.GitRepository(t)
 	origin := strings.TrimPrefix(repository, "file://")
+	git(t, origin, "config", "uploadpack.allowFilter", "true")
 	git(t, origin, "commit", "-q", "--allow-empty", "-m", "second")
 	home := t.TempDir()
 	root := filepath.Join(home, "app")
@@ -41,8 +42,8 @@ func TestCheckoutScriptClonesShallowThenSwitchesRefWithoutKeepingTheToken(t *tes
 	if git(t, root, "rev-parse", "HEAD") != git(t, origin, "rev-parse", "main") || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "main" {
 		t.Error("the clone is not at the requested ref")
 	}
-	if shallow := git(t, root, "rev-parse", "--is-shallow-repository"); shallow != "true" {
-		t.Errorf("a lean checkout is not shallow: %s", shallow)
+	if git(t, root, "rev-parse", "--is-shallow-repository") != "false" || git(t, root, "rev-list", "--count", "HEAD") != git(t, origin, "rev-list", "--count", "main") || git(t, root, "config", "remote.origin.promisor") != "true" {
+		t.Error("a lean checkout is not a blobless clone of the whole history, which a rebase onto an older base needs")
 	}
 	if out, err := runScript(t, home, workspace.CheckoutScript(root, repository, workspace.Source{Ref: "feature"}, true), workspacetest.Token+"\n"); err != nil {
 		t.Fatalf("%v: %s", err, out)
@@ -149,8 +150,8 @@ func TestCheckoutScriptPinsTheRequestedCommitOnTheRequestedBranch(t *testing.T) 
 	if git(t, root, "rev-parse", "HEAD") != head || git(t, root, "rev-parse", "--abbrev-ref", "HEAD") != "orca/ws-1" {
 		t.Errorf("checked out %s on %s after the branch advanced past the pin", git(t, root, "rev-parse", "HEAD"), git(t, root, "rev-parse", "--abbrev-ref", "HEAD"))
 	}
-	if git(t, root, "rev-parse", "--is-shallow-repository") != "true" || git(t, root, "rev-list", "--count", "HEAD") != "1" {
-		t.Error("the pinned checkout deepened past one commit")
+	if git(t, root, "rev-parse", "--is-shallow-repository") != "false" || git(t, root, "rev-list", "--count", "HEAD") != git(t, origin, "rev-list", "--count", head) {
+		t.Error("the pinned checkout lacks the history below its pin")
 	}
 	if git(t, root, "remote", "get-url", "origin") != repository {
 		t.Error("the pinned checkout has no origin to refresh from")

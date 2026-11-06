@@ -46,10 +46,10 @@ func (s Source) pinned() bool {
 	return s.Head != ""
 }
 
-func CheckoutScript(root, repository string, source Source, shallow bool) string {
-	depth := ""
-	if shallow {
-		depth = " --depth 1"
+func CheckoutScript(root, repository string, source Source, lean bool) string {
+	filter := ""
+	if lean {
+		filter = " --filter=blob:none"
 	}
 	lines := append(gitCredentials(),
 		"root="+remote.Quote(root),
@@ -63,26 +63,26 @@ func CheckoutScript(root, repository string, source Source, shallow bool) string
 			`  git init --quiet "$root"`,
 			`  git -C "$root" remote add origin `+remote.Quote(repository),
 			"fi",
-			`git "$@" -C "$root" fetch --quiet`+depth+` origin "$head" || { echo "`+remote.Prefix+`: $ref no longer offers the pinned commit $head" >&2; exit 1; }`,
+			`git "$@" -C "$root" fetch --quiet`+filter+` origin "$head" || { echo "`+remote.Prefix+`: $ref no longer offers the pinned commit $head" >&2; exit 1; }`,
 			`git -C "$root" checkout --quiet --force -B `+remote.Quote(source.Branch)+` "$head"`,
-		), trackDefaultBranch(depth)...)...)
+		), trackDefaultBranch(filter)...)...)
 	}
 	return remote.Script(append(append(lines,
 		`if [ ! -d "$root/.git" ]; then`,
 		`  mkdir -p "$(dirname "$root")"`,
-		`  git "$@" clone --quiet`+depth+` --branch "$ref" --single-branch `+remote.Quote(repository)+` "$root"`,
+		`  git "$@" clone --quiet`+filter+` --branch "$ref" --single-branch `+remote.Quote(repository)+` "$root"`,
 		"else",
-		`  git "$@" -C "$root" fetch --quiet --prune`+depth+` origin "$ref"`,
+		`  git "$@" -C "$root" fetch --quiet --prune`+filter+` origin "$ref"`,
 		`  git -C "$root" checkout --quiet --force -B "$ref" FETCH_HEAD`,
 		"fi",
 		`if git -C "$root" rev-parse --quiet --verify "refs/remotes/origin/$ref" > /dev/null; then git -C "$root" branch --quiet --set-upstream-to "origin/$ref"; fi`,
-	), trackDefaultBranch(depth)...)...)
+	), trackDefaultBranch(filter)...)...)
 }
 
-func trackDefaultBranch(depth string) []string {
+func trackDefaultBranch(filter string) []string {
 	return []string{
 		`trunk="$(git "$@" -C "$root" ls-remote --symref origin HEAD | awk '$1 == "ref:" { sub("^refs/heads/", "", $2); print $2 }')"`,
-		`git "$@" -C "$root" fetch --quiet` + depth + ` origin "+refs/heads/$trunk:refs/remotes/origin/$trunk"`,
+		`git "$@" -C "$root" fetch --quiet` + filter + ` origin "+refs/heads/$trunk:refs/remotes/origin/$trunk"`,
 		`git -C "$root" remote set-head origin "$trunk"`,
 	}
 }
