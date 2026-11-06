@@ -655,8 +655,8 @@ func TestAFreshCreateChecksOutPreparesBootstrapsThenEnrolls(t *testing.T) {
 	if got := h.machine.stdins["ws-1"][source[0]]; got != token {
 		t.Errorf("checkout read %q on stdin", got)
 	}
-	if !strings.Contains(h.machine.scripts["ws-1"][source[0]], "--filter=blob:none") || !strings.Contains(h.machine.scripts["ws-1"][source[0]], "ref=feature") {
-		t.Error("the lean checkout is not a blobless checkout of the requested ref")
+	if !strings.Contains(h.machine.scripts["ws-1"][source[0]], "--depth 1") || !strings.Contains(h.machine.scripts["ws-1"][source[0]], "ref=feature") {
+		t.Error("the lean checkout is not a shallow checkout of the requested ref")
 	}
 	if result.Machine != "ws-1" || !strings.Contains(h.calls(), "create ws-1") || result.Tailnet == nil || result.Tailnet.NodeID != "nNEW" || result.SSH.Host != "ws-1" || len(result.Forwards) != 1 || result.Source.Ref != "feature" {
 		t.Errorf("result = %+v", result)
@@ -2766,10 +2766,7 @@ func TestResidentPackagesThatFailOnADifferingBaseInstallOnlineOnceAndTryAgain(t 
 		refusal = "cc-remote: the resident packages did not install offline, and the packages on this machine differ from the base its payload captured them against (-payload +machine); rebuild the payload on this base:\n+tmux=1\n-tmux=2"
 	)
 	failing := func(result providers.Result, fragments map[string]int) func(string) (providers.Result, bool) {
-		var counted sync.Mutex
 		return func(script string) (providers.Result, bool) {
-			counted.Lock()
-			defer counted.Unlock()
 			for fragment, left := range fragments {
 				if strings.Contains(script, fragment) && left > 0 {
 					fragments[fragment]--
