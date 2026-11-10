@@ -300,6 +300,16 @@ func TestParsePreservesTheOptionalTrunkKeyCommand(t *testing.T) {
 	}
 }
 
+func TestParsePreservesTheOptionalGitHubLoginCommand(t *testing.T) {
+	cfg, err := Parse([]byte(minimal + "orca:\n  keys:\n    github_login: [gh, config, get, -h, github.com, user]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Orca.Keys[KeyGitHubLogin]; !slices.Equal(got, []string{"gh", "config", "get", "-h", "github.com", "user"}) {
+		t.Errorf("GitHub login command = %q", got)
+	}
+}
+
 func TestParseRefusesWhatCannotRun(t *testing.T) {
 	tests := []struct {
 		name string

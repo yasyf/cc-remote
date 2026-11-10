@@ -27,6 +27,7 @@ const (
 	KeyOpenAI              = "openai"
 	KeyTypeSafe            = "typesafe"
 	KeyGitHub              = "github"
+	KeyGitHubLogin         = "github_login"
 	KeyTrunk               = "trunk"
 	KeyGemini              = "gemini"
 	HelperPlatform         = "linux/amd64"
@@ -233,8 +234,8 @@ func (o Orca) validate() error {
 		return fmt.Errorf("orca.entry %q must be a clean path inside the runtime tool's directory", o.Entry)
 	}
 	for provider, command := range o.Keys {
-		if provider != KeyAnthropic && provider != KeyOpenAI && provider != KeyTypeSafe && provider != KeyGitHub && provider != KeyTrunk && provider != KeyGemini {
-			return fmt.Errorf("orca.keys.%s: name %s, %s, %s, %s, %s, or %s", provider, KeyAnthropic, KeyOpenAI, KeyTypeSafe, KeyGitHub, KeyTrunk, KeyGemini)
+		if provider != KeyAnthropic && provider != KeyOpenAI && provider != KeyTypeSafe && provider != KeyGitHub && provider != KeyGitHubLogin && provider != KeyTrunk && provider != KeyGemini {
+			return fmt.Errorf("orca.keys.%s: name %s, %s, %s, %s, %s, %s, or %s", provider, KeyAnthropic, KeyOpenAI, KeyTypeSafe, KeyGitHub, KeyGitHubLogin, KeyTrunk, KeyGemini)
 		}
 		if len(command) == 0 || command[0] == "" {
 			return fmt.Errorf("orca.keys.%s needs the command that prints the key as its first element", provider)
