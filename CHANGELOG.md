@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finds its merge base. A blobless profile can keep a warm pool too.
 
 ### Fixed
+- **An Orca runtime that exits starts again.** The launcher ran the runtime in
+  place of itself as the `cc-remote-orca` service, and a Sprite counts a service
+  as running while any process it started is left. When a Sprite's home volume
+  filled and the runtime died on `ENOSPC`, its session daemon and agents stayed,
+  so nothing started the runtime again. The launcher now stays and runs the
+  runtime in a loop, waiting 1 second before the first restart and doubling up
+  to 30 seconds. Before each restart it writes the exit status to `serve.log`,
+  and it names the disk and its free MiB when that disk is full. A restarted
+  runtime has a new runtime id, which `reconnect` and `status` do not adopt yet.
+- **Go's caches leave a Sprite's home volume.** On a Sprite the tool install
+  sets `GOMODCACHE`, `GOCACHE` and `GOTMPDIR` under `/var/tmp/cc-remote` on the
+  root filesystem. A growing module cache can no longer fill the 12 GiB volume
+  the home, `/tmp` and the Orca runtime share. A machine keeps its home caches
+  until its tool install runs again.
 - **A lane's build can no longer take its Sprite down.** A Sprite's container
   had no memory limit until the platform restarted it, so a Go compile and test
   that reached 7 GB starved the block device daemon behind the root disk; its

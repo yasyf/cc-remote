@@ -236,6 +236,19 @@ The records stay.
 resume a machine, restart a runtime, or recover a worker after process loss.
 The recorded runtime and receipt identities remain unchanged.
 
+The machine itself restarts a runtime that exits. Its launcher,
+`$HOME/.cc-remote/orca/serve.sh`, runs the runtime in a loop and waits before
+each restart: 1 second at first, twice as long after each exit up to 30
+seconds, and 1 second again after a run of a minute or more. The agents in the
+worker's terminals keep running across the restart. Only the launcher holds
+`serve.lock`; the runtime and the processes it starts run without it. Before
+each restart the launcher writes `cc-remote: the Orca runtime exited <status>;
+starting it again in <delay>s` to its stderr and to `serve.log`. When that run
+logged `ENOSPC`, or the disk under the home has less than 64 MiB free, it first
+writes a line naming that disk's mount point, its device and the MiB it has
+free. A restarted runtime answers under a new runtime id, so `reconnect` and
+`status`, which ask for the recorded one, fail for that task.
+
 An SSH forward can exit on its own while its worker keeps running, for example
 after 45 seconds without an answer from the Sprite. Once `create`, `prepare`, or
 `reconnect` has a worker answering over an SSH forward, it keeps the task and
