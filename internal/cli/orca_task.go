@@ -474,7 +474,8 @@ func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
 		newOrcaForwardCmd(),
 		newOrcaPoolCmd(),
 		newOrcaStopCmd(runner),
-		newOrcaKeepCmd(),
+		newOrcaPruneCmd(runner),
+		newOrcaKeepCmd(runner),
 	}
 }
 

@@ -116,7 +116,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("hold the keeper lock = %t, %v", held, err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep beside a running one = %v, opened %q; want it to exit at once", err, opened())
 	}
 	unlock()
@@ -124,7 +124,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err := state.Remove(dir.OrcaKept("lane-a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep with nothing kept = %v, opened %q; want it to exit at once", err, opened())
 	}
 }

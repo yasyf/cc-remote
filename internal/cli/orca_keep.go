@@ -13,10 +13,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
-const keepEvery = 30 * time.Second
+const (
+	keepEvery  = 30 * time.Second
+	pruneEvery = 10 * time.Minute
+)
 
 var keepCommand = func(config string) (*exec.Cmd, error) {
 	helper, err := os.Executable()
@@ -26,7 +30,7 @@ var keepCommand = func(config string) (*exec.Cmd, error) {
 	return exec.Command(helper, "orca", "keep", "--config", config), nil
 }
 
-func newOrcaKeepCmd() *cobra.Command {
+func newOrcaKeepCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "keep",
@@ -34,8 +38,10 @@ func newOrcaKeepCmd() *cobra.Command {
 		Long: `keep runs detached, started by orca create, prepare, and reconnect once a task's worker answers. Every
 30 seconds it checks the SSH forward of each kept task and reopens one that has exited, as reconnect
 does, without touching the runtime or the worker. orca stop and destroy release a task before they
-close its forward, so keep never reopens a stopped lane's forward. One keep runs per state directory:
-a keep that finds another running exits at once, and a keep exits once no task is kept.`,
+close its forward, so keep never reopens a stopped lane's forward. Every 10 minutes, starting with its
+first pass, it also runs orca prune, so a stopped lane's or a gone machine's Orca environment does not
+linger for Orca to keep reading and retrying. One keep runs per state directory: a keep that finds
+another running exits at once, and a keep exits once no task is kept.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -43,7 +49,15 @@ a keep that finds another running exits at once, and a keep exits once no task i
 			if err != nil {
 				return err
 			}
-			return keepForwards(cmd.Context(), cfg.State(), slog.Default())
+			prune := func(ctx context.Context) error {
+				session, err := flags.open()
+				if err != nil {
+					return err
+				}
+				_, err = pruneEnvironments(ctx, session, orca.NewClient(runner), false)
+				return err
+			}
+			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune)
 		},
 	}
 	flags.bind(cmd)
@@ -84,13 +98,13 @@ func spawnKeeper(dir state.Dir, config string) error {
 	return cmd.Process.Release()
 }
 
-func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger) error {
+func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error) error {
 	for {
 		unlock, held, err := state.TryLock(dir.OrcaKeeper())
 		if err != nil || !held {
 			return err
 		}
-		err = holdForwards(ctx, dir, log)
+		err = holdForwards(ctx, dir, log, prune)
 		unlock()
 		if err != nil {
 			return err
@@ -102,10 +116,17 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger) error {
 	}
 }
 
-func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger) error {
+func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error) error {
 	ticker := time.NewTicker(keepEvery)
 	defer ticker.Stop()
+	var pruned time.Time
 	for {
+		if time.Since(pruned) >= pruneEvery {
+			if err := prune(ctx); err != nil {
+				log.Warn("pruning Orca environments failed, and the next prune tries again", "error", err)
+			}
+			pruned = time.Now()
+		}
 		kept, err := reopenForwards(ctx, dir, log)
 		if err != nil || kept == 0 {
 			return err

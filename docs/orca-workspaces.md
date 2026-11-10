@@ -218,6 +218,20 @@ normal cold. stop counts it as stopped, prints the provider's answer under
 `found`, and exits zero. It destroys nothing, so the machine and its records stay
 for whoever recovers its disk.
 
+A stopped lane's environment can still be saved in Orca, and so can the
+environment of a workspace whose machine was deleted some other way. Orca
+rereads every saved environment on each lookup, so each one it no longer needs
+costs it work. `cc-remote orca prune` removes the saved environment of every
+task on the selected provider whose lane was stopped or whose machine the
+provider no longer has, and prints each one it removed with the reason.
+`--dry-run` prints the same list and removes nothing.
+
+prune matches an environment
+by the id the task recorded when it paired, so a later pairing under the same
+name stays, and it never touches an environment no task paired. It also
+releases a task whose machine is gone, so keep stops reopening that forward.
+The records stay.
+
 `reconnect` restores only the transport to an existing runtime. It does not
 resume a machine, restart a runtime, or recover a worker after process loss.
 The recorded runtime and receipt identities remain unchanged.
@@ -232,6 +246,9 @@ exits once no task is kept. `orca stop` and `destroy` release the task before
 they close its forward, so keep never reopens a stopped lane's forward. A task
 launched by a release without keep is not kept until `reconnect` runs on it.
 keep logs to `orca/keeper.log` in the state directory.
+
+keep also runs `orca prune` on its first pass and every 10 minutes after. A
+failed prune is logged and tried again on the next one, and it never stops keep.
 
 ## Prepare a worker for a Mac Run
 
