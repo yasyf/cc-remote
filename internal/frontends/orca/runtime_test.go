@@ -2,13 +2,16 @@ package orca_test
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 )
@@ -170,19 +173,60 @@ func TestRuntimeLauncher(t *testing.T) {
 		`cd "$HOME/.cc-remote/orca"`,
 		"exec 9> serve.lock",
 		"flock -n 9 || exit 0",
-		`exec xvfb-run --auto-servernum '--server-args=-nolisten tcp' "$HOME/".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun serve --port 7001 --pairing-address 127.0.0.1 --json --log-level info > serve.json 2>> serve.log`,
+		"say() {",
+		`  printf '%s\n' "$1" >&2`,
+		`  printf '%s\n' "$1" >> serve.log || :`,
+		"}",
+		"child=",
+		`trap 'kill "$child" 2> /dev/null || :; wait "$child" 2> /dev/null || :; exit 143' HUP INT TERM`,
+		"delay=1",
+		"while :; do",
+		"  logged=0",
+		"  test ! -f serve.log || logged=$(wc -c < serve.log)",
+		"  started=$(date +%s)",
+		`  xvfb-run --auto-servernum '--server-args=-nolisten tcp' "$HOME/".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun serve --port 7001 --pairing-address 127.0.0.1 --json --log-level info > serve.json 2>> serve.log 9>&- &`,
+		"  child=$!",
+		"  status=0",
+		`  wait "$child" || status=$?`,
+		"  test $(($(date +%s) - started)) -lt 60 || delay=1",
+		"  enospc=0",
+		"  tail -c +$((logged + 1)) serve.log 2> /dev/null | grep -q ENOSPC && enospc=1",
+		`  full=$(df -Pk "$HOME" | awk -v enospc="$enospc" 'NR == 2 && (enospc || $4 < 65536) { printf "cc-remote: the Orca runtime is out of disk space: %s on %s has %d MiB free", $6, $1, $4 / 1024 }')`,
+		`  test -z "$full" || say "$full"`,
+		`  say "cc-remote: the Orca runtime exited $status; starting it again in ${delay}s"`,
+		`  sleep "$delay" &`,
+		"  child=$!",
+		`  wait "$child"`,
+		"  delay=$((delay * 2))",
+		"  test $delay -le 30 || delay=30",
+		"done",
 	}, "\n")
 	if got := runtime.Launcher(); got != want {
 		t.Errorf("Launcher =\n%s\nwant\n%s", got, want)
 	}
 }
 
-func TestRuntimeLauncherServesOnStockDefaults(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "a home with spaces")
-	for path, script := range map[string]string{
-		".local/bin/flock":         "#!/bin/sh\nexit 0\n",
-		"orca runtime/orca/AppRun": "#!/bin/sh\nprintf '%s\\0' \"$@\"\n",
-	} {
+const (
+	launcherEntry = "runtime/AppRun"
+	countRun      = "n=$(($(cat \"$HOME/runs\" 2> /dev/null || echo 0) + 1))\necho \"$n\" > \"$HOME/runs\"\n"
+)
+
+func dfReporting(availableKiB int) string {
+	return "#!/bin/sh\ntest \"$1 $2\" = \"-Pk $HOME\" || exit 64\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/vdb 20971520 10485760 " + strconv.Itoa(availableKiB) + " 50%% /home\\n'\n"
+}
+
+func startLauncher(t *testing.T, home string, runtime orca.Runtime, scripts map[string]string) string {
+	t.Helper()
+	files := map[string]string{
+		".local/bin/flock": "#!/bin/sh\nexit 0\n",
+		".local/bin/sleep": "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$HOME/slept\"\n",
+		".local/bin/df":    dfReporting(10 << 20),
+	}
+	maps.Copy(files, scripts)
+	if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, script := range files {
 		if err := os.MkdirAll(filepath.Join(home, filepath.Dir(path)), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -190,21 +234,137 @@ func TestRuntimeLauncherServesOnStockDefaults(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	launch := exec.Command("sh", "-c", orca.Runtime{Entry: "orca runtime/orca/AppRun", Port: 7001}.Launcher())
-	launch.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
-	if out, err := launch.CombinedOutput(); err != nil {
-		t.Fatalf("launcher: %v: %s", err, out)
-	}
-	raw, err := os.ReadFile(filepath.Join(home, ".cc-remote", "orca", "serve.json"))
+	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"serve", "--port", "7001", "--pairing-address", "127.0.0.1", "--json"}
-	if got := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00"); !slices.Equal(got, want) {
-		t.Errorf("runtime argv = %q, want %q", got, want)
+	launch := exec.Command("sh", "-c", runtime.Launcher())
+	launch.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+	launch.Stderr = stderr
+	launch.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := launch.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := syscall.Kill(-launch.Process.Pid, syscall.SIGKILL); err != nil {
+			t.Errorf("kill the launcher's process group: %v", err)
+		}
+		_ = launch.Wait()
+		_ = stderr.Close()
+	})
+	return stderr.Name()
+}
+
+func awaitFile(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, _ := os.ReadFile(path)
+		if string(got) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s holds %q, want %q", path, got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestRuntimeLauncherServesOnStockDefaults(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "a home with spaces")
+	startLauncher(t, home, orca.Runtime{Entry: "orca runtime/orca/AppRun", Port: 7001}, map[string]string{
+		"orca runtime/orca/AppRun": "#!/bin/sh\nprintf '%s\\0' \"$@\"\nexec /bin/sleep 600\n",
+	})
+	awaitFile(t, filepath.Join(home, ".cc-remote", "orca", "serve.json"), strings.Join([]string{"serve", "--port", "7001", "--pairing-address", "127.0.0.1", "--json", ""}, "\x00"))
+}
+
+func TestRuntimeLauncherRestartsTheRuntimeWithBackoff(t *testing.T) {
+	home := t.TempDir()
+	stderr := startLauncher(t, home, orca.Runtime{Entry: launcherEntry, Port: 7001}, map[string]string{
+		launcherEntry:     "#!/bin/sh\n" + countRun + "test \"$n\" -lt 9 || exec /bin/sleep 600\nexit 3\n",
+		".local/bin/date": "#!/bin/sh\ntest \"$1\" = +%s || exit 64\nn=$(($(cat \"$HOME/dates\" 2> /dev/null || echo 0) + 1))\necho \"$n\" > \"$HOME/dates\"\nif test \"$n\" -lt 16; then echo 1000; else echo 1060; fi\n",
+	})
+	awaitFile(t, filepath.Join(home, "runs"), "9\n")
+	delays := []string{"1", "2", "4", "8", "16", "30", "30", "1"}
+	if got, want := readFile(t, filepath.Join(home, "slept")), strings.Join(delays, "\n")+"\n"; got != want {
+		t.Errorf("the launcher slept %q between runs, want %q: doubling from 1s, capped at 30s, back to 1s after a 60s run", got, want)
+	}
+	var lines strings.Builder
+	for _, delay := range delays {
+		lines.WriteString("cc-remote: the Orca runtime exited 3; starting it again in " + delay + "s\n")
+	}
+	if got := readFile(t, stderr); got != lines.String() {
+		t.Errorf("stderr = %q, want %q", got, lines.String())
+	}
+	if got := readFile(t, filepath.Join(home, ".cc-remote", "orca", "serve.log")); got != lines.String() {
+		t.Errorf("serve.log = %q, want %q", got, lines.String())
+	}
+}
+
+func TestRuntimeLauncherKeepsSessionsAcrossARestart(t *testing.T) {
+	home := t.TempDir()
+	stderr := startLauncher(t, home, orca.Runtime{Entry: launcherEntry, Port: 7001}, map[string]string{
+		launcherEntry: "#!/bin/sh\n" + countRun +
+			"if (true >&9) 2> /dev/null; then echo open; else echo closed; fi >> \"$HOME/lock\"\n" +
+			"test \"$n\" -gt 1 && exec /bin/sleep 600\n" +
+			"/bin/sleep 600 &\necho \"$!\" > \"$HOME/session\"\nexit 9\n",
+	})
+	awaitFile(t, filepath.Join(home, "lock"), "closed\nclosed\n")
+	session, err := strconv.Atoi(strings.TrimSpace(readFile(t, filepath.Join(home, "session"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(session, 0); err != nil {
+		t.Errorf("the session the first run started is gone after the restart: %v", err)
+	}
+	if got, want := readFile(t, stderr), "cc-remote: the Orca runtime exited 9; starting it again in 1s\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeLauncherNamesAFullDisk(t *testing.T) {
+	for _, tt := range []struct {
+		name, earlier, run string
+		availableKiB       int
+		want               string
+	}{
+		{
+			"the run reports ENOSPC", "", "echo 'Error: ENOSPC: no space left on device, write' >&2\nexit 1\n", 10 << 20,
+			"cc-remote: the Orca runtime is out of disk space: /home on /dev/vdb has 10240 MiB free\ncc-remote: the Orca runtime exited 1; starting it again in 1s\n",
+		},
+		{
+			"df shows under 64 MiB", "", "exit 1\n", 63 << 10,
+			"cc-remote: the Orca runtime is out of disk space: /home on /dev/vdb has 63 MiB free\ncc-remote: the Orca runtime exited 1; starting it again in 1s\n",
+		},
+		{
+			"a normal exit after an earlier run's ENOSPC", "Error: ENOSPC: no space left on device, write\n", "exit 0\n", 64 << 10,
+			"cc-remote: the Orca runtime exited 0; starting it again in 1s\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			stderr := startLauncher(t, home, orca.Runtime{Entry: launcherEntry, Port: 7001}, map[string]string{
+				launcherEntry:               "#!/bin/sh\n" + countRun + "test \"$n\" -gt 1 && exec /bin/sleep 600\n" + tt.run,
+				".local/bin/df":             dfReporting(tt.availableKiB),
+				".cc-remote/orca/serve.log": tt.earlier,
+			})
+			awaitFile(t, filepath.Join(home, "runs"), "2\n")
+			if got := readFile(t, stderr); got != tt.want {
+				t.Errorf("stderr = %q, want %q", got, tt.want)
+			}
+			if got := readFile(t, filepath.Join(home, ".cc-remote", "orca", "serve.log")); !strings.HasSuffix(got, tt.want) {
+				t.Errorf("serve.log = %q, want it to end with %q", got, tt.want)
+			}
+		})
 	}
 }
 

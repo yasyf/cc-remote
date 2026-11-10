@@ -145,6 +145,16 @@ Sprites, which the Orca runtime exports as `GOFLAGS=-p=2` and `GOMEMLIMIT` to
 every lane, so a Go build or test runs two jobs at a time and each Go process
 collects its garbage before it passes 2 GiB.
 
+Go's module cache, build cache and temporary build directory are the one
+exception to the volume on a Sprite. The tool install points them at
+`/var/tmp/cc-remote/go-mod`, `go-build` and `go-tmp` with `go env -w`, since
+`/var/tmp` is on the root filesystem. The volume holds the home, `/tmp`, and
+every log and state file the Orca runtime writes, so a full volume stops the
+runtime. On a pool Sprite the volume is 12 GiB and the module cache alone had
+grown to 2.6 GiB, while the root filesystem had 90 GiB free. Elsewhere Go keeps
+its caches in the home, and the install moves a cache that sits outside it to
+`$HOME/.cache/go-mod` or `$HOME/.cache/go-build`.
+
 Startup then runs `provision.sh prerequisites` on machines provisioned in place,
 and these lanes concurrently:
 
