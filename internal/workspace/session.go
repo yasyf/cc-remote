@@ -678,12 +678,17 @@ func (s *Session) wake(ctx context.Context, machine string) error {
 	if err := s.Provider.Wake(ctx, machine); err != nil {
 		return err
 	}
-	if s.Provider.Traits().LocalDisk != "" {
-		if err := s.Scripts.RebindLocalDisk(ctx, s.exec(machine)); err != nil {
-			return err
-		}
+	if err := s.BindHome(ctx, machine); err != nil {
+		return err
 	}
 	return s.limitMemory(ctx, machine)
+}
+
+func (s *Session) BindHome(ctx context.Context, machine string) error {
+	if s.Provider.Traits().LocalDisk == "" {
+		return nil
+	}
+	return s.Scripts.RebindLocalDisk(ctx, s.exec(machine))
 }
 
 func (s *Session) limitMemory(ctx context.Context, machine string) error {

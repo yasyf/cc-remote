@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finds its merge base. A blobless profile can keep a warm pool too.
 
 ### Fixed
+- **A spare that slept in the warm pool is claimed again.** A Sprite keeps its
+  home on a volume of its local disk, which a boot mounts again through a
+  service. A spare left unclaimed long enough to sleep boots when the claim
+  first reaches it, and the claim checked its checkout before that mount was
+  back, so it found no checkout, failed with "the configured project root is
+  not the top level of a git checkout", and stayed running as failed. The claim now binds the home
+  first, the step a resume already runs, and checks the checkout after it. A
+  spare whose home cannot be bound stays running as failed, the same as one
+  whose check fails.
 - **An Orca runtime that exits starts again.** The launcher ran the runtime in
   place of itself as the `cc-remote-orca` service, and a Sprite counts a service
   as running while any process it started is left. When a Sprite's home volume
