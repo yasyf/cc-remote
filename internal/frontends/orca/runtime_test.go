@@ -337,12 +337,18 @@ func TestRuntimeLauncherNamesAFullDisk(t *testing.T) {
 		availableKiB       int
 		want               string
 	}{
-		{"the run reports ENOSPC", "", "echo 'Error: ENOSPC: no space left on device, write' >&2\nexit 1\n", 10 << 20,
-			"cc-remote: the Orca runtime is out of disk space: /home on /dev/vdb has 10240 MiB free\ncc-remote: the Orca runtime exited 1; starting it again in 1s\n"},
-		{"df shows under 64 MiB", "", "exit 1\n", 63 << 10,
-			"cc-remote: the Orca runtime is out of disk space: /home on /dev/vdb has 63 MiB free\ncc-remote: the Orca runtime exited 1; starting it again in 1s\n"},
-		{"a normal exit after an earlier run's ENOSPC", "Error: ENOSPC: no space left on device, write\n", "exit 0\n", 64 << 10,
-			"cc-remote: the Orca runtime exited 0; starting it again in 1s\n"},
+		{
+			"the run reports ENOSPC", "", "echo 'Error: ENOSPC: no space left on device, write' >&2\nexit 1\n", 10 << 20,
+			"cc-remote: the Orca runtime is out of disk space: /home on /dev/vdb has 10240 MiB free\ncc-remote: the Orca runtime exited 1; starting it again in 1s\n",
+		},
+		{
+			"df shows under 64 MiB", "", "exit 1\n", 63 << 10,
+			"cc-remote: the Orca runtime is out of disk space: /home on /dev/vdb has 63 MiB free\ncc-remote: the Orca runtime exited 1; starting it again in 1s\n",
+		},
+		{
+			"a normal exit after an earlier run's ENOSPC", "Error: ENOSPC: no space left on device, write\n", "exit 0\n", 64 << 10,
+			"cc-remote: the Orca runtime exited 0; starting it again in 1s\n",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
