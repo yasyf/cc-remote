@@ -1079,12 +1079,14 @@ func orcaRuntime(session *workspace.Session) (orca.Runtime, error) {
 	if err != nil {
 		return orca.Runtime{}, fmt.Errorf("orca.tool: %w", err)
 	}
+	traits := session.Provider.Traits()
 	return orca.Runtime{
-		Entry:       dir + "/" + cfg.Orca.Entry,
-		Display:     cfg.Orca.Display,
-		Args:        cfg.Orca.Args,
-		Supervised:  session.Provider.Traits().Supervisor == providers.SupervisorSpriteEnv,
-		GoBuildJobs: session.Provider.Traits().GoBuildJobs,
+		Entry:         dir + "/" + cfg.Orca.Entry,
+		Display:       cfg.Orca.Display,
+		Args:          cfg.Orca.Args,
+		Supervised:    traits.Supervisor == providers.SupervisorSpriteEnv,
+		GoBuildJobs:   traits.GoBuildJobs,
+		GoMemoryLimit: traits.GoMemoryLimit,
 	}, nil
 }
 

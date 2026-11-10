@@ -27,6 +27,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finds its merge base. A blobless profile can keep a warm pool too.
 
 ### Fixed
+- **A lane's build can no longer take its Sprite down.** A Sprite's container
+  had no memory limit until the platform restarted it, so a Go compile and test
+  that reached 7 GB starved the block device daemon behind the root disk; its
+  writes timed out, the disk returned I/O errors, and the platform restarted
+  every process, which ended the lane. Create, resume and reuse now cap the
+  container at 8 GiB with a throttle at 7.5 GiB, and a boot service sets both
+  again after every restart, so a build past 7.5 GiB slows down in its own
+  container and the disk daemon keeps its memory. Sprite lanes also build Go
+  with two jobs and a 2 GiB `GOMEMLIMIT`.
+- **One dead machine no longer stalls `orca keep`.** Each forward reopen gets
+  one minute, and a forward whose machine still reports its storage gone 10
+  minutes after its first failed reopen is released and logged once, so keep
+  stops paying about 30 seconds a pass for each machine that will never answer.
 - **A full local disk no longer takes a Sprite's root filesystem down.** The
   Sprite's block device daemon keeps its cache on the same 20 GB local disk as
   `/tmp`, and fails every root filesystem write once that disk has less than
