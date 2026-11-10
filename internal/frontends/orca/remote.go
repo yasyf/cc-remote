@@ -129,21 +129,36 @@ func (c Client) AddEnvironment(ctx context.Context, name, pairing string) (Envir
 	return result.Environment, nil
 }
 
-func (c Client) ForgetEnvironment(ctx context.Context, name string) error {
+func (c Client) Environments(ctx context.Context) ([]Environment, error) {
 	out, runErr := c.runner.Run(ctx, "environment", "list", "--json")
 	saved, err := decode[struct {
 		Environments []Environment `json:"environments"`
 	}](out, "orca environment list", LocalRuntime)
 	if err != nil {
+		return nil, errors.Join(runErr, err)
+	}
+	return saved.Environments, nil
+}
+
+func (c Client) RemoveEnvironment(ctx context.Context, id string) error {
+	out, runErr := c.runner.Run(ctx, "environment", "rm", "--environment", id, "--json")
+	if _, err := decode[json.RawMessage](out, "orca environment rm --environment "+id, LocalRuntime); err != nil {
 		return errors.Join(runErr, err)
 	}
-	for _, environment := range saved.Environments {
+	return nil
+}
+
+func (c Client) ForgetEnvironment(ctx context.Context, name string) error {
+	saved, err := c.Environments(ctx)
+	if err != nil {
+		return err
+	}
+	for _, environment := range saved {
 		if environment.Name != name {
 			continue
 		}
-		out, runErr := c.runner.Run(ctx, "environment", "rm", "--environment", environment.ID, "--json")
-		if _, err := decode[json.RawMessage](out, "orca environment rm --environment "+environment.ID, LocalRuntime); err != nil {
-			return errors.Join(runErr, err)
+		if err := c.RemoveEnvironment(ctx, environment.ID); err != nil {
+			return err
 		}
 	}
 	return nil
