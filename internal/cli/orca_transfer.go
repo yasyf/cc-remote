@@ -119,6 +119,9 @@ func checkRetained(ctx context.Context, session *workspace.Session, result *work
 }
 
 func checkUnused(ctx context.Context, session *workspace.Session, record *workspace.Record) error {
+	if err := session.BindHome(ctx, record.Machine); err != nil {
+		return &unconfirmed{err: err}
+	}
 	if err := checkClean(ctx, session, "check the unused checkout", record.Name, record.Machine); err != nil {
 		return &unconfirmed{err: err}
 	}

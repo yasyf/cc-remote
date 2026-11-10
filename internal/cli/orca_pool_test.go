@@ -22,6 +22,7 @@ import (
 
 	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
 	"github.com/yasyf/cc-remote/internal/providers/sprites"
@@ -692,6 +693,35 @@ func TestAClaimedSpareWhoseCheckoutCannotBeReadIsNotTreatedAsClean(t *testing.T)
 	}
 	if slices.Contains(lifecycle, "suspend pool-a") {
 		t.Errorf("provider calls = %q, want a spare its claim never confirmed unused left as it is", lifecycle)
+	}
+	w.free("pool-a")
+	w.free("lane-a")
+}
+
+func TestAClaimBindsTheSparesHomeOnItsLocalDiskBeforeItChecksTheCheckout(t *testing.T) {
+	w := newWarmPool(t, "pool-a")
+	standInFill(t)
+	if _, err := openPool(w.session).fill(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	w.provider.Facts.LocalDisk = "/fast"
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-a"))
+	from := len(w.local.Scripts("pool-a"))
+	runner := taskOrcaRunner(func(context.Context, ...string) ([]byte, error) {
+		return nil, errors.New("stop after the claim")
+	})
+	_ = w.warm(t.Context(), w.session, runner, io.Discard, "lane-a", "")
+	binds, checks := -1, -1
+	for i, script := range w.local.Scripts("pool-a")[from:] {
+		switch {
+		case binds < 0 && strings.Contains(script, images.LocalDiskService):
+			binds = i
+		case checks < 0 && strings.Contains(script, "rev-parse --show-toplevel"):
+			checks = i
+		}
+	}
+	if binds < 0 || checks < 0 || binds > checks {
+		t.Errorf("the home was bound at script %d and the checkout checked at %d, want the bind first: %q", binds, checks, w.local.Scripts("pool-a")[from:])
 	}
 	w.free("pool-a")
 	w.free("lane-a")

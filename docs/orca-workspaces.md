@@ -376,8 +376,11 @@ claiming anything. It reads only the pool's own records and never lists,
 adopts, renames, stops, or deletes other Sprites.
 
 The claim is recorded with the lane and ref before anything touches the
-machine. The command then checks that the checkout is the configured
-repository's clean top level with no Orca runtime state, wakes the Sprite, and
+machine. The command then binds the home on the Sprite's local disk again, as
+its boot service does, since a spare that slept boots without that mount and
+its home holds no checkout until it is back. It then checks that the checkout
+is the configured repository's clean top level with no Orca runtime state,
+wakes the Sprite, and
 requires its tools to be ready at the current stamp; it never reinstalls them.
 It fetches `--ref` with `--depth 1` and checks out the fetched commit, so a
 branch that moved since the workspace was made is honored, not matched by
