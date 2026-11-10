@@ -507,6 +507,9 @@ func (s *Session) provision(ctx context.Context, held *state.Held, record *Recor
 	if err := s.moveToLocalDisk(ctx, machine); err != nil {
 		return nil, err
 	}
+	if err := s.limitMemory(ctx, machine); err != nil {
+		return nil, err
+	}
 	if err := s.installPrerequisites(ctx, machine); err != nil {
 		return nil, err
 	}
@@ -675,10 +678,22 @@ func (s *Session) wake(ctx context.Context, machine string) error {
 	if err := s.Provider.Wake(ctx, machine); err != nil {
 		return err
 	}
-	if s.Provider.Traits().LocalDisk == "" {
+	if s.Provider.Traits().LocalDisk != "" {
+		if err := s.Scripts.RebindLocalDisk(ctx, s.exec(machine)); err != nil {
+			return err
+		}
+	}
+	return s.limitMemory(ctx, machine)
+}
+
+func (s *Session) limitMemory(ctx context.Context, machine string) error {
+	traits := s.Provider.Traits()
+	if traits.MemoryMax == 0 {
 		return nil
 	}
-	return s.Scripts.RebindLocalDisk(ctx, s.exec(machine))
+	return s.timed(ctx, laneMain, "memory.limit", machine, func() error {
+		return s.Scripts.LimitMemory(ctx, s.exec(machine), traits.MemoryMax, traits.MemoryHigh)
+	})
 }
 
 func (s *Session) moveToLocalDisk(ctx context.Context, machine string) error {

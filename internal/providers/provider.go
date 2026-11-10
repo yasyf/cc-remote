@@ -28,6 +28,10 @@ type Extender interface {
 	Extend(ctx context.Context, id string, by time.Duration) (time.Time, error)
 }
 
+type StorageChecker interface {
+	CheckStorage(ctx context.Context, id string) error
+}
+
 var (
 	ErrNotFound  = errors.New("machine not found")
 	ErrExists    = errors.New("machine already exists")
@@ -56,6 +60,9 @@ type Traits struct {
 	Supervisor       Supervisor
 	Platform         string
 	GoBuildJobs      int
+	GoMemoryLimit    int64
+	MemoryMax        int64
+	MemoryHigh       int64
 }
 
 type Spec struct {

@@ -36,6 +36,13 @@ const (
 	localDiskReserve      = blockDeviceCacheLimit + blockDeviceWriteFloor + platformFilesOnDisk
 )
 
+const (
+	containerMemoryMax  = 8 << 30
+	containerMemoryHigh = containerMemoryMax - 512<<20
+	goBuildJobs         = 2
+	goMemoryLimit       = 2 << 30
+)
+
 var (
 	pauseWithin = 2 * time.Minute
 	pauseEvery  = 5 * time.Second
@@ -78,7 +85,10 @@ type Provider struct {
 	Runner providers.Runner
 }
 
-var _ providers.Provider = (*Provider)(nil)
+var (
+	_ providers.Provider       = (*Provider)(nil)
+	_ providers.StorageChecker = (*Provider)(nil)
+)
 
 type CreateStep string
 
@@ -102,7 +112,10 @@ func (p *Provider) Traits() providers.Traits {
 	return providers.Traits{
 		TailnetMode:      providers.TailnetKernel,
 		Supervisor:       providers.SupervisorSpriteEnv,
-		GoBuildJobs:      4,
+		GoBuildJobs:      goBuildJobs,
+		GoMemoryLimit:    goMemoryLimit,
+		MemoryMax:        containerMemoryMax,
+		MemoryHigh:       containerMemoryHigh,
 		LocalDisk:        localDisk,
 		LocalDiskReserve: localDiskReserve,
 	}
@@ -282,21 +295,11 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 	if _, err := p.Get(ctx, id); err != nil {
 		return err
 	}
-	services := "/v1/sprites/" + id + "/services"
-	status, body, err := p.api(ctx, services)
+	listed, err := p.services(ctx, id)
 	if err != nil {
-		return err
+		return fmt.Errorf("suspending sprite %s: %w", id, err)
 	}
-	if status == 503 && string(bytes.TrimSpace(body)) == storageNotReady {
-		return fmt.Errorf("suspending sprite %s: %w: listing its services answered 503 %s", id, providers.ErrNoStorage, storageNotReady)
-	}
-	if status != 200 {
-		return fmt.Errorf("suspending sprite %s: %w listing its services: %s", id, &StatusError{Status: status}, bytes.TrimSpace(body))
-	}
-	var listed []service
-	if err := json.Unmarshal(body, &listed); err != nil {
-		return fmt.Errorf("suspending sprite %s: reading its services: %w", id, err)
-	}
+	services := "/v1/sprites/" + id + "/services"
 	for _, running := range listed {
 		if running.State.Status == "stopped" {
 			continue
@@ -310,6 +313,29 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 		}
 	}
 	return p.paused(ctx, id)
+}
+
+func (p *Provider) CheckStorage(ctx context.Context, id string) error {
+	_, err := p.services(ctx, id)
+	return err
+}
+
+func (p *Provider) services(ctx context.Context, id string) ([]service, error) {
+	status, body, err := p.api(ctx, "/v1/sprites/"+id+"/services")
+	if err != nil {
+		return nil, err
+	}
+	if status == 503 && string(bytes.TrimSpace(body)) == storageNotReady {
+		return nil, fmt.Errorf("%w: listing its services answered 503 %s", providers.ErrNoStorage, storageNotReady)
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("%w listing its services: %s", &StatusError{Status: status}, bytes.TrimSpace(body))
+	}
+	var listed []service
+	if err := json.Unmarshal(body, &listed); err != nil {
+		return nil, fmt.Errorf("reading its services: %w", err)
+	}
+	return listed, nil
 }
 
 func (p *Provider) paused(ctx context.Context, id string) error {

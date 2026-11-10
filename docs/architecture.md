@@ -123,6 +123,28 @@ keeps the home's path canonical, which `capt-hookd` and the payload's manifest
 require and a symlink would not. A home is bound only on a machine created this
 way: moving a used one in place would split the databases its daemons hold open.
 
+A provider whose machine shares its memory with the daemon behind its disk names
+a cap for its own container as its `MemoryMax` trait and a lower throttle level
+as `MemoryHigh`. On Sprites they are 8 GiB and 7.5 GiB, the container size the
+platform itself applies after it restarts a container. Until such a restart a
+Sprite's container has no limit, and waking a suspended one lifts the limit its
+idle step set, so a build could take all 16 GB and starve the block device
+daemon behind `nbd0`. Its writes then time out, `nbd0` returns I/O errors, and
+the platform restarts every process. Right after the local disk move, create
+writes both values to the container's own cgroup, `/sys/fs/cgroup`, and creates
+the `cc-remote-memory` service, which writes them again at every boot. A resume
+or reuse writes them and creates that service again, since a suspend stops it,
+and a machine created before the limit existed gets it there too. The platform's
+idle step caps and releases the parent cgroup, so the container's own values
+stay. A workload past the throttle level is slowed inside the container while
+the daemon keeps its memory. The throttle level is what keeps the machine up: on
+a scratch Sprite a 10 GiB allocation crawled at 7.5 GiB for five minutes and the
+machine kept running, and the same allocation under the cap alone restarted it.
+The provider also names `GoBuildJobs` and `GoMemoryLimit`, 2 and 2 GiB on
+Sprites, which the Orca runtime exports as `GOFLAGS=-p=2` and `GOMEMLIMIT` to
+every lane, so a Go build or test runs two jobs at a time and each Go process
+collects its garbage before it passes 2 GiB.
+
 Startup then runs `provision.sh prerequisites` on machines provisioned in place,
 and these lanes concurrently:
 

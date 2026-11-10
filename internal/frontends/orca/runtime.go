@@ -40,13 +40,14 @@ var (
 )
 
 type Runtime struct {
-	Entry       string
-	Display     []string
-	Args        []string
-	Port        int
-	Advertise   string
-	Supervised  bool
-	GoBuildJobs int
+	Entry         string
+	Display       []string
+	Args          []string
+	Port          int
+	Advertise     string
+	Supervised    bool
+	GoBuildJobs   int
+	GoMemoryLimit int64
 }
 
 type Ready struct {
@@ -108,6 +109,9 @@ func (r Runtime) Launcher() string {
 	}
 	if r.GoBuildJobs > 0 {
 		lines = append(lines, "export GOFLAGS=-p="+strconv.Itoa(r.GoBuildJobs))
+	}
+	if r.GoMemoryLimit > 0 {
+		lines = append(lines, "export GOMEMLIMIT="+strconv.FormatInt(r.GoMemoryLimit, 10))
 	}
 	return strings.Join(append(lines,
 		`cd "`+runtimeDir+`"`,

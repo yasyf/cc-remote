@@ -66,7 +66,7 @@ func TestNewSprites(t *testing.T) {
 			if got != want {
 				t.Errorf("config = %+v, want %+v", got, want)
 			}
-			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 4, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29}
+			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 2, GoMemoryLimit: 2 << 30, MemoryMax: 8 << 30, MemoryHigh: 15 << 29, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29}
 			if traits := provider.Traits(); traits != wantTraits {
 				t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)
 			}

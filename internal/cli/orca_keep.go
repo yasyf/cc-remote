@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
 )
 
@@ -21,6 +24,13 @@ const (
 	keepEvery  = 30 * time.Second
 	pruneEvery = 10 * time.Minute
 )
+
+var (
+	reopenWithin = time.Minute
+	storageGone  = 10 * time.Minute
+)
+
+type storageCheck func(ctx context.Context, task *orcaTask) error
 
 var keepCommand = func(config string) (*exec.Cmd, error) {
 	helper, err := os.Executable()
@@ -37,11 +47,15 @@ func newOrcaKeepCmd(runner orca.Runner) *cobra.Command {
 		Short: "Reopen the SSH forward of every kept task whose forward has exited, until no task is kept",
 		Long: `keep runs detached, started by orca create, prepare, and reconnect once a task's worker answers. Every
 30 seconds it checks the SSH forward of each kept task and reopens one that has exited, as reconnect
-does, without touching the runtime or the worker. orca stop and destroy release a task before they
-close its forward, so keep never reopens a stopped lane's forward. Every 10 minutes, starting with its
-first pass, it also runs orca prune, so a stopped lane's or a gone machine's Orca environment does not
-linger for Orca to keep reading and retrying. One keep runs per state directory: a keep that finds
-another running exits at once, and a keep exits once no task is kept.`,
+does, without touching the runtime or the worker. Each reopen gets one minute, so a machine that
+answers nothing costs one pass a minute, never the forwards after it. When a reopen fails, keep asks
+the provider whether the machine's storage is reachable, and once a failing machine has reported its
+storage gone for 10 minutes, keep releases its task, logs that once, and reopens it no more; orca
+reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
+never reopens a stopped lane's forward. Every 10 minutes, starting with its first pass, it also runs
+orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
+reading and retrying. One keep runs per state directory: a keep that finds another running exits at
+once, and a keep exits once no task is kept.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -57,7 +71,18 @@ another running exits at once, and a keep exits once no task is kept.`,
 				_, err = pruneEnvironments(ctx, session, orca.NewClient(runner), false)
 				return err
 			}
-			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune)
+			storage := func(ctx context.Context, task *orcaTask) error {
+				provider, err := openProvider(cfg, task.Provider)
+				if err != nil {
+					return err
+				}
+				checker, ok := provider.(providers.StorageChecker)
+				if !ok {
+					return nil
+				}
+				return checker.CheckStorage(ctx, task.Machine)
+			}
+			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune, storage)
 		},
 	}
 	flags.bind(cmd)
@@ -98,13 +123,13 @@ func spawnKeeper(dir state.Dir, config string) error {
 	return cmd.Process.Release()
 }
 
-func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error) error {
+func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck) error {
 	for {
 		unlock, held, err := state.TryLock(dir.OrcaKeeper())
 		if err != nil || !held {
 			return err
 		}
-		err = holdForwards(ctx, dir, log, prune)
+		err = holdForwards(ctx, dir, log, prune, storage)
 		unlock()
 		if err != nil {
 			return err
@@ -116,10 +141,11 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 	}
 }
 
-func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error) error {
+func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck) error {
 	ticker := time.NewTicker(keepEvery)
 	defer ticker.Stop()
 	var pruned time.Time
+	gone := map[string]time.Time{}
 	for {
 		if time.Since(pruned) >= pruneEvery {
 			if err := prune(ctx); err != nil {
@@ -127,7 +153,7 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 			}
 			pruned = time.Now()
 		}
-		kept, err := reopenForwards(ctx, dir, log)
+		kept, err := reopenForwards(ctx, dir, log, storage, gone)
 		if err != nil || kept == 0 {
 			return err
 		}
@@ -139,29 +165,73 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 	}
 }
 
-func reopenForwards(ctx context.Context, dir state.Dir, log *slog.Logger) (int, error) {
+func reopenForwards(ctx context.Context, dir state.Dir, log *slog.Logger, storage storageCheck, gone map[string]time.Time) (int, error) {
 	names, err := keptNames(dir)
 	if err != nil {
 		return 0, err
 	}
+	kept := len(names)
+	still := map[string]time.Time{}
+	defer func() {
+		clear(gone)
+		maps.Copy(gone, still)
+	}()
 	for _, name := range names {
 		task, err := loadTask(dir, name)
 		if err != nil {
 			return 0, err
 		}
-		if task.Forward.up(ctx) {
+		reopened, err := reopenForward(ctx, dir, task)
+		if err == nil {
+			if reopened {
+				log.Info("reopened a kept forward", "workspace", name)
+			}
 			continue
 		}
-		if _, err := os.Stat(dir.OrcaKept(name)); errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err := task.Forward.ensure(ctx, task.Port); err != nil {
+		if !storageLost(ctx, storage, task) {
 			log.Warn("a kept forward did not reopen, and the next pass tries again", "workspace", name, "error", err)
 			continue
 		}
-		log.Info("reopened a kept forward", "workspace", name)
+		since, seen := gone[task.Machine]
+		if !seen {
+			still[task.Machine] = time.Now()
+			continue
+		}
+		if time.Since(since) < storageGone {
+			still[task.Machine] = since
+			continue
+		}
+		if err := state.Remove(dir.OrcaKept(name)); err != nil {
+			return 0, err
+		}
+		kept--
+		log.Warn("released a kept forward whose machine has reported its storage gone since the first failed reopen, so keep reopens it no more; orca reconnect keeps it again", "workspace", name, "machine", task.Machine, "since", since, "error", err)
 	}
-	return len(names), nil
+	return kept, nil
+}
+
+func reopenForward(ctx context.Context, dir state.Dir, task *orcaTask) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, reopenWithin)
+	defer cancel()
+	if task.Forward.up(ctx) {
+		return false, nil
+	}
+	if _, err := os.Stat(dir.OrcaKept(task.Workspace)); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err := task.Forward.ensure(ctx, task.Port); err != nil {
+		if ctx.Err() != nil {
+			return false, fmt.Errorf("the reopen did not finish within %s: %w", reopenWithin, err)
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func storageLost(ctx context.Context, storage storageCheck, task *orcaTask) bool {
+	ctx, cancel := context.WithTimeout(ctx, reopenWithin)
+	defer cancel()
+	return errors.Is(storage(ctx, task), providers.ErrNoStorage)
 }
 
 func keptNames(dir state.Dir) ([]string, error) {

@@ -20,7 +20,7 @@ func TestTheExampleConfigOpensEveryShippedProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	for kind, want := range map[string]providers.Traits{
-		"sprites":   {TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 4, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29},
+		"sprites":   {TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 2, GoMemoryLimit: 2 << 30, MemoryMax: 8 << 30, MemoryHigh: 15 << 29, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29},
 		"namespace": {TailnetMode: providers.TailnetUserspace, Supervisor: providers.SupervisorSetsid, Platform: "linux/amd64"},
 	} {
 		provider, err := openProvider(cfg, kind)

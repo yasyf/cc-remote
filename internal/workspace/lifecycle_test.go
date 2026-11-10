@@ -615,6 +615,23 @@ func TestAResumeBindsTheHomeAgainBeforeItReadsTheTools(t *testing.T) {
 	h.ordered(from, "cc-remote-local-disk", readies)
 }
 
+func TestACreateLimitsTheMachinesMemoryRightAfterTheMoveAndAResumeLimitsItAgain(t *testing.T) {
+	const limitsMemory = "sudo --preserve-env=PATH bash -s 8192 4096"
+	h := build(t, true, inventory, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv, LocalDisk: "/fast", LocalDiskReserve: 7168, MemoryMax: 8192, MemoryHigh: 4096})
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	moved := h.ordered(0, movesToDisk, limitsMemory, prereqsPhase)
+	if moved[1] != moved[0]+1 || h.machine.ran("ws-1", limitsMemory) != 1 {
+		t.Errorf("the create did not limit the memory once, right after the move: %q", h.machine.scripts["ws-1"])
+	}
+	from := len(h.machine.scripts["ws-1"])
+	if _, err := h.session.Resume(context.Background(), "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(from, "cc-remote-local-disk", limitsMemory, readies)
+}
+
 func TestAProviderWithNoLocalDiskMovesNothing(t *testing.T) {
 	h := newHarness(t, true)
 	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "feature"}); err != nil {

@@ -242,7 +242,14 @@ after 45 seconds without an answer from the Sprite. Once `create`, `prepare`, or
 starts `cc-remote orca keep` in the background. One keep runs per state
 directory, so a Mac runs one however many lanes it holds. Every 30 seconds it
 reopens each kept forward that has exited, the way `reconnect` does, and it
-exits once no task is kept. `orca stop` and `destroy` release the task before
+exits once no task is kept. Each reopen gets one minute, so a machine that
+answers nothing costs a pass that minute and never holds up the forwards after
+it. When a reopen fails, keep asks the provider whether the machine's storage is
+reachable. A machine that still reports its storage gone 10 minutes after its
+first failed reopen runs nothing again, so keep releases its task, logs that
+once, and stops reopening it; `reconnect` keeps it again. The 10 minutes pass
+over a platform restart, during which a live machine answers `Storage not
+ready` for a few seconds. `orca stop` and `destroy` release the task before
 they close its forward, so keep never reopens a stopped lane's forward. A task
 launched by a release without keep is not kept until `reconnect` runs on it.
 keep logs to `orca/keeper.log` in the state directory.

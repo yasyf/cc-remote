@@ -56,6 +56,8 @@ const (
 const (
 	LocalDiskService = "cc-remote-local-disk"
 	localDiskBoot    = "/opt/cc-remote/local-disk.sh"
+	MemoryService    = "cc-remote-memory"
+	memoryBoot       = "/opt/cc-remote/memory.sh"
 )
 
 const BaseDriftListing = "(-payload +machine); rebuild the payload on this base:\n"
@@ -107,6 +109,26 @@ SH
 chmod 0755 "$boot"
 "$boot"
 sprite-env services create ` + LocalDiskService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
+`
+
+const limitMemory = `set -euo pipefail
+limit="$1"
+high="$2"
+boot=` + memoryBoot + `
+cgroup=/sys/fs/cgroup
+install -d -m 0755 "$(dirname "$boot")"
+cat > "$boot" <<SH
+#!/bin/sh
+set -eu
+echo $high > $cgroup/memory.high
+echo $limit > $cgroup/memory.max
+SH
+chmod 0755 "$boot"
+"$boot"
+if sprite-env services get ` + MemoryService + ` > /dev/null 2>&1; then
+  sprite-env services delete ` + MemoryService + ` > /dev/null
+fi
+sprite-env services create ` + MemoryService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
 `
 
 const rebindLocalDisk = `if [ -x ` + localDiskBoot + ` ]; then
@@ -402,6 +424,14 @@ func (s Scripts) MoveToLocalDisk(ctx context.Context, exec Exec, disk string, re
 	// sudo's secure_path drops /.sprite/bin, where the script finds sprite-env.
 	if err := exec(ctx, []string{"sudo", "--preserve-env=PATH", "bash", "-s", disk, strconv.FormatInt(reserve, 10)}, strings.NewReader(moveToLocalDisk)); err != nil {
 		return fmt.Errorf("move to the local disk %s: %w", disk, err)
+	}
+	return nil
+}
+
+func (s Scripts) LimitMemory(ctx context.Context, exec Exec, limit, high int64) error {
+	// sudo's secure_path drops /.sprite/bin, where the script finds sprite-env.
+	if err := exec(ctx, []string{"sudo", "--preserve-env=PATH", "bash", "-s", strconv.FormatInt(limit, 10), strconv.FormatInt(high, 10)}, strings.NewReader(limitMemory)); err != nil {
+		return fmt.Errorf("limit the machine's memory to %d bytes: %w", limit, err)
 	}
 	return nil
 }
