@@ -148,6 +148,14 @@ git's credential helper for `https://github.com` set to `gh auth git-credential`
 through `GIT_CONFIG_*` variables, so the worker can push its branch and open its
 pull request. Codex keeps that token in its shell tools.
 
+An optional
+`orca.keys.github_login` command, also with no default, prints the GitHub login
+that owns that token, such as `[gh, config, get, -h, github.com, user]`. The
+worker's terminal saves it as the `user` of `github.com` in gh's config before
+the agent starts, so `gh config get -h github.com user` answers on the machine
+without an API call, the same as on the launcher. Only the login is saved,
+never the token.
+
 An optional `orca.keys.trunk` command, which has no default, runs locally and adds a scoped Trunk key that every newly launched worker receives as `TRUNK_MERGE_API_KEY`. Like `GH_TOKEN`, it stays available to shell tools rather than being excluded with the model credentials. An optional `orca.keys.gemini` command works the same way, handing every newly launched worker a Gemini key as `GEMINI_API_KEY` so the `gemini` CLI runs from its shell tools.
 
 Every key travels only over SSH stdin into a

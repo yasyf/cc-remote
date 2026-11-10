@@ -1182,11 +1182,11 @@ func captainPins(inventory images.Inventory) []orca.Pin {
 }
 
 type secrets struct {
-	key, judge, typesafe, github, trunk, gemini []byte
+	key, judge, typesafe, github, trunk, gemini, githubLogin []byte
 }
 
 func (s secrets) payload(launcher author) []byte {
-	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini}
+	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini, s.githubLogin}
 	return append(bytes.Join(lines, []byte{'\n'}), '\n')
 }
 
@@ -1197,6 +1197,7 @@ func (s secrets) clear() {
 	clear(s.github)
 	clear(s.trunk)
 	clear(s.gemini)
+	clear(s.githubLogin)
 }
 
 func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
@@ -1233,6 +1234,12 @@ func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent
 		if captured.gemini, err = captureKey(ctx, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("gemini %w", err)
+		}
+	}
+	if command, ok := keys[config.KeyGitHubLogin]; ok {
+		if captured.githubLogin, err = captureKey(ctx, command); err != nil {
+			captured.clear()
+			return secrets{}, fmt.Errorf("github_login %w", err)
 		}
 	}
 	return captured, nil

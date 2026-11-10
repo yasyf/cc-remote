@@ -720,6 +720,53 @@ func TestAgentCommandGivesEveryWorkerTheLaunchersGitIdentityOverTheMachinesOwn(t
 	}
 }
 
+func TestAgentCommandSavesTheLaunchersGitHubLoginWhereGhReadsIt(t *testing.T) {
+	worker := "#!/bin/sh\nprintf '%s|%s\\n' \"$(gh config get -h github.com user 2>/dev/null)\" \"${login-unset}\"\n"
+	tests := []struct {
+		name, kind, payload, want string
+	}{
+		{"claude with a login", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n\n\nada-launcher\n", "ada-launcher|unset"},
+		{"codex with a login", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nada-launcher\n", "ada-launcher|unset"},
+		{"claude without one", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "|unset"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := orca.Agent{Kind: tt.kind, Model: "m", Effort: "e"}
+			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			command := agent.Command(dir, orca.ShellPolicy{})
+			if strings.Contains(command, "ada-launcher") {
+				t.Errorf("the command text carries the login: %s", command)
+			}
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"), "GH_CONFIG_DIR="+t.TempDir(), "login=stale")
+			go func() {
+				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = fifo.WriteString(tt.payload)
+				_ = fifo.Close()
+			}()
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Errorf("worker saw %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCodexCommandKeepsTheActorKeysBesideItsToolPolicy(t *testing.T) {
 	agent := orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast"}
 	worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$OPENAI_API_KEY\" \"$ANTHROPIC_API_KEY\" \"$CAPT_HOOK_ACTOR_JUDGE\"\nprintf '%s\\n' \"$@\"\n"

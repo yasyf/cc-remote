@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca.keys.github_login` saves the launcher's GitHub login on the worker.**
+  A worker signed in only through `GH_TOKEN` had no saved login, so
+  `gh config get -h github.com user` failed there, and a tool that reads the
+  login that way without calling GitHub, such as a merge guard deciding
+  whether you own a repository, treated every repository as someone else's.
+  When the config names a command for `github_login`, cc-remote runs it beside
+  the key commands, sends the one line down the same key pipe, and the
+  worker's terminal saves it with `gh config set -h github.com user` before
+  the agent starts. Only the login is written, never the token, and leaving it
+  unconfigured changes nothing.
 - **`cc-remote orca stop <lane>` stops the workspace a lane runs on.** It finds
   the workspace `prepare` created under the lane's name or the warm pool
   workspace the lane claimed, closes the task's SSH forward, and suspends the
