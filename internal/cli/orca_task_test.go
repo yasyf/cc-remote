@@ -1490,7 +1490,7 @@ func TestPrepareSendsTheLaunchersIdentityAndTrunkKeyOnlyDownTheKeyPipe(t *testin
 	}
 	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
 	w.prepared(out.Bytes())
-	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n\n\n" {
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n\n\n\n" {
 		t.Errorf("key pipe = %q, %v", sent, err)
 	}
 	kept := w.effects()
