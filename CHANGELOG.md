@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca.keys.env` exports a command's `NAME=value` lines on the worker.**
+  Each key command delivers one value to one fixed variable, so a credential
+  that comes as several variables from one sign-in, such as an AWS session,
+  had no way onto a worker. When the config names a command for `env`,
+  cc-remote runs it beside the key commands, checks each line is an uppercase
+  name and a value free of spaces, quotes and shell characters, refuses a name
+  another key command or the launcher's git identity sets, and sends the
+  assignments down the key pipe as one line, which the worker's terminal
+  exports before the agent starts. Leaving it unconfigured changes nothing.
 - **`orca.keys.github_login` saves the launcher's GitHub login on the worker.**
   A worker signed in only through `GH_TOKEN` had no saved login, so
   `gh config get -h github.com user` failed there, and a tool that reads the

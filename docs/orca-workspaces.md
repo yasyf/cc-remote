@@ -158,6 +158,15 @@ never the token.
 
 An optional `orca.keys.trunk` command, which has no default, runs locally and adds a scoped Trunk key that every newly launched worker receives as `TRUNK_MERGE_API_KEY`. Like `GH_TOKEN`, it stays available to shell tools rather than being excluded with the model credentials. An optional `orca.keys.gemini` command works the same way, handing every newly launched worker a Gemini key as `GEMINI_API_KEY` so the `gemini` CLI runs from its shell tools.
 
+An optional `orca.keys.env` command, also with no default, prints `NAME=value`
+lines, such as a short-lived AWS session's `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` from one sign-in, and every newly
+launched worker's terminal exports each of them before the agent starts. Each
+name is uppercase, each value holds only letters, digits and `+/=:._@-`, and a
+name another key command or the launcher's git identity sets is refused, so the
+command cannot replace a model key or inject shell. The assignments travel down
+the same key pipe as one line and stay available to shell tools.
+
 Every key travels only over SSH stdin into a
 one-use pipe that the worker's terminal reads and removes.
 

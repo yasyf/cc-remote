@@ -1,6 +1,7 @@
 package orca
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -243,6 +244,24 @@ const geminiVariable = "GEMINI_API_KEY"
 
 var githubVariables = []string{"GH_TOKEN", "GITHUB_TOKEN"}
 
+var envAssignment = regexp.MustCompile(`^([A-Z_][A-Z0-9_]*)=[A-Za-z0-9+/=:._@-]+$`)
+
+func EnvLine(out []byte) ([]byte, error) {
+	owned := slices.Concat(CredentialEnv(), []string{trunkVariable, geminiVariable}, githubVariables)
+	var assignments [][]byte
+	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte{'\n'}) {
+		match := envAssignment.FindSubmatch(line)
+		if match == nil {
+			return nil, errors.New("must print NAME=value lines whose values hold no spaces, quotes or shell characters")
+		}
+		if name := string(match[1]); slices.Contains(owned, name) || strings.HasPrefix(name, "GIT_CONFIG_") {
+			return nil, fmt.Errorf("sets %s, which another orca.keys command or the launcher's git identity sets", name)
+		}
+		assignments = append(assignments, line)
+	}
+	return bytes.Join(assignments, []byte{' '}), nil
+}
+
 const authorIdentity = `export GIT_CONFIG_COUNT=2 ` +
 	`GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0="$name" ` +
 	`GIT_CONFIG_KEY_1=user.email GIT_CONFIG_VALUE_1="$email"`
@@ -381,7 +400,7 @@ func (a Agent) JudgeKeyProvider() string {
 func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
-		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; IFS= read -r environment || environment=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
 		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable}, githubVariables), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
@@ -391,7 +410,8 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$trunk" || export ` + trunkVariable + `="$trunk"; }`,
 		`{ test -z "$gemini" || export ` + geminiVariable + `="$gemini"; }`,
 		`{ test -z "$login" || gh config set -h github.com user "$login"; }`,
-		"unset key judge typesafe github trunk gemini name email login",
+		`{ test -z "$environment" || export $environment; }`,
+		"unset key judge typesafe github trunk gemini name email login environment",
 		"export " + strings.Join(a.exports(), " "),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")

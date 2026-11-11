@@ -767,6 +767,66 @@ func TestAgentCommandSavesTheLaunchersGitHubLoginWhereGhReadsIt(t *testing.T) {
 	}
 }
 
+func TestAgentCommandExportsTheEnvLinesAssignments(t *testing.T) {
+	worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"${DOOR_TOKEN-unset}\" \"${CI_DOOR_URL-unset}\" \"${environment-unset}\"\n"
+	tests := []struct {
+		name, kind, payload, want string
+	}{
+		{"claude with assignments", orca.AgentClaude, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\nDOOR_TOKEN=Fw+tok/en== CI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/\n", "Fw+tok/en==|https://door.lambda-url.us-west-2.on.aws/|unset"},
+		{"codex with assignments", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nada-launcher\nCI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/\n", "unset|https://door.lambda-url.us-west-2.on.aws/|unset"},
+		{"claude without them", orca.AgentClaude, "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\n", "unset|unset|unset"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := orca.Agent{Kind: tt.kind, Model: "m", Effort: "e"}
+			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			command := agent.Command(dir, orca.ShellPolicy{})
+			if strings.Contains(command, "Fw+tok") {
+				t.Errorf("the command text carries an assignment: %s", command)
+			}
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"), "GH_CONFIG_DIR="+t.TempDir(), "environment=stale")
+			go func() {
+				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = fifo.WriteString(tt.payload)
+				_ = fifo.Close()
+			}()
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Errorf("worker saw %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnvLineRefusesAnAssignmentAnotherSlotOwns(t *testing.T) {
+	for _, name := range orca.CredentialEnv() {
+		if _, err := orca.EnvLine([]byte(name + "=x\n")); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("EnvLine(%s=x) = %v, want refused naming it", name, err)
+		}
+	}
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "TRUNK_MERGE_API_KEY", "GEMINI_API_KEY", "GIT_CONFIG_KEY_0"} {
+		if _, err := orca.EnvLine([]byte("AWS_REGION=us-west-2\n" + name + "=x\n")); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("EnvLine with %s = %v, want refused naming it", name, err)
+		}
+	}
+}
+
 func TestCodexCommandKeepsTheActorKeysBesideItsToolPolicy(t *testing.T) {
 	agent := orca.Agent{Kind: orca.AgentCodex, Model: "gpt-6.1-sol", Effort: "xhigh", Tier: "fast"}
 	worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$OPENAI_API_KEY\" \"$ANTHROPIC_API_KEY\" \"$CAPT_HOOK_ACTOR_JUDGE\"\nprintf '%s\\n' \"$@\"\n"
