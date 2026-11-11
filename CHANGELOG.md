@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contents until a checkout or diff needs them, so a rebase onto an older base
   finds its merge base. A blobless profile can keep a warm pool too.
 
+### Security
+- **Builds use Go 1.26.11.** Go 1.26.10's `net/http` carries
+  [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), which the Sprite and
+  Namespace providers, the tailnet client and the image host all reach, and
+  1.26.11 fixes it.
+
 ### Fixed
 - **A spare that slept in the warm pool is claimed again.** A Sprite keeps its
   home on a volume of its local disk, which a boot mounts again through a
