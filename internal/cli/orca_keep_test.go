@@ -136,7 +136,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("hold the keeper lock = %t, %v", held, err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, appTokens{}); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep beside a running one = %v, opened %q; want it to exit at once", err, opened())
 	}
 	unlock()
@@ -144,7 +144,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err := state.Remove(dir.OrcaKept("lane-a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, appTokens{}); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep with nothing kept = %v, opened %q; want it to exit at once", err, opened())
 	}
 }
@@ -260,5 +260,71 @@ func TestKeepForgetsAGoneStorageSightingOnceItsLaneIsNoLongerKept(t *testing.T) 
 	}
 	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, seen); err != nil || kept != 1 {
 		t.Errorf("the second pass after it was kept again = %d kept, %v; want it released", kept, err)
+	}
+}
+
+func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp(t *testing.T) {
+	w := newWarmPool(t)
+	standInKeeper(t)
+	dir := w.session.Config.State()
+	quiet := slog.New(slog.DiscardHandler)
+	driver := orcaDriver{state: dir, log: quiet}
+	for _, name := range []string{"lane-a", "lane-b"} {
+		w.laneWorkspace(name)
+		if err := driver.keep(w.liveTask(name), w.session.Config.Path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin, sent, down := t.TempDir(), t.TempDir(), t.TempDir()
+	ssh := "#!/bin/sh\nfor arg do\n  test \"$arg\" = sh && break\n  host=$arg\ndone\ncase \" $* \" in *' -O check '*) test ! -e " + down + "/\"$host\"; exit $?;; esac\ncat >> " + sent + "/\"$host\"\n"
+	minted := filepath.Join(bin, "minted")
+	mint := filepath.Join(bin, "mint")
+	for path, body := range map[string]string{filepath.Join(bin, "ssh"): ssh, mint: "#!/bin/sh\ncat " + minted + "\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	received := func(name string) string {
+		raw, err := os.ReadFile(filepath.Join(sent, name))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	tokens := appTokens{command: []string{mint}, sent: map[string][]byte{}}
+	pass := func(line string) {
+		t.Helper()
+		if err := os.WriteFile(minted, []byte(line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := tokens.renew(t.Context(), dir, quiet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(down, "lane-b"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	pass("{\"token\":\"first\"}\n")
+	if a, b := received("lane-a"), received("lane-b"); a != `{"token":"first"}` || b != "" {
+		t.Fatalf("after the first mint lane-a got %q and lane-b, whose forward is down, got %q", a, b)
+	}
+	if err := os.Remove(filepath.Join(down, "lane-b")); err != nil {
+		t.Fatal(err)
+	}
+	pass("{\"token\":\"first\"}\n")
+	if a, b := received("lane-a"), received("lane-b"); a != `{"token":"first"}` || b != `{"token":"first"}` {
+		t.Errorf("once lane-b's forward is up, lane-a got %q and lane-b %q; want the same token once each", a, b)
+	}
+	pass("{\"token\":\"second\"}\n")
+	if a := received("lane-a"); a != `{"token":"first"}{"token":"second"}` {
+		t.Errorf("after the second mint lane-a got %q, want both tokens in turn", a)
+	}
+	if err := os.WriteFile(mint, []byte("#!/bin/sh\nexit 3\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := tokens.renew(t.Context(), dir, quiet); err != nil || received("lane-b") != `{"token":"first"}{"token":"second"}` {
+		t.Errorf("a failed mint = %v, lane-b got %q; want no error and nothing new sent", err, received("lane-b"))
 	}
 }

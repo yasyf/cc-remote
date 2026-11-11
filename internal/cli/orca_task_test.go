@@ -148,7 +148,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
-			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n\n\n"
+			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n\n\n\n"
 			if payload := string(got.payload(firstAuthor)); payload != want {
 				t.Errorf("payload = %q, want %q", payload, want)
 			}
@@ -180,7 +180,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 }
 
-func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiAndGitHubLoginLines(t *testing.T) {
+func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiGitHubLoginAndGitHubAppLines(t *testing.T) {
 	dir := t.TempDir()
 	script := func(name, line string) []string {
 		path := filepath.Join(dir, name)
@@ -191,22 +191,22 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiAndGitHubLoginLines(t
 	}
 	for _, kind := range []string{orca.AgentClaude, orca.AgentCodex} {
 		agent := orca.Agent{Kind: kind}
-		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel"), config.KeyGemini: script("gemini", "gemini-sentinel"), config.KeyGitHubLogin: script("login", "login-sentinel")}
+		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel"), config.KeyGemini: script("gemini", "gemini-sentinel"), config.KeyGitHubLogin: script("login", "login-sentinel"), config.KeyGitHubApp: script("app", "app-sentinel")}
 		got, err := captureKeys(t.Context(), keys, agent)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" || string(got.githubLogin) != "login-sentinel" {
-			t.Fatalf("Trunk key = %q, Gemini key = %q, GitHub login = %q", got.trunk, got.gemini, got.githubLogin)
+		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" || string(got.githubLogin) != "login-sentinel" || string(got.githubApp) != "app-sentinel" {
+			t.Fatalf("Trunk key = %q, Gemini key = %q, GitHub login = %q, GitHub App token = %q", got.trunk, got.gemini, got.githubLogin, got.githubApp)
 		}
-		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\n"
+		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\napp-sentinel\n"
 		if payload := string(got.payload(firstAuthor)); payload != want {
 			t.Errorf("payload = %q, want %q", payload, want)
 		}
-		trunk, gemini, login := got.trunk, got.gemini, got.githubLogin
+		trunk, gemini, login, app := got.trunk, got.gemini, got.githubLogin, got.githubApp
 		got.clear()
-		if bytes.Count(trunk, []byte{0}) != len(trunk) || bytes.Count(gemini, []byte{0}) != len(gemini) || bytes.Count(login, []byte{0}) != len(login) {
-			t.Error("Trunk, Gemini or GitHub login bytes survived clear")
+		if bytes.Count(trunk, []byte{0}) != len(trunk) || bytes.Count(gemini, []byte{0}) != len(gemini) || bytes.Count(login, []byte{0}) != len(login) || bytes.Count(app, []byte{0}) != len(app) {
+			t.Error("Trunk, Gemini, GitHub login or GitHub App token bytes survived clear")
 		}
 		failing := filepath.Join(dir, "failing")
 		if err := os.WriteFile(failing, []byte("#!/bin/sh\necho trunk-leaked-sentinel; exit 3\n"), 0o700); err != nil {
@@ -242,7 +242,7 @@ func TestCaptureKeysSendsTheEnvCommandsAssignmentsAsOneLineAndRefusesUnsafeOnes(
 		t.Fatal(err)
 	}
 	line := "AWS_ACCESS_KEY_ID=ASIA-sentinel AWS_SESSION_TOKEN=Fw+tok/en== CI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/"
-	if want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\n" + line + "\n"; string(got.payload(firstAuthor)) != want {
+	if want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\n" + line + "\n\n"; string(got.payload(firstAuthor)) != want {
 		t.Errorf("payload = %q, want %q", got.payload(firstAuthor), want)
 	}
 	env := got.env
