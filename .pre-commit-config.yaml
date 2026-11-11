@@ -42,9 +42,9 @@ repos:
       # prek forces GOTOOLCHAIN=local; auto lets `go` fetch the patch a consumer's
       # go.mod asks for. Raise the pin for a go.mod on a newer minor.
       - id: golangci-lint-fmt
-        language_version: '1.26.11'
+        language_version: '1.26.10'
         env: {GOTOOLCHAIN: auto}
       - id: golangci-lint
-        language_version: '1.26.11'
+        language_version: '1.26.10'
         env: {GOTOOLCHAIN: auto}
         args: [--allow-serial-runners]
