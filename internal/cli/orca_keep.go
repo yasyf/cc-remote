@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/cc-remote/internal/config"
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
@@ -54,8 +56,10 @@ storage gone for 10 minutes, keep releases its task, logs that once, and reopens
 reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
 never reopens a stopped lane's forward. Every 10 minutes, starting with its first pass, it also runs
 orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
-reading and retrying. One keep runs per state directory: a keep that finds another running exits at
-once, and a keep exits once no task is kept.`,
+reading and retrying. When orca.keys.github_app names a command, each pass runs it and writes a line it
+has not yet written to a kept task's machine into that machine's GitHub App token file, so a worker's
+ccx keeps reading on the app's quota past the hour its launch token lasts. One keep runs per state
+directory: a keep that finds another running exits at once, and a keep exits once no task is kept.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -82,7 +86,8 @@ once, and a keep exits once no task is kept.`,
 				}
 				return checker.CheckStorage(ctx, task.Machine)
 			}
-			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune, storage)
+			tokens := appTokens{command: cfg.Orca.Keys[config.KeyGitHubApp], sent: map[string][]byte{}}
+			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune, storage, tokens)
 		},
 	}
 	flags.bind(cmd)
@@ -123,13 +128,13 @@ func spawnKeeper(dir state.Dir, config string) error {
 	return cmd.Process.Release()
 }
 
-func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck) error {
+func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, tokens appTokens) error {
 	for {
 		unlock, held, err := state.TryLock(dir.OrcaKeeper())
 		if err != nil || !held {
 			return err
 		}
-		err = holdForwards(ctx, dir, log, prune, storage)
+		err = holdForwards(ctx, dir, log, prune, storage, tokens)
 		unlock()
 		if err != nil {
 			return err
@@ -141,7 +146,7 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 	}
 }
 
-func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck) error {
+func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, tokens appTokens) error {
 	ticker := time.NewTicker(keepEvery)
 	defer ticker.Stop()
 	var pruned time.Time
@@ -155,6 +160,9 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 		}
 		kept, err := reopenForwards(ctx, dir, log, storage, gone)
 		if err != nil || kept == 0 {
+			return err
+		}
+		if err := tokens.renew(ctx, dir, log); err != nil {
 			return err
 		}
 		select {
@@ -226,6 +234,51 @@ func reopenForward(ctx context.Context, dir state.Dir, task *orcaTask) (bool, er
 		return false, err
 	}
 	return true, nil
+}
+
+type appTokens struct {
+	command []string
+	sent    map[string][]byte
+}
+
+func (a appTokens) renew(ctx context.Context, dir state.Dir, log *slog.Logger) error {
+	if len(a.command) == 0 {
+		return nil
+	}
+	line, err := captureKey(ctx, a.command)
+	if err != nil {
+		log.Warn("the orca.keys.github_app command failed, so each worker reads through the GitHub App token it holds until a later pass renews it", "error", err)
+		return nil
+	}
+	names, err := keptNames(dir)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if bytes.Equal(a.sent[name], line) {
+			continue
+		}
+		task, err := loadTask(dir, name)
+		if err != nil {
+			return err
+		}
+		if err := sendAppToken(ctx, task, line); err != nil {
+			log.Warn("a kept task's GitHub App token did not renew, and the next pass tries again", "workspace", name, "error", err)
+			continue
+		}
+		a.sent[name] = line
+	}
+	return nil
+}
+
+func sendAppToken(ctx context.Context, task *orcaTask, line []byte) error {
+	ctx, cancel := context.WithTimeout(ctx, reopenWithin)
+	defer cancel()
+	if !task.Forward.up(ctx) {
+		return errors.New("its forward is down")
+	}
+	_, err := task.run(ctx, orca.GitHubAppScript, bytes.NewReader(line))
+	return err
 }
 
 func storageLost(ctx context.Context, storage storageCheck, task *orcaTask) bool {

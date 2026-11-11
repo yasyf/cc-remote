@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca.keys.github_app` moves a worker's GitHub reads onto a GitHub App.**
+  A worker's ccx read GitHub on `GH_TOKEN`, the launcher's own token, outside
+  ccx's cache and on the launcher's rate limit, because the worker has no app
+  key to mint an installation token from. When the config names a command for
+  `github_app`, such as `[ccx, vcs, auth, token, --json, owner/name]`,
+  cc-remote runs it on the Mac, sends the token line down the key pipe, and
+  the worker's terminal writes it to `/dev/shm/cc-remote/github-app.json` and
+  exports `CCX_GITHUB_APP_TOKEN_FILE`, so ccx reads that account's
+  repositories on the installation while git and gh keep writing with
+  `GH_TOKEN`. `cc-remote orca keep` renews the file on every kept worker
+  whenever the Mac mints a new token, and the private key never leaves the
+  Mac. Leaving it unconfigured changes nothing.
 - **`orca.keys.env` exports a command's `NAME=value` lines on the worker.**
   Each key command delivers one value to one fixed variable, so a credential
   that comes as several variables from one sign-in, such as an AWS session,

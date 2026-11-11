@@ -242,12 +242,20 @@ const trunkVariable = "TRUNK_MERGE_API_KEY"
 
 const geminiVariable = "GEMINI_API_KEY"
 
+const (
+	githubAppVariable = "CCX_GITHUB_APP_TOKEN_FILE"
+	githubAppDir      = "/dev/shm/cc-remote"
+	githubAppFile     = githubAppDir + "/github-app.json"
+)
+
+const GitHubAppScript = `umask 077 && mkdir -p ` + githubAppDir + ` && tmp=$(mktemp ` + githubAppFile + `.XXXXXX) && cat > "$tmp" && mv "$tmp" ` + githubAppFile
+
 var githubVariables = []string{"GH_TOKEN", "GITHUB_TOKEN"}
 
 var envAssignment = regexp.MustCompile(`^([A-Z_][A-Z0-9_]*)=[A-Za-z0-9+/=:._@-]+$`)
 
 func EnvLine(out []byte) ([]byte, error) {
-	owned := slices.Concat(CredentialEnv(), []string{trunkVariable, geminiVariable}, githubVariables)
+	owned := slices.Concat(CredentialEnv(), []string{trunkVariable, geminiVariable, githubAppVariable}, githubVariables)
 	var assignments [][]byte
 	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte{'\n'}) {
 		match := envAssignment.FindSubmatch(line)
@@ -400,8 +408,8 @@ func (a Agent) JudgeKeyProvider() string {
 func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
-		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; IFS= read -r environment || environment=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable}, githubVariables), " "),
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; IFS= read -r environment || environment=; IFS= read -r app || app=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable, githubAppVariable}, githubVariables), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
 		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
@@ -411,7 +419,8 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$gemini" || export ` + geminiVariable + `="$gemini"; }`,
 		`{ test -z "$login" || gh config set -h github.com user "$login"; }`,
 		`{ test -z "$environment" || export $environment; }`,
-		"unset key judge typesafe github trunk gemini name email login environment",
+		`{ test -z "$app" || { printf '%s' "$app" | (` + GitHubAppScript + `) && export ` + githubAppVariable + `=` + githubAppFile + `; }; }`,
+		"unset key judge typesafe github trunk gemini name email login environment app",
 		"export " + strings.Join(a.exports(), " "),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")
