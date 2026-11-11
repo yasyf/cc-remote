@@ -148,7 +148,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
-			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n\n"
+			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n\n\n"
 			if payload := string(got.payload(firstAuthor)); payload != want {
 				t.Errorf("payload = %q, want %q", payload, want)
 			}
@@ -199,7 +199,7 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiAndGitHubLoginLines(t
 		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" || string(got.githubLogin) != "login-sentinel" {
 			t.Fatalf("Trunk key = %q, Gemini key = %q, GitHub login = %q", got.trunk, got.gemini, got.githubLogin)
 		}
-		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n"
+		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\n"
 		if payload := string(got.payload(firstAuthor)); payload != want {
 			t.Errorf("payload = %q, want %q", payload, want)
 		}
@@ -219,6 +219,53 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiAndGitHubLoginLines(t
 		}
 		if err != nil && strings.Contains(err.Error(), "sentinel") {
 			t.Errorf("Trunk capture error leaks key: %v", err)
+		}
+	}
+}
+
+func TestCaptureKeysSendsTheEnvCommandsAssignmentsAsOneLineAndRefusesUnsafeOnes(t *testing.T) {
+	dir := t.TempDir()
+	script := func(name, out string) []string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '"+out+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return []string{path}
+	}
+	agent := orca.Agent{Kind: orca.AgentClaude}
+	keys := map[string][]string{
+		agent.KeyProvider(): script("model", "model-sentinel"),
+		config.KeyEnv:       script("env", `AWS_ACCESS_KEY_ID=ASIA-sentinel\nAWS_SESSION_TOKEN=Fw+tok/en==\nCI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/\n`),
+	}
+	got, err := captureKeys(t.Context(), keys, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := "AWS_ACCESS_KEY_ID=ASIA-sentinel AWS_SESSION_TOKEN=Fw+tok/en== CI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/"
+	if want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\n" + line + "\n"; string(got.payload(firstAuthor)) != want {
+		t.Errorf("payload = %q, want %q", got.payload(firstAuthor), want)
+	}
+	env := got.env
+	got.clear()
+	if bytes.Count(env, []byte{0}) != len(env) {
+		t.Error("env bytes survived clear")
+	}
+	for name, out := range map[string]string{
+		"a space":          `AWS_REGION=us west\n`,
+		"a command":        `AWS_REGION=$(sentinel)\n`,
+		"a model key":      `ANTHROPIC_API_KEY=sentinel\n`,
+		"the git identity": `GIT_CONFIG_COUNT=9\n`,
+		"a lowercase name": `aws_region=sentinel\n`,
+		"nothing":          ``,
+		"a bare word":      `sentinel\n`,
+	} {
+		keys[config.KeyEnv] = script("refused", out)
+		got, err := captureKeys(t.Context(), keys, agent)
+		if err == nil || !strings.HasPrefix(err.Error(), "env command") || got.key != nil || got.env != nil {
+			t.Errorf("%s: captureKeys = %+v, %v; want refused", name, got, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "sentinel") {
+			t.Errorf("%s: the refusal leaks the value: %v", name, err)
 		}
 	}
 }
@@ -1443,7 +1490,7 @@ func TestPrepareSendsTheLaunchersIdentityAndTrunkKeyOnlyDownTheKeyPipe(t *testin
 	}
 	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
 	w.prepared(out.Bytes())
-	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n\n" {
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n\n\n" {
 		t.Errorf("key pipe = %q, %v", sent, err)
 	}
 	kept := w.effects()

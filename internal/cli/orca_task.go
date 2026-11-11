@@ -1182,11 +1182,11 @@ func captainPins(inventory images.Inventory) []orca.Pin {
 }
 
 type secrets struct {
-	key, judge, typesafe, github, trunk, gemini, githubLogin []byte
+	key, judge, typesafe, github, trunk, gemini, githubLogin, env []byte
 }
 
 func (s secrets) payload(launcher author) []byte {
-	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini, s.githubLogin}
+	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini, s.githubLogin, s.env}
 	return append(bytes.Join(lines, []byte{'\n'}), '\n')
 }
 
@@ -1198,6 +1198,7 @@ func (s secrets) clear() {
 	clear(s.trunk)
 	clear(s.gemini)
 	clear(s.githubLogin)
+	clear(s.env)
 }
 
 func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
@@ -1242,6 +1243,12 @@ func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent
 			return secrets{}, fmt.Errorf("github_login %w", err)
 		}
 	}
+	if command, ok := keys[config.KeyEnv]; ok {
+		if captured.env, err = captureEnv(ctx, command); err != nil {
+			captured.clear()
+			return secrets{}, fmt.Errorf("env %w", err)
+		}
+	}
 	return captured, nil
 }
 
@@ -1259,6 +1266,21 @@ func captureKey(ctx context.Context, command []string) ([]byte, error) {
 		return nil, fmt.Errorf("key command %s must print exactly one non-empty line", strings.Join(command, " "))
 	}
 	return key, nil
+}
+
+func captureEnv(ctx context.Context, command []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, keyTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
+	defer clear(out)
+	if err != nil {
+		return nil, fmt.Errorf("command %s: %w", strings.Join(command, " "), err)
+	}
+	line, err := orca.EnvLine(out)
+	if err != nil {
+		return nil, fmt.Errorf("command %s %w", strings.Join(command, " "), err)
+	}
+	return line, nil
 }
 
 type author struct {

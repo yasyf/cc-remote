@@ -310,6 +310,16 @@ func TestParsePreservesTheOptionalGitHubLoginCommand(t *testing.T) {
 	}
 }
 
+func TestParsePreservesTheOptionalEnvCommand(t *testing.T) {
+	cfg, err := Parse([]byte(minimal + "orca:\n  keys:\n    env: [./sprite-lane-env]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Orca.Keys[KeyEnv]; !slices.Equal(got, []string{"./sprite-lane-env"}) {
+		t.Errorf("env command = %q", got)
+	}
+}
+
 func TestParseRefusesWhatCannotRun(t *testing.T) {
 	tests := []struct {
 		name string
