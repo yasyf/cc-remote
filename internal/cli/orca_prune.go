@@ -142,7 +142,7 @@ func recordedTasks(dir state.Dir) ([]*orcaTask, error) {
 	var tasks []*orcaTask
 	for _, entry := range entries {
 		name, ok := strings.CutSuffix(entry.Name(), ".json")
-		if !ok || entry.IsDir() || state.ValidateName(name) != nil {
+		if !ok || entry.IsDir() || state.ValidateName(name) != nil || dir.Orca(name) == dir.OrcaKeeperSuccessor() {
 			continue
 		}
 		task, err := loadTask(dir, name)
