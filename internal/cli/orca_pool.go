@@ -139,6 +139,7 @@ type orcaFill struct {
 	Created   []string `json:"created,omitempty"`
 	Abandoned []string `json:"abandoned,omitempty"`
 	Refused   []string `json:"refused,omitempty"`
+	Retired   []string `json:"retired,omitempty"`
 }
 
 type orcaPoolStatus struct {
@@ -150,6 +151,7 @@ type orcaPoolStatus struct {
 var (
 	spareAnswersWithin = time.Minute
 	failedStopWithin   = 4 * time.Minute
+	staleSpareAfter    = 24 * time.Hour
 	agentProcesses     = remote.Script(`processes=$(ps -eo comm=)`, `for name in $processes; do case "$name" in `+orca.AgentCodex+`|`+orca.AgentClaude+`) exit `+strconv.Itoa(exitAgentRunning)+` ;; esac; done`)
 	agentRefusals      = map[int]string{exitAgentRunning: "an agent process runs there"}
 
@@ -697,7 +699,13 @@ func (p *orcaPool) census(ctx context.Context, fill *orcaFill) (map[string]bool,
 	}
 	eligible := map[string]bool{}
 	for _, member := range members {
-		if member.Key != p.key || member.State != memberReady {
+		if member.Key != p.key {
+			if err := p.retireStale(ctx, member, fill); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if member.State != memberReady {
 			continue
 		}
 		unlock, held, err := state.TryLock(p.dir.Orca(member.Name) + ".lock")
@@ -723,6 +731,26 @@ func (p *orcaPool) census(ctx context.Context, fill *orcaFill) (map[string]bool,
 		}
 	}
 	return eligible, nil
+}
+
+func (p *orcaPool) retireStale(ctx context.Context, member *orcaMember, fill *orcaFill) error {
+	if member.State != memberReady || p.session.Now().Sub(member.UpdatedAt) < staleSpareAfter {
+		return nil
+	}
+	unlock, held, err := state.TryLock(p.dir.Orca(member.Name) + ".lock")
+	if err != nil || !held {
+		return err
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(ctx, failedStopWithin)
+	defer cancel()
+	if err := p.session.Destroy(ctx, member.Name); err != nil {
+		p.session.Log.Warn("a warm workspace under an old pool key stays, since its destroy failed", "workspace", member.Name, "failure", failureOf(err).describe())
+		return nil
+	}
+	member.State, member.Reason = memberRefused, "it was ready under a pool key no claim takes any more, so a fill destroyed it"
+	fill.Retired = append(fill.Retired, member.Name)
+	return p.save(member)
 }
 
 func (p *orcaPool) replenish() *orcaReplenish {

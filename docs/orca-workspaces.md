@@ -534,6 +534,13 @@ directory. It doesn't wait for the fill, and the fill can't hold its stdout
 open. A fill that fails to start shows up as `replenish.failure`, and
 the worker is still prepared.
 
+A new release or config change gives the pool a new compatibility key, and no
+claim takes a workspace readied under an old one. A fill destroys each such
+workspace once it has sat ready for a day, records it `refused`, and lists it
+under `retired`. The day leaves a spare alone while another release that still
+uses the old key may claim it. A failed claim or a create that failed after its
+machine was confirmed destroys that machine too.
+
 Run the fill yourself to top up the pool, then list it:
 
 ```sh

@@ -418,6 +418,36 @@ func TestDestroyKeepsTheReceiptUntilTheSpriteIsGone(t *testing.T) {
 	}
 }
 
+func TestDestroyRetriesAnAPIServerErrorUntilTheSpriteIsGone(t *testing.T) {
+	paused := destroyPause
+	destroyPause = time.Millisecond
+	t.Cleanup(func() { destroyPause = paused })
+	p, fake := newProvider(t)
+	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+		t.Fatal(err)
+	}
+	fake.flaky = []int{503, 500}
+	if err := p.Destroy(t.Context(), "alpha"); err != nil {
+		t.Fatalf("Destroy after two server errors = %v, want the third try to remove it", err)
+	}
+	if _, err := p.Get(t.Context(), "alpha"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("after the destroy, Get = %v", err)
+	}
+
+	if _, err := p.Create(t.Context(), spec("beta", nil)); err != nil {
+		t.Fatal(err)
+	}
+	fake.flaky = []int{500, 500, 500}
+	var answered *StatusError
+	if err := p.Destroy(t.Context(), "beta"); !errors.As(err, &answered) || answered.Status != 500 {
+		t.Errorf("Destroy after three server errors = %v, want the last one", err)
+	}
+	fake.flaky = []int{401}
+	if err := p.Destroy(t.Context(), "beta"); !errors.As(err, &answered) || answered.Status != 401 || len(fake.flaky) != 0 {
+		t.Errorf("Destroy after a client error = %v, want it returned at once", err)
+	}
+}
+
 func TestSuspendStopsEveryServiceAndReturnsOnceTheSpritePauses(t *testing.T) {
 	p, fake := newProvider(t)
 	if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {

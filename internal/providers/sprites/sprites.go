@@ -44,8 +44,10 @@ const (
 )
 
 var (
-	pauseWithin = 2 * time.Minute
-	pauseEvery  = 5 * time.Second
+	pauseWithin  = 2 * time.Minute
+	pauseEvery   = 5 * time.Second
+	destroyTries = 3
+	destroyPause = 2 * time.Second
 )
 
 const (
@@ -357,6 +359,21 @@ func (p *Provider) paused(ctx context.Context, id string) error {
 }
 
 func (p *Provider) Destroy(ctx context.Context, id string) error {
+	for try := 1; ; try++ {
+		err := p.destroy(ctx, id)
+		var answered *StatusError
+		if !errors.As(err, &answered) || answered.Status < 500 || try == destroyTries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(destroyPause << (try - 1)):
+		}
+	}
+}
+
+func (p *Provider) destroy(ctx context.Context, id string) error {
 	if _, err := p.Get(ctx, id); err != nil {
 		if errors.Is(err, providers.ErrNotFound) {
 			return errors.Join(err, p.keys().remove(id), p.records().Remove(id))
