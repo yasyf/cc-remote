@@ -47,6 +47,7 @@ type Runtime struct {
 	Port          int
 	Advertise     string
 	Supervised    bool
+	Restart       bool
 	GoBuildJobs   int
 	GoMemoryLimit int64
 }
@@ -163,15 +164,18 @@ func (r Runtime) start() string {
 		return `nohup setsid "` + launcher + `" > /dev/null 2>&1 < /dev/null &`
 	}
 	create := spriteEnv + ` services create ` + RuntimeService + ` --cmd "` + launcher + `"`
-	return strings.Join([]string{
+	lines := []string{
 		"if ! " + spriteEnv + " services get " + RuntimeService + " > /dev/null 2>&1; then",
 		"  if " + spriteEnv + " services get cc-remote-payload > /dev/null 2>&1; then",
 		"    " + create + " --needs cc-remote-payload --duration 1ms --no-stream >&2",
 		"  else",
 		"    " + create + " --duration 1ms --no-stream >&2",
 		"  fi",
-		"fi",
-	}, "\n")
+	}
+	if r.Restart {
+		lines = append(lines, "else", `  rm -f "`+readyFile+`"`, "  "+spriteEnv+" services restart "+RuntimeService+" >&2")
+	}
+	return strings.Join(append(lines, "fi"), "\n")
 }
 
 func (r Runtime) EnsureScript() string {

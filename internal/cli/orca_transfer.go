@@ -41,6 +41,7 @@ const (
 )
 
 var (
+	firstUse         = orca.FirstUseCheck + ` || exit ` + fmt.Sprint(exitPriorRuntime)
 	commitID         = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	digestHex        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	transferRefusals = map[int]string{
@@ -115,7 +116,7 @@ func answered(step, name string, refusals map[int]string, result providers.Resul
 }
 
 func checkRetained(ctx context.Context, session *workspace.Session, result *workspace.Result) error {
-	return checkCheckout(ctx, session, "check the retained checkout", result.Name, result.Machine, result.ProjectRoot)
+	return checkCheckout(ctx, session, "check the retained checkout", result.Name, result.Machine, result.ProjectRoot, firstUse)
 }
 
 func checkUnused(ctx context.Context, session *workspace.Session, record *workspace.Record) error {
@@ -129,7 +130,7 @@ func checkUnused(ctx context.Context, session *workspace.Session, record *worksp
 }
 
 func checkClean(ctx context.Context, session *workspace.Session, step, name, machine string) error {
-	return checkCheckout(ctx, session, step, name, machine, session.ProjectRoot(),
+	return checkCheckout(ctx, session, step, name, machine, session.ProjectRoot(), firstUse,
 		`status=$(git --no-optional-locks -C "$root" status --porcelain --untracked-files=all)`,
 		`test -z "$status" || exit `+fmt.Sprint(exitNotClean),
 	)
@@ -140,7 +141,6 @@ func checkCheckout(ctx context.Context, session *workspace.Session, step, name, 
 		"root=" + remote.Quote(root),
 		`top=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) && test "$top" = "$(cd "$root" && pwd -P)" || exit ` + fmt.Sprint(exitNotCheckout),
 		`test "$(git -C "$root" config --get remote.origin.url)" = ` + remote.Quote(session.Config.Repository) + ` || exit ` + fmt.Sprint(exitOtherOrigin),
-		orca.FirstUseCheck + ` || exit ` + fmt.Sprint(exitPriorRuntime),
 	}, checks)...)
 	ran, err := session.Provider.Exec(ctx, machine, []string{"sh", "-c", script}, nil)
 	_, err = answered(step, name, checkoutRefusals, ran, err)
@@ -195,12 +195,12 @@ func (t *orcaTask) sendBrief(ctx context.Context, brief []byte) (*orcaArtifact, 
 	created := taskRoot + "/" + t.Workspace
 	script := remote.Script(
 		"umask 077",
-		`mkdir -p "`+taskRoot+`"`,
-		`mkdir "`+created+`"`,
+		`mkdir -p "`+created+`"`,
 		`dir=$(cd "`+created+`" && pwd -P)`,
 		"root=$(cd "+remote.Quote(t.ProjectRoot)+" && pwd -P)",
 		`case "$dir/" in "$root"/*) exit `+fmt.Sprint(exitInsideCheckout)+` ;; esac`,
 		`printf '%s\n' "$dir"`,
+		`rm -f "$dir/`+briefName+`"`,
 		`cat > "$dir/`+briefName+`"`,
 		`exec cat "$dir/`+briefName+`"`,
 	)

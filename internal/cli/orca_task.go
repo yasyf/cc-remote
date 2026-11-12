@@ -107,6 +107,7 @@ type orcaOpening int
 const (
 	openCreated orcaOpening = iota
 	openExisting
+	openContinued
 	openSpare
 )
 
@@ -321,18 +322,31 @@ func (l *orcaLaunch) start(ctx context.Context, out io.Writer, session *workspac
 		return err
 	}
 	defer unlock()
-	if err := absentTask(session.Config.State(), name); err != nil {
+	opening, err := l.opening(session.Config.State(), name, runtime)
+	if err != nil {
 		return err
-	}
-	opening := openCreated
-	if l.existing {
-		opening = openExisting
 	}
 	task, err := l.prime(ctx, session, runner, runtime, name, opening, nil, finish)
 	if task == nil {
 		return err
 	}
 	return errors.Join(err, emit(out, task))
+}
+
+func (l *orcaLaunch) opening(dir state.Dir, name string, runtime orca.Runtime) (orcaOpening, error) {
+	if !l.existing {
+		return openCreated, absentTask(dir, name)
+	}
+	recorded, err := state.Load(dir.Orca(name), &orcaTask{})
+	switch {
+	case err != nil:
+		return 0, err
+	case !recorded:
+		return openExisting, nil
+	case !runtime.Supervised:
+		return 0, fmt.Errorf("%s already has an Orca task under %s, and continuing it restarts the machine's Orca runtime, which only a sprite-env service does", name, dir)
+	}
+	return openContinued, nil
 }
 
 func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runner orca.Runner, runtime orca.Runtime, name string, opening orcaOpening, pregrant *orca.Pregrant, finish func(context.Context, orcaDriver, *orcaTask) error) (*orcaTask, error) {
@@ -342,7 +356,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 	}
 	var task *orcaTask
 	var booted *orcaBoot
-	if opening != openExisting && l.agent.Kind != orca.AgentCodex {
+	if (opening == openCreated || opening == openSpare) && l.agent.Kind != orca.AgentCodex {
 		session.AfterTools = func(ctx context.Context, machine string) {
 			booted = driver.boot(ctx, session, task, runtime, machine)
 		}
@@ -350,7 +364,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 	}
 	session.Retain = func(ctx context.Context, record *workspace.Record) (err error) {
 		switch opening {
-		case openExisting:
+		case openExisting, openContinued:
 			err = owned(ctx, session.Provider, record, name)
 		case openSpare:
 			within, cancel := context.WithTimeout(ctx, spareAnswersWithin)
@@ -373,6 +387,17 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			return nil, err
 		}
 		if err = checkRetained(ctx, session, result); err == nil {
+			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
+		}
+	case openContinued:
+		if result, err = session.Resume(ctx, name); err != nil {
+			return nil, err
+		}
+		if err = disconnect(ctx, driver.state, driver.client, name); err != nil {
+			return nil, err
+		}
+		runtime.Restart = true
+		if err = checkCheckout(ctx, session, "check the continued checkout", result.Name, result.Machine, result.ProjectRoot); err == nil {
 			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
 		}
 	case openSpare:
@@ -531,10 +556,14 @@ the pool holds none it creates the lane's own workspace as plain prepare does. I
 cc-remote orca pool fill toward orca.pool.ready unused workspaces. stdout carries the lane, the actual workspace,
 allocation warm or created, the checkout's HEAD, the fill it started, and the task record.
 
-With --existing, prepare starts the first worker of a recorded workspace instead of creating one: it resumes
-the exact recorded machine and keeps its checkout as it is. It refuses a recorded Orca task, a machine without
-the workspace's ownership, a checkout or origin that differs from the config, and earlier Orca runtime state,
-and it takes no --ref.
+With --existing, prepare starts a worker on a recorded workspace instead of creating one: it resumes the exact
+recorded machine and keeps its checkout as it is, uncommitted work included. A workspace with no Orca task gets
+its first worker, and earlier Orca runtime state on its machine is refused. A workspace whose Orca task is
+recorded is continued: prepare closes that task's forward, removes its Orca environment, and restarts the
+machine's Orca runtime service, which ends any worker the earlier task left running, then starts the new worker
+and replaces the task record and the brief. Only a machine whose runtime runs as a sprite-env service is
+continued. It refuses a machine without the workspace's ownership and a checkout or origin that differs from the
+config, and it takes no --ref.
 
 With --before-worker-file, the file's script runs with sh on the machine after the checkout and before the worker
 starts, so the worker's first session sees whatever it installs. A nonzero exit stops prepare with no worker. The
@@ -551,7 +580,7 @@ task record carries the script's stdout as beforeWorker.`,
 				return errors.New("--existing starts on a recorded workspace and --warm claims a pool workspace for a lane, so pass only one")
 			}
 			if launch.existing && cmd.Flags().Changed("ref") {
-				return errors.New("--existing starts the first worker on the workspace's retained checkout, so it takes no --ref")
+				return errors.New("--existing starts a worker on the workspace's retained checkout, so it takes no --ref")
 			}
 			brief, err := readBrief(briefFile)
 			if err != nil {
@@ -572,7 +601,7 @@ task record carries the script's stdout as beforeWorker.`,
 	launch.bind(cmd, "MCP servers the worker may start, inline only: for claude one JSON object per flag; for codex one TOML inline table for mcp_servers (default none)")
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
 	cmd.Flags().StringVar(&beforeWorkerFile, "before-worker-file", "", "file holding a script to run on the machine before the worker starts; a nonzero exit stops prepare with no worker")
-	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start the first worker on the recorded workspace's machine and retained checkout instead of creating one")
+	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start a worker on the recorded workspace's machine and retained checkout instead of creating one, continuing its recorded Orca task")
 	cmd.Flags().BoolVar(&launch.warm, "warm", false, "treat the name as a lane: claim an unused warm pool Sprite refreshed to --ref, moving to the next when one fails before its worker starts, or create the lane's workspace when none is left, refilling the pool in the background after each claim")
 	_ = cmd.MarkFlagRequired("brief-file")
 	return cmd

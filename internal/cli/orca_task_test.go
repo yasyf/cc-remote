@@ -1255,6 +1255,61 @@ func TestExistingPrepareStartsTheFirstWorkerOnTheRetainedCheckout(t *testing.T) 
 	w.free("task-a")
 }
 
+func TestExistingPrepareContinuesTheRecordedTaskOnItsRetainedCheckout(t *testing.T) {
+	w := newFirstWorker(t, nil, true)
+	first, _ := w.native()
+	var earlier bytes.Buffer
+	if err := w.prepare(t.Context(), w.session, first, &earlier, "task-a", true); err != nil {
+		t.Fatal(err)
+	}
+	w.prepared(earlier.Bytes())
+	w.free("task-a")
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.prepare(t.Context(), w.contender(), runner, io.Discard, "task-a", true)
+	}, "continuing it restarts the machine's Orca runtime, which only a sprite-env service does")
+	if err := os.WriteFile(filepath.Join(w.root, "README"), []byte("work in progress\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := gitOutput(t, w.root, "status", "--porcelain", "--untracked-files=all")
+	calls, ssh := len(w.provider.Calls()), len(sshCalls(t))
+	native, commands := w.native()
+	forget := []string{"environment list --json", "environment rm --environment env-1 --json"}
+	native.replies[forget[0]] = `{"id":"local","ok":true,"result":{"environments":[{"id":"env-1","name":"task-a"}]},"_meta":{"runtimeId":"local"}}`
+	native.replies[forget[1]] = `{"id":"local","ok":true,"result":{"removed":{"id":"env-1"}},"_meta":{"runtimeId":"local"}}`
+	launch := orcaLaunch{agent: firstAgent, existing: true, author: firstAuthor}
+	var out bytes.Buffer
+	err := launch.start(t.Context(), &out, w.session, native, orca.Runtime{Entry: "tools/orca/AppRun", Supervised: true}, "task-a", func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+		return driver.publish(ctx, task, []byte("Read every line.\n"))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.prepared(out.Bytes())
+	if want := slices.Concat(forget, commands); !slices.Equal(native.calls, want) {
+		t.Errorf("orca calls =\n%q\nwant the earlier environment removed, then\n%q", native.calls, want)
+	}
+	lifecycle := w.provider.Calls()[calls:]
+	restarts := 0
+	for _, call := range lifecycle {
+		if strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") {
+			t.Errorf("a continued workspace ran %q", call)
+		}
+		if strings.Contains(call, "services restart "+orca.RuntimeService) {
+			restarts++
+		}
+	}
+	if restarts != 1 {
+		t.Errorf("provider calls = %q, want the runtime service restarted once", lifecycle)
+	}
+	if got := gitOutput(t, w.root, "status", "--porcelain", "--untracked-files=all"); got != status {
+		t.Errorf("checkout status = %q, want the earlier worker's %q", got, status)
+	}
+	if got := sshCalls(t)[ssh:]; !slices.Equal(got, []string{"check", "exit", "check", "key-dir", "key-write", "head", "brief"}) {
+		t.Errorf("ssh calls = %q, want the earlier forward closed before the new worker's key", got)
+	}
+	w.free("task-a")
+}
+
 func TestPrepareRunsTheBeforeWorkerScriptAheadOfTheWorkerAndRecordsItsOutput(t *testing.T) {
 	w := newFirstWorker(t, nil, true)
 	native, commands := w.native()
@@ -1338,7 +1393,9 @@ func TestExistingPrepareHoldsTheTaskFromAdmissionThroughOutput(t *testing.T) {
 	if !slices.Equal(native.calls, commands) {
 		t.Errorf("orca calls =\n%q\nwant one worker's\n%q", native.calls, commands)
 	}
-	contend("task-a", "task-a already has an Orca task")
+	w.refusedWithoutEffects(func(runner orca.Runner) error {
+		return w.prepare(t.Context(), w.contender(), runner, io.Discard, "task-a", false)
+	}, "task-a already has an Orca task")
 	w.free("task-a")
 }
 
@@ -1374,7 +1431,7 @@ func TestCancelledExistingPrepareKeepsItsPartialTaskAndReleasesTheTask(t *testin
 	w.free("task-a")
 	later := w.contender()
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
-		return w.prepare(t.Context(), later, runner, io.Discard, "task-a", true)
+		return w.prepare(t.Context(), later, runner, io.Discard, "task-a", false)
 	}, "task-a already has an Orca task")
 	if !slices.Equal(native.calls, commands) {
 		t.Errorf("orca calls =\n%q\nwant one terminal and no resend\n%q", native.calls, commands)

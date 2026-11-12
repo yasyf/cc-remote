@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new one into every kept worker's file, so the AWS CLI and SDKs on the
   worker pick it up when the one they hold expires. Leaving it unconfigured
   changes nothing.
+- **`orca prepare --existing` continues a workspace whose Orca task is
+  recorded.** A lane that died with commits or uncommitted changes on its
+  Sprite could only be relaunched onto a fresh warm Sprite, which holds none of
+  them, because `--existing` refused any recorded task and any earlier runtime
+  state, and the brief copy refused the task directory the first brief left.
+  `--existing` now continues such a workspace: it closes the earlier task's
+  forward, removes its Orca environment, restarts the `cc-remote-orca` service,
+  which ends any worker the earlier task left running, and starts the new
+  worker on the same checkout, replacing the task record and the brief. A
+  workspace with no task record still gets a first worker and still refuses
+  earlier runtime state, and a machine whose runtime is not a sprite-env
+  service is refused.
 - **`orca.keys.github_app` moves a worker's GitHub reads onto a GitHub App.**
   A worker's ccx read GitHub on `GH_TOKEN`, the launcher's own token, outside
   ccx's cache and on the launcher's rate limit, because the worker has no app
