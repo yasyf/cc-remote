@@ -20,8 +20,10 @@ cc-remote jobs adopt build-1 build-2
 `run` claims a machine for one command. It sets `SPRITE` to the machine's name, exits with the command's status, and releases the machine however the command ends.
 
 ```sh
-cc-remote jobs run --holder restack -- sh -c 'sprite exec -s "$SPRITE" -- make test'
+cc-remote jobs run --holder restack -- sh -c 'cc-remote step "$SPRITE" -- make test'
 ```
+
+`step` runs one command detached on a machine, so a dropped connection never ends it. The machine saves the command's combined output and exit status under `~/.cc-remote/steps`, and `step` reconnects until it has replayed both, then exits with the command's status. An interrupt stops the command.
 
 To hold a machine across several commands, use `claim` and `release`.
 
