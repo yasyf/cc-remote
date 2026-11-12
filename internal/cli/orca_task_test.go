@@ -148,7 +148,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
-			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n\n\n\n"
+			want := tt.key + "\n" + tt.judge + "\n" + tt.typesafe + "\n" + tt.github + "\nAda O'Launcher\nada@example.test\n\n\n\n\n\n\n"
 			if payload := string(got.payload(firstAuthor)); payload != want {
 				t.Errorf("payload = %q, want %q", payload, want)
 			}
@@ -199,7 +199,7 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiGitHubLoginAndGitHubA
 		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" || string(got.githubLogin) != "login-sentinel" || string(got.githubApp) != "app-sentinel" {
 			t.Fatalf("Trunk key = %q, Gemini key = %q, GitHub login = %q, GitHub App token = %q", got.trunk, got.gemini, got.githubLogin, got.githubApp)
 		}
-		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\napp-sentinel\n"
+		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\napp-sentinel\n\n"
 		if payload := string(got.payload(firstAuthor)); payload != want {
 			t.Errorf("payload = %q, want %q", payload, want)
 		}
@@ -242,7 +242,7 @@ func TestCaptureKeysSendsTheEnvCommandsAssignmentsAsOneLineAndRefusesUnsafeOnes(
 		t.Fatal(err)
 	}
 	line := "AWS_ACCESS_KEY_ID=ASIA-sentinel AWS_SESSION_TOKEN=Fw+tok/en== CI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/"
-	if want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\n" + line + "\n\n"; string(got.payload(firstAuthor)) != want {
+	if want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\n" + line + "\n\n\n"; string(got.payload(firstAuthor)) != want {
 		t.Errorf("payload = %q, want %q", got.payload(firstAuthor), want)
 	}
 	env := got.env
@@ -266,6 +266,49 @@ func TestCaptureKeysSendsTheEnvCommandsAssignmentsAsOneLineAndRefusesUnsafeOnes(
 		}
 		if err != nil && strings.Contains(err.Error(), "sentinel") {
 			t.Errorf("%s: the refusal leaks the value: %v", name, err)
+		}
+	}
+}
+
+func TestCaptureKeysSendsTheAWSSessionAsOneLineAndRefusesOutputWithoutAnExpiration(t *testing.T) {
+	dir := t.TempDir()
+	script := func(name, out string) []string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\ncat <<'EOF'\n"+out+"EOF\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return []string{path}
+	}
+	agent := orca.Agent{Kind: orca.AgentClaude}
+	keys := map[string][]string{
+		agent.KeyProvider(): script("model", "model-sentinel\n"),
+		config.KeyAWS:       script("aws", "{\n  \"Version\": 1,\n  \"AccessKeyId\": \"ASIA-sentinel\",\n  \"SecretAccessKey\": \"secret-sentinel\",\n  \"SessionToken\": \"Fw+tok/en==\",\n  \"Expiration\": \"2026-11-12T17:07:15+00:00\"\n}\n"),
+	}
+	got, err := captureKeys(t.Context(), keys, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"Version":1,"AccessKeyId":"ASIA-sentinel","SecretAccessKey":"secret-sentinel","SessionToken":"Fw+tok/en==","Expiration":"2026-11-12T17:07:15+00:00"}`
+	if want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\n\n\n\n\n\n" + line + "\n"; string(got.payload(firstAuthor)) != want {
+		t.Errorf("payload = %q, want %q", got.payload(firstAuthor), want)
+	}
+	session := got.aws
+	got.clear()
+	if bytes.Count(session, []byte{0}) != len(session) {
+		t.Error("AWS session bytes survived clear")
+	}
+	for name, out := range map[string]string{
+		"no expiration":   "{\"Version\": 1, \"AccessKeyId\": \"ASIA-sentinel\", \"SecretAccessKey\": \"secret-sentinel\"}\n",
+		"env lines":       "AWS_ACCESS_KEY_ID=ASIA-sentinel\nAWS_SECRET_ACCESS_KEY=secret-sentinel\n",
+		"another version": "{\"Version\": 2, \"AccessKeyId\": \"ASIA-sentinel\", \"SecretAccessKey\": \"secret-sentinel\", \"Expiration\": \"2026-11-12T17:07:15Z\"}\n",
+	} {
+		keys[config.KeyAWS] = script("refused", out)
+		got, err := captureKeys(t.Context(), keys, agent)
+		if err == nil || !strings.HasPrefix(err.Error(), "aws command") || got.key != nil || got.aws != nil {
+			t.Errorf("%s: captureKeys = %+v, %v; want refused", name, got, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "sentinel") {
+			t.Errorf("%s: the refusal leaks the session: %v", name, err)
 		}
 	}
 }
@@ -1497,7 +1540,7 @@ func TestPrepareSendsTheLaunchersIdentityAndTrunkKeyOnlyDownTheKeyPipe(t *testin
 	}
 	w.head = gitOutput(t, w.root, "rev-parse", "HEAD")
 	w.prepared(out.Bytes())
-	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n\n\n\n" {
+	if sent, err := os.ReadFile(pipe); err != nil || string(sent) != "sk-test-key\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-private-sentinel\n\n\n\n\n\n" {
 		t.Errorf("key pipe = %q, %v", sent, err)
 	}
 	kept := w.effects()

@@ -169,6 +169,23 @@ command again on each pass and writes any line it has not yet written into
 each kept worker's file, and ccx mints a new token once the one it printed has
 under 55 minutes left.
 
+An optional `orca.keys.aws` command, also with no default, prints an AWS
+session as the process credentials
+`[aws, configure, export-credentials, --profile, <name>, --format, process]`
+prints, with its `Expiration`. The worker's terminal writes the session to
+`/dev/shm/cc-remote/aws.json`, readable only by the worker, writes
+`/dev/shm/cc-remote/aws-config`, whose default profile reads that file through
+`credential_process = cat /dev/shm/cc-remote/aws.json`, and exports
+`AWS_CONFIG_FILE` naming it, so the AWS CLI and SDKs on the worker sign with the
+session and read the file again once the session they hold expires. Once the
+session it last printed has under an hour left, `cc-remote orca keep` runs the
+command again and writes the new session into each kept worker's file, so a
+worker's AWS access lasts as long as the worker while the Mac is awake, and the
+identity that mints the session never leaves the Mac. Static AWS variables
+outrank `AWS_CONFIG_FILE`, so an `orca.keys.env` command beside this one must not
+print the session's `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or
+`AWS_SESSION_TOKEN`.
+
 An optional `orca.keys.trunk` command, which has no default, runs locally and adds a scoped Trunk key that every newly launched worker receives as `TRUNK_MERGE_API_KEY`. Like `GH_TOKEN`, it stays available to shell tools rather than being excluded with the model credentials. An optional `orca.keys.gemini` command works the same way, handing every newly launched worker a Gemini key as `GEMINI_API_KEY` so the `gemini` CLI runs from its shell tools.
 
 An optional `orca.keys.env` command, also with no default, prints `NAME=value`
@@ -301,6 +318,14 @@ ready` for a few seconds. `orca stop` and `destroy` release the task before
 they close its forward, so keep never reopens a stopped lane's forward. A task
 launched by a release without keep is not kept until `reconnect` runs on it.
 keep logs to `orca/keeper.log` in the state directory.
+
+A keep that finds another running records itself in `orca/keeper-successor.json`
+when it is a newer release than the successor already recorded there, and exits.
+The running keep reads that file at the start of each pass and, when it names a
+newer release than its own, releases the lock and execs that release's keep with
+its config, so a launch from a newer pin takes the keep over within one pass.
+A keep of the same or an older release, or a development build, never takes it
+over. When the exec fails, keep drops the record, logs why, and keeps holding.
 
 keep also runs `orca prune` on its first pass and every 10 minutes after. A
 failed prune is logged and tried again on the next one, and it never stops keep.

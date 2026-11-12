@@ -86,6 +86,10 @@ func (d Dir) OrcaKeeper() string {
 	return filepath.Join(string(d), "orca", "keeper.lock")
 }
 
+func (d Dir) OrcaKeeperSuccessor() string {
+	return filepath.Join(string(d), "orca", "keeper-successor.json")
+}
+
 func (d Dir) OrcaKeeperLog() string {
 	return filepath.Join(string(d), "orca", "keeper.log")
 }
