@@ -38,6 +38,9 @@ func TestPruneRemovesOnlyTheEnvironmentsOfStoppedLanesGoneMachinesAndDestroyedWo
 	if err := state.Remove(w.session.Config.State().Workspace("lane-destroyed")); err != nil {
 		t.Fatal(err)
 	}
+	if err := state.Save(w.session.Config.State().OrcaKeeperSuccessor(), map[string]string{"version": "9.9.9"}); err != nil {
+		t.Fatal(err)
+	}
 	saved := []orca.Environment{
 		{ID: "env-live", Name: "lane-live"},
 		{ID: "env-stopped", Name: "lane-stopped"},
