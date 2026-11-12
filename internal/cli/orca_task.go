@@ -1199,11 +1199,11 @@ func captainPins(inventory images.Inventory) []orca.Pin {
 }
 
 type secrets struct {
-	key, judge, typesafe, github, trunk, gemini, githubLogin, env, githubApp []byte
+	key, judge, typesafe, github, trunk, gemini, githubLogin, env, githubApp, aws []byte
 }
 
 func (s secrets) payload(launcher author) []byte {
-	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini, s.githubLogin, s.env, s.githubApp}
+	lines := [][]byte{s.key, s.judge, s.typesafe, s.github, []byte(launcher.name), []byte(launcher.email), s.trunk, s.gemini, s.githubLogin, s.env, s.githubApp, s.aws}
 	return append(bytes.Join(lines, []byte{'\n'}), '\n')
 }
 
@@ -1217,6 +1217,7 @@ func (s secrets) clear() {
 	clear(s.githubLogin)
 	clear(s.env)
 	clear(s.githubApp)
+	clear(s.aws)
 }
 
 func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
@@ -1273,6 +1274,12 @@ func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent
 			return secrets{}, fmt.Errorf("github_app %w", err)
 		}
 	}
+	if command, ok := keys[config.KeyAWS]; ok {
+		if captured.aws, _, err = captureAWS(ctx, command); err != nil {
+			captured.clear()
+			return secrets{}, fmt.Errorf("aws %w", err)
+		}
+	}
 	return captured, nil
 }
 
@@ -1305,6 +1312,30 @@ func captureEnv(ctx context.Context, command []string) ([]byte, error) {
 		return nil, fmt.Errorf("command %s %w", strings.Join(command, " "), err)
 	}
 	return line, nil
+}
+
+func captureAWS(ctx context.Context, command []string) ([]byte, time.Time, error) {
+	ctx, cancel := context.WithTimeout(ctx, keyTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
+	defer clear(out)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("command %s: %w", strings.Join(command, " "), err)
+	}
+	var session struct {
+		Version         int
+		AccessKeyID     string `json:"AccessKeyId"`
+		SecretAccessKey string
+		Expiration      time.Time
+	}
+	if err := json.Unmarshal(out, &session); err != nil || session.Version != 1 || session.AccessKeyID == "" || session.SecretAccessKey == "" || session.Expiration.IsZero() {
+		return nil, time.Time{}, fmt.Errorf("command %s must print the AWS process credentials, with their Expiration, that aws configure export-credentials --format process prints", strings.Join(command, " "))
+	}
+	var line bytes.Buffer
+	if err := json.Compact(&line, out); err != nil {
+		return nil, time.Time{}, err
+	}
+	return line.Bytes(), session.Expiration, nil
 }
 
 type author struct {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,11 +24,13 @@ import (
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
+	"github.com/yasyf/cc-remote/internal/version"
 )
 
 const (
-	keepEvery  = 30 * time.Second
-	pruneEvery = 10 * time.Minute
+	keepEvery   = 30 * time.Second
+	pruneEvery  = 10 * time.Minute
+	renewBefore = time.Hour
 )
 
 var (
@@ -41,6 +47,10 @@ var keepCommand = func(config string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	return exec.Command(helper, "orca", "keep", "--config", config), nil
+}
+
+var execKeeper = func(next successor) error {
+	return syscall.Exec(next.Binary, []string{next.Binary, "orca", "keep", "--config", next.Config}, os.Environ())
 }
 
 func newOrcaKeepCmd(runner orca.Runner) *cobra.Command {
@@ -60,8 +70,12 @@ never reopens a stopped lane's forward. Every 10 minutes, starting with its firs
 orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
 reading and retrying. When orca.keys.github_app names a command, each pass runs it and writes a line it
 has not yet written to a kept task's machine into that machine's GitHub App token file, so a worker's
-ccx keeps reading on the app's quota past the hour its launch token lasts. One keep runs per state
-directory: a keep that finds another running exits at once, and a keep exits once no task is kept.`,
+ccx keeps reading on the app's quota past the hour its launch token lasts. When orca.keys.aws names a
+command, a pass runs it once the session it last printed has under an hour left and writes the new
+session into each kept task's AWS credentials file the same way, so a worker's AWS reads outlive the
+session its launch captured. One keep runs per state directory: a keep that finds another running
+records itself as that keep's successor and exits, the running keep execs a successor of a newer
+release at its next pass, so a pin change reaches the keep, and a keep exits once no task is kept.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -88,8 +102,16 @@ directory: a keep that finds another running exits at once, and a keep exits onc
 				}
 				return checker.CheckStorage(ctx, task.Machine)
 			}
-			tokens := appTokens{command: cfg.Orca.Keys[config.KeyGitHubApp], sent: map[string][]byte{}}
-			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune, storage, tokens)
+			binary, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			renewals := []*renewal{
+				{key: config.KeyGitHubApp, command: cfg.Orca.Keys[config.KeyGitHubApp], capture: captureAppToken, script: orca.GitHubAppScript, sent: map[string][]byte{}},
+				{key: config.KeyAWS, command: cfg.Orca.Keys[config.KeyAWS], capture: captureAWS, script: orca.AWSScript, sent: map[string][]byte{}},
+			}
+			self := successor{Version: version.String(), Binary: binary, Config: cfg.Path}
+			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune, storage, renewals, self)
 		},
 	}
 	flags.bind(cmd)
@@ -130,16 +152,28 @@ func spawnKeeper(dir state.Dir, config string) error {
 	return cmd.Process.Release()
 }
 
-func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, tokens appTokens) error {
+func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, renewals []*renewal, self successor) error {
 	for {
 		unlock, held, err := state.TryLock(dir.OrcaKeeper())
-		if err != nil || !held {
+		if err != nil {
 			return err
 		}
-		err = holdForwards(ctx, dir, log, prune, storage, tokens)
+		if !held {
+			return offerSuccessor(dir, self)
+		}
+		next, err := holdForwards(ctx, dir, log, prune, storage, renewals, self.Version)
 		unlock()
 		if err != nil {
 			return err
+		}
+		if next != nil {
+			log.Info("handing the keeper to a newer release", "version", next.Version, "binary", next.Binary)
+			err := execKeeper(*next)
+			log.Warn("the newer keeper did not start, so this one keeps holding", "version", next.Version, "binary", next.Binary, "error", err)
+			if err := os.Remove(dir.OrcaKeeperSuccessor()); err != nil {
+				return err
+			}
+			continue
 		}
 		kept, err := keptNames(dir)
 		if err != nil || len(kept) == 0 {
@@ -148,12 +182,19 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 	}
 }
 
-func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, tokens appTokens) error {
+func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, renewals []*renewal, running string) (*successor, error) {
 	ticker := time.NewTicker(keepEvery)
 	defer ticker.Stop()
 	var pruned time.Time
 	gone := map[string]time.Time{}
 	for {
+		next, err := readSuccessor(dir)
+		if err != nil {
+			return nil, err
+		}
+		if next != nil && newerRelease(next.Version, running) {
+			return next, nil
+		}
 		if time.Since(pruned) >= pruneEvery {
 			if err := prune(ctx); err != nil {
 				log.Warn("pruning Orca environments failed, and the next prune tries again", "error", err)
@@ -162,17 +203,69 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 		}
 		kept, err := reopenForwards(ctx, dir, log, storage, gone)
 		if err != nil || kept == 0 {
-			return err
+			return nil, err
 		}
-		if err := tokens.renew(ctx, dir, log); err != nil {
-			return err
+		for _, r := range renewals {
+			if err := r.renew(ctx, dir, log); err != nil {
+				return nil, err
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case <-ticker.C:
 		}
 	}
+}
+
+type successor struct {
+	Version string `json:"version"`
+	Binary  string `json:"binary"`
+	Config  string `json:"config"`
+}
+
+func readSuccessor(dir state.Dir) (*successor, error) {
+	raw, err := os.ReadFile(dir.OrcaKeeperSuccessor())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var next successor
+	return &next, json.Unmarshal(raw, &next)
+}
+
+func offerSuccessor(dir state.Dir, self successor) error {
+	if releaseParts(self.Version) == nil {
+		return nil
+	}
+	offered, err := readSuccessor(dir)
+	if err != nil || (offered != nil && !newerRelease(self.Version, offered.Version)) {
+		return err
+	}
+	return state.Save(dir.OrcaKeeperSuccessor(), self)
+}
+
+func newerRelease(candidate, running string) bool {
+	a, b := releaseParts(candidate), releaseParts(running)
+	return a != nil && b != nil && slices.Compare(a, b) > 0
+}
+
+func releaseParts(v string) []int {
+	fields := strings.Split(v, ".")
+	if len(fields) != 3 {
+		return nil
+	}
+	parts := make([]int, 3)
+	for i, field := range fields {
+		n, err := strconv.Atoi(field)
+		if err != nil || strconv.Itoa(n) != field || n < 0 {
+			return nil
+		}
+		parts[i] = n
+	}
+	return parts
 }
 
 func reopenForwards(ctx context.Context, dir state.Dir, log *slog.Logger, storage storageCheck, gone map[string]time.Time) (int, error) {
@@ -238,48 +331,61 @@ func reopenForward(ctx context.Context, dir state.Dir, task *orcaTask) (bool, er
 	return true, nil
 }
 
-type appTokens struct {
+type renewal struct {
+	key     string
 	command []string
+	capture func(context.Context, []string) ([]byte, time.Time, error)
+	script  string
+	line    []byte
+	expires time.Time
 	sent    map[string][]byte
 }
 
-func (a appTokens) renew(ctx context.Context, dir state.Dir, log *slog.Logger) error {
-	if len(a.command) == 0 {
+func captureAppToken(ctx context.Context, command []string) ([]byte, time.Time, error) {
+	line, err := captureKey(ctx, command)
+	return line, time.Time{}, err
+}
+
+func (r *renewal) renew(ctx context.Context, dir state.Dir, log *slog.Logger) error {
+	if len(r.command) == 0 {
 		return nil
 	}
-	line, err := captureKey(ctx, a.command)
-	if err != nil {
-		log.Warn("the orca.keys.github_app command failed, so each worker reads through the GitHub App token it holds until a later pass renews it", "error", err)
-		return nil
+	if time.Until(r.expires) < renewBefore {
+		line, expires, err := r.capture(ctx, r.command)
+		if err != nil {
+			log.Warn("an orca.keys command keep renews failed, so each worker reads through what it holds until a later pass renews it", "key", r.key, "error", err)
+			return nil
+		}
+		r.line, r.expires = line, expires
 	}
 	names, err := keptNames(dir)
 	if err != nil {
 		return err
 	}
 	for _, name := range names {
-		if bytes.Equal(a.sent[name], line) {
+		if bytes.Equal(r.sent[name], r.line) {
 			continue
 		}
 		task, err := loadTask(dir, name)
 		if err != nil {
 			return err
 		}
-		if err := sendAppToken(ctx, task, line); err != nil {
-			log.Warn("a kept task's GitHub App token did not renew, and the next pass tries again", "workspace", name, "error", err)
+		if err := r.send(ctx, task); err != nil {
+			log.Warn("a kept task's renewed key did not reach it, and the next pass tries again", "key", r.key, "workspace", name, "error", err)
 			continue
 		}
-		a.sent[name] = line
+		r.sent[name] = r.line
 	}
 	return nil
 }
 
-func sendAppToken(ctx context.Context, task *orcaTask, line []byte) error {
+func (r *renewal) send(ctx context.Context, task *orcaTask) error {
 	ctx, cancel := context.WithTimeout(ctx, answerWithin)
 	defer cancel()
 	if !task.Forward.up(ctx) {
 		return errors.New("its forward is down")
 	}
-	_, err := task.run(ctx, orca.GitHubAppScript, bytes.NewReader(line))
+	_, err := task.run(ctx, r.script, bytes.NewReader(r.line))
 	return err
 }
 

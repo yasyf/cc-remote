@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca.keys.aws` keeps a worker's AWS session fresh for as long as the
+  worker runs.** An AWS session that `orca.keys.env` exports lasts as long as
+  the session the launch minted, four hours for a typical role, and a worker
+  waiting longer loses its AWS access until it is relaunched. When the config
+  names a command for `aws`, such as
+  `[aws, configure, export-credentials, --profile, <name>, --format, process]`,
+  cc-remote checks it prints process credentials with an `Expiration`, sends
+  them down the key pipe as one line, and the worker's terminal writes them to
+  `/dev/shm/cc-remote/aws.json` and points `AWS_CONFIG_FILE` at a profile that
+  reads that file through `credential_process`. `cc-remote orca keep` runs the
+  command again once the session it last sent has under an hour left and writes
+  the new one into every kept worker's file, so the AWS CLI and SDKs on the
+  worker pick it up when the one they hold expires. Leaving it unconfigured
+  changes nothing.
 - **`orca.keys.github_app` moves a worker's GitHub reads onto a GitHub App.**
   A worker's ccx read GitHub on `GH_TOKEN`, the launcher's own token, outside
   ccx's cache and on the launcher's rate limit, because the worker has no app
@@ -64,6 +78,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A launch from a newer release takes `cc-remote orca keep` over.** One keep
+  runs per state directory, and a newer keep that found an older one running
+  exited, so a keep started before a pin change ran the old release's code
+  until no task was kept, which on a busy Mac is never: a keep from 0.27.29 ran
+  for days past the 0.27.32 pin, and no worker's GitHub App token was ever
+  renewed. A keep that finds another running now records itself as the
+  successor, and the running keep execs a newer release's keep at its next
+  pass. A keep of the same or an older release changes nothing.
 - **A resume of a cold-booted Sprite waits for the payload that holds its
   tools.** A Sprite that slept boots again when a resume first reaches it, and
   it answers commands before its `cc-remote-payload` service has mounted the

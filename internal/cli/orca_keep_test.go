@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasyf/cc-remote/internal/config"
+	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
 )
@@ -136,7 +141,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("hold the keeper lock = %t, %v", held, err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, appTokens{}); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, nil, successor{}); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep beside a running one = %v, opened %q; want it to exit at once", err, opened())
 	}
 	unlock()
@@ -144,7 +149,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err := state.Remove(dir.OrcaKept("lane-a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, appTokens{}); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, nil, successor{}); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep with nothing kept = %v, opened %q; want it to exit at once", err, opened())
 	}
 }
@@ -292,7 +297,7 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 		}
 		return string(raw)
 	}
-	tokens := appTokens{command: []string{mint}, sent: map[string][]byte{}}
+	tokens := &renewal{key: config.KeyGitHubApp, command: []string{mint}, capture: captureAppToken, script: orca.GitHubAppScript, sent: map[string][]byte{}}
 	pass := func(line string) {
 		t.Helper()
 		if err := os.WriteFile(minted, []byte(line), 0o600); err != nil {
@@ -326,5 +331,123 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 	}
 	if err := tokens.renew(t.Context(), dir, quiet); err != nil || received("lane-b") != `{"token":"first"}{"token":"second"}` {
 		t.Errorf("a failed mint = %v, lane-b got %q; want no error and nothing new sent", err, received("lane-b"))
+	}
+}
+
+func TestKeepSendsEachKeptWorkerANewAWSSessionOnceTheOneItHoldsHasUnderAnHourLeft(t *testing.T) {
+	w := newWarmPool(t)
+	standInKeeper(t)
+	dir := w.session.Config.State()
+	quiet := slog.New(slog.DiscardHandler)
+	w.keptLanes("lane-a", "lane-b")
+	bin, sent := t.TempDir(), t.TempDir()
+	ssh := "#!/bin/sh\nfor arg do\n  test \"$arg\" = sh && break\n  host=$arg\ndone\ncase \" $* \" in *' -O check '*) exit 0;; esac\ncat >> " + sent + "/\"$host\"\necho >> " + sent + "/\"$host\"\n"
+	minted, mints := filepath.Join(bin, "minted"), filepath.Join(bin, "mints")
+	mint := filepath.Join(bin, "mint")
+	for path, body := range map[string]string{filepath.Join(bin, "ssh"): ssh, mint: "#!/bin/sh\necho >> " + mints + "\ncat " + minted + "\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	session := func(id string, left time.Duration) string {
+		return fmt.Sprintf("{\n  \"Version\": 1,\n  \"AccessKeyId\": %q,\n  \"SecretAccessKey\": \"secret\",\n  \"SessionToken\": \"token\",\n  \"Expiration\": %q\n}\n", id, time.Now().Add(left).UTC().Format(time.RFC3339))
+	}
+	line := func(out string) string {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, []byte(out)); err != nil {
+			t.Fatal(err)
+		}
+		return compact.String() + "\n"
+	}
+	sessions := &renewal{key: config.KeyAWS, command: []string{mint}, capture: captureAWS, script: orca.AWSScript, sent: map[string][]byte{}}
+	pass := func(out string) {
+		t.Helper()
+		if err := os.WriteFile(minted, []byte(out), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := sessions.renew(t.Context(), dir, quiet); err != nil {
+			t.Fatal(err)
+		}
+	}
+	received := func(name string) string {
+		raw, err := os.ReadFile(filepath.Join(sent, name))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	minting := func() int {
+		raw, err := os.ReadFile(mints)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return strings.Count(string(raw), "\n")
+	}
+
+	expiring, fresh, unused := session("ASIA-expiring", 50*time.Minute), session("ASIA-fresh", 4*time.Hour), session("ASIA-unused", 4*time.Hour)
+	pass(expiring)
+	pass(fresh)
+	pass(unused)
+	want := line(expiring) + line(fresh)
+	if a, b := received("lane-a"), received("lane-b"); a != want || b != want {
+		t.Errorf("lane-a got %q and lane-b %q; want the session with 50 minutes left, then the fresh one, each once", a, b)
+	}
+	if n := minting(); n != 2 {
+		t.Errorf("the mint ran %d times over three passes, want twice: once for the first session and once because it had under an hour left, not while the fresh one has four hours", n)
+	}
+}
+
+func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
+	w := newWarmPool(t)
+	stubForwards(t, nil, nil)
+	standInKeeper(t)
+	dir := w.session.Config.State()
+	quiet := slog.New(slog.DiscardHandler)
+	w.keptLanes("lane-a")
+	var started []successor
+	original := execKeeper
+	execKeeper = func(next successor) error {
+		started = append(started, next)
+		return errors.New("exec refused")
+	}
+	t.Cleanup(func() { execKeeper = original })
+	running := successor{Version: "0.27.9", Binary: "/running/cc-remote", Config: "/running/config.yaml"}
+	newer := successor{Version: "0.27.10", Binary: "/newer/cc-remote", Config: "/newer/config.yaml"}
+	older := successor{Version: "0.27.8", Binary: "/older/cc-remote", Config: "/older/config.yaml"}
+
+	unlock, held, err := state.TryLock(dir.OrcaKeeper())
+	if err != nil || !held {
+		t.Fatalf("hold the keeper lock = %t, %v", held, err)
+	}
+	for _, offered := range []successor{newer, older, {Version: "dev", Binary: "/dev/cc-remote"}} {
+		if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, nil, offered); err != nil {
+			t.Fatalf("a %s keep beside the running one = %v; want it to exit at once", offered.Version, err)
+		}
+	}
+	unlock()
+	if next, err := readSuccessor(dir); err != nil || next == nil || *next != newer {
+		t.Fatalf("recorded successor = %+v, %v; want the 0.27.10 keep, not the older or dev one offered after it", next, err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, nil, running); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the 0.27.9 keep = %v; want it to keep holding after the handoff failed", err)
+	}
+	if !slices.Equal(started, []successor{newer}) {
+		t.Errorf("keeps started = %+v, want the 0.27.10 one once", started)
+	}
+	if _, err := os.Stat(dir.OrcaKeeperSuccessor()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the successor that did not start is still recorded: %v", err)
+	}
+
+	if err := state.Save(dir.OrcaKeeperSuccessor(), older); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, nil, running); !errors.Is(err, context.DeadlineExceeded) || len(started) != 1 {
+		t.Errorf("the 0.27.9 keep beside a recorded 0.27.8 successor = %v, started %+v; want no handoff to an older release", err, started)
 	}
 }
