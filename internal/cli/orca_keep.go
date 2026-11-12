@@ -28,7 +28,8 @@ const (
 )
 
 var (
-	reopenWithin = time.Minute
+	reopenWithin = 2 * time.Minute
+	answerWithin = time.Minute
 	storageGone  = 10 * time.Minute
 )
 
@@ -49,11 +50,12 @@ func newOrcaKeepCmd(runner orca.Runner) *cobra.Command {
 		Short: "Reopen the SSH forward of every kept task whose forward has exited, until no task is kept",
 		Long: `keep runs detached, started by orca create, prepare, and reconnect once a task's worker answers. Every
 30 seconds it checks the SSH forward of each kept task and reopens one that has exited, as reconnect
-does, without touching the runtime or the worker. Each reopen gets one minute, so a machine that
-answers nothing costs one pass a minute, never the forwards after it. When a reopen fails, keep asks
-the provider whether the machine's storage is reachable, and once a failing machine has reported its
-storage gone for 10 minutes, keep releases its task, logs that once, and reopens it no more; orca
-reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
+does, without touching the runtime or the worker. Each reopen gets two minutes, since reopening the
+forward of a cold Sprite waits for it to boot, which took about 67 seconds to its Orca runtime, so a
+machine that answers nothing costs one pass two minutes, never the forwards after it. When a reopen
+fails, keep asks the provider whether the machine's storage is reachable, and once a failing machine
+has reported its storage gone for 10 minutes, keep releases its task, logs that once, and reopens it
+no more; orca reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
 never reopens a stopped lane's forward. Every 10 minutes, starting with its first pass, it also runs
 orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
 reading and retrying. When orca.keys.github_app names a command, each pass runs it and writes a line it
@@ -272,7 +274,7 @@ func (a appTokens) renew(ctx context.Context, dir state.Dir, log *slog.Logger) e
 }
 
 func sendAppToken(ctx context.Context, task *orcaTask, line []byte) error {
-	ctx, cancel := context.WithTimeout(ctx, reopenWithin)
+	ctx, cancel := context.WithTimeout(ctx, answerWithin)
 	defer cancel()
 	if !task.Forward.up(ctx) {
 		return errors.New("its forward is down")
@@ -282,7 +284,7 @@ func sendAppToken(ctx context.Context, task *orcaTask, line []byte) error {
 }
 
 func storageLost(ctx context.Context, storage storageCheck, task *orcaTask) bool {
-	ctx, cancel := context.WithTimeout(ctx, reopenWithin)
+	ctx, cancel := context.WithTimeout(ctx, answerWithin)
 	defer cancel()
 	return errors.Is(storage(ctx, task), providers.ErrNoStorage)
 }

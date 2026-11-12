@@ -404,9 +404,14 @@ func TestKeyCleanupHasItsOwnDeadlineAfterCancellation(t *testing.T) {
 	}
 }
 
-func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
-	for _, runtimeID := range []string{"rt-1", "rt-2"} {
-		t.Run(runtimeID, func(t *testing.T) {
+func TestReconnectRestoresTheRecordedTransportToTheRuntimeTheMachineRuns(t *testing.T) {
+	tests := []struct{ machine, environment, want string }{
+		{"rt-1", "rt-1", "rt-1"},
+		{"rt-2", "rt-2", "rt-2"},
+		{"rt-2", "rt-1", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.machine+" answered from "+tt.environment, func(t *testing.T) {
 			dir, bin := state.Dir(t.TempDir()), t.TempDir()
 			control, err := state.NewOrcaControl()
 			if err != nil {
@@ -416,7 +421,9 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 			if err := os.Remove(filepath.Dir(control)); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\ncase \" $* \" in *' -O check '*) exit 1;; esac\n"), 0o700); err != nil {
+			ready := fmt.Sprintf(`{"type":"orca_server_ready","schemaVersion":1,"runtimeId":%q,"boundEndpoint":"ws://0.0.0.0:7001","advertisedEndpoint":"ws://127.0.0.1:7001","pairing":{"available":true,"url":"orca://pair?code=private"}}`, tt.machine)
+			ssh := "#!/bin/sh\ncase \" $* \" in *' -O check '*) exit 1;; *' sh -c '*) printf '%s\\n' '" + ready + "';; esac\n"
+			if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(ssh), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
@@ -435,17 +442,17 @@ func TestReconnectOnlyRestoresTheRecordedTransport(t *testing.T) {
 				if !slices.Equal(args, []string{"status", "--environment", "task-a", "--json"}) {
 					t.Fatalf("unexpected runtime operation: %v", args)
 				}
-				return fmt.Appendf(nil, `{"ok":true,"result":{"runtime":{"reachable":true,"runtimeId":%q}},"_meta":{"runtimeId":%q}}`, runtimeID, runtimeID), nil
+				return fmt.Appendf(nil, `{"ok":true,"result":{"runtime":{"reachable":true,"runtimeId":%q}},"_meta":{"runtimeId":%q}}`, tt.environment, tt.environment), nil
 			})
 			cmd := newOrcaReconnectCmd(runner)
 			cmd.SetArgs([]string{"task-a", "--config", path})
 			cmd.SetOut(io.Discard)
 			err = cmd.ExecuteContext(t.Context())
-			if (err == nil) != (runtimeID == "rt-1") || calls != 1 {
+			if (err == nil) != (tt.want != "") || calls != 1 {
 				t.Fatalf("reconnect = %v, calls = %d", err, calls)
 			}
 			loaded, err := loadTask(dir, "task-a")
-			if err != nil || loaded.RuntimeID != "rt-1" || *loaded.Forward != *task.Forward {
+			if err != nil || loaded.RuntimeID != cmp.Or(tt.want, "rt-1") || *loaded.Forward != *task.Forward {
 				t.Errorf("recorded task changed: %+v, %v", loaded, err)
 			}
 			if info, err := os.Stat(filepath.Dir(control)); err != nil || info.Mode().Perm() != 0o700 {

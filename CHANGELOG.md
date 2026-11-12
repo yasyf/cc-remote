@@ -64,6 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A resume of a cold-booted Sprite waits for the payload that holds its
+  tools.** A Sprite that slept boots again when a resume first reaches it, and
+  it answers commands before its `cc-remote-payload` service has mounted the
+  payload, so the resume's plugin configuration found no `claude` and failed.
+  The resume and a warm-pool claim now run that service's mount script
+  themselves right after the wake, waiting up to three minutes, and log the
+  wait as the `payload.boot` phase.
+- **`orca reconnect` and `resume --connection server` adopt the runtime a cold
+  boot starts.** A Sprite's boot starts a new Orca runtime with a new runtime
+  id. Both commands refused any runtime but the saved one, so a lane on a
+  rebooted Sprite could not be reached again. Both now read the ready line of
+  the runtime the machine runs, `reconnect` waiting up to two minutes for it,
+  and record its id; `reconnect` still confirms the environment answers from
+  it.
+- **`orca keep` gives a forward's reopen two minutes.** Reopening the forward
+  of a cold Sprite waits for its boot, which took about 67 seconds to its Orca
+  runtime, so the one-minute deadline killed the reopen first.
 - **A spare that slept in the warm pool is claimed again.** A Sprite keeps its
   home on a volume of its local disk, which a boot mounts again through a
   service. A spare left unclaimed long enough to sleep boots when the claim

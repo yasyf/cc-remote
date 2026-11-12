@@ -58,6 +58,7 @@ const (
 	localDiskBoot    = "/opt/cc-remote/local-disk.sh"
 	MemoryService    = "cc-remote-memory"
 	memoryBoot       = "/opt/cc-remote/memory.sh"
+	payloadBoot      = "/opt/cc-remote/payload-mount.sh"
 )
 
 const BaseDriftListing = "(-payload +machine); rebuild the payload on this base:\n"
@@ -134,6 +135,11 @@ sprite-env services create ` + MemoryService + ` --cmd sudo --args "-n,sh,-c,$bo
 const rebindLocalDisk = `if [ -x ` + localDiskBoot + ` ]; then
   sudo -n ` + localDiskBoot + `
   sprite-env services start ` + LocalDiskService + ` --duration 1ms
+fi
+`
+
+const mountPayloadForBoot = `if [ -x ` + payloadBoot + ` ]; then
+  sudo -n ` + payloadBoot + `
 fi
 `
 
@@ -439,6 +445,13 @@ func (s Scripts) LimitMemory(ctx context.Context, exec Exec, limit, high int64) 
 func (s Scripts) RebindLocalDisk(ctx context.Context, exec Exec) error {
 	if err := exec(ctx, []string{"sh", "-c", rebindLocalDisk}, nil); err != nil {
 		return fmt.Errorf("bind the home on the local disk again: %w", err)
+	}
+	return nil
+}
+
+func (s Scripts) MountPayloadForBoot(ctx context.Context, exec Exec) error {
+	if err := exec(ctx, []string{"sh", "-c", mountPayloadForBoot}, nil); err != nil {
+		return fmt.Errorf("mount the payload for this boot: %w", err)
 	}
 	return nil
 }

@@ -657,11 +657,12 @@ func newOrcaReconnectCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "reconnect <name>",
-		Short: "Restore a task's SSH forward to its recorded live Orca runtime",
-		Long: `reconnect reopens the recorded SSH forward when it is down and confirms the paired environment
-answers from the recorded live runtime, then keeps the task so orca keep reopens its forward if it
-exits again. It does not resume a machine or start a runtime or worker. Recovery after a runtime
-exits or a machine loses its processes is not supported by this command.`,
+		Short: "Restore a task's SSH forward to the Orca runtime its machine runs",
+		Long: `reconnect reopens the recorded SSH forward when it is down, reads the ready line of the Orca runtime
+the machine's launcher runs, waiting up to two minutes for a cold-booted machine to print it, and
+confirms the paired environment answers from that runtime, then keeps the task so orca keep reopens
+its forward if it exits again. A runtime other than the saved one, as a cold boot starts, is adopted
+into the task. It does not resume a machine or start a runtime or worker.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := flags.load()
@@ -679,7 +680,18 @@ exits or a machine loses its processes is not supported by this command.`,
 			if err := driver.save(task); err != nil {
 				return err
 			}
-			if _, err := orca.NewClient(runner).On(task.Environment, task.RuntimeID).Status(cmd.Context()); err != nil {
+			probed, err := task.run(cmd.Context(), orca.ProbeScript, nil)
+			if err != nil {
+				return err
+			}
+			ready, _, err := orca.ParseReady(lastReady(probed), task.runtime(orca.Runtime{}).Port, task.Port)
+			if err != nil {
+				return err
+			}
+			if _, err := orca.NewClient(runner).On(task.Environment, ready.RuntimeID).Status(cmd.Context()); err != nil {
+				return err
+			}
+			if err := driver.adopt(task, ready); err != nil {
 				return err
 			}
 			if err := driver.keep(task, cfg.Path); err != nil {
@@ -940,7 +952,7 @@ func orcaServe(ctx context.Context, session *workspace.Session, result *workspac
 
 func (d orcaDriver) serve(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime, resumed bool) (string, error) {
 	if resumed {
-		pairing, err := d.resumed(ctx, session, task, runtime)
+		pairing, err := d.resumed(ctx, session, task)
 		if err != nil {
 			return "", err
 		}
@@ -999,24 +1011,29 @@ func (d orcaDriver) startOn(ctx context.Context, session *workspace.Session, mac
 	return ready, pairing, nil
 }
 
-func (d orcaDriver) resumed(ctx context.Context, session *workspace.Session, task *orcaTask, runtime orca.Runtime) (string, error) {
-	runtime = task.runtime(runtime)
+func (d orcaDriver) resumed(ctx context.Context, session *workspace.Session, task *orcaTask) (string, error) {
 	result, err := session.Provider.Exec(ctx, task.Machine, []string{"sh", "-c", orca.ProbeScript}, nil)
 	if err != nil {
 		return "", err
 	}
 	if result.ExitCode != 0 {
-		return "", fmt.Errorf("%s has no running Orca runtime %s to resume (%s); none is started in its place, and the saved task is kept", task.Workspace, task.RuntimeID, bytes.TrimSpace(result.Stderr))
+		return "", fmt.Errorf("%s has no running Orca runtime to resume (%s); none is started in its place, and the saved task is kept", task.Workspace, bytes.TrimSpace(result.Stderr))
 	}
-	ready, pairing, err := orca.ParseReady(lastReady(result.Stdout), runtime.Port, task.Port)
+	ready, pairing, err := orca.ParseReady(lastReady(result.Stdout), task.runtime(orca.Runtime{}).Port, task.Port)
 	if err != nil {
 		return "", err
 	}
-	if ready.RuntimeID != task.RuntimeID {
-		return "", fmt.Errorf("%s now answers as Orca runtime %s, not its saved %s; the other runtime is not adopted, and the saved task and every process are kept", task.Workspace, ready.RuntimeID, task.RuntimeID)
+	return pairing, d.adopt(task, ready)
+}
+
+func (d orcaDriver) adopt(task *orcaTask, ready orca.Ready) error {
+	if ready.RuntimeID == task.RuntimeID {
+		d.log.Info("the Orca runtime survived", "machine", task.Machine, "runtime", ready.RuntimeID)
+		return nil
 	}
-	d.log.Info("the Orca runtime survived the resume", "machine", task.Machine, "runtime", ready.RuntimeID)
-	return pairing, nil
+	d.log.Info("adopted the Orca runtime the machine started since the task was saved", "machine", task.Machine, "runtime", ready.RuntimeID, "saved", task.RuntimeID)
+	task.RuntimeID, task.ManagedServer = ready.RuntimeID, ready.ManagedServer
+	return d.save(task)
 }
 
 func lastReady(stdout []byte) []byte {
