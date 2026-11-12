@@ -24,7 +24,7 @@ func (w *firstWorker) pairedTask(name, provider, environmentID string, stopped b
 	}
 }
 
-func TestPruneRemovesOnlyTheEnvironmentsOfStoppedLanesAndGoneMachines(t *testing.T) {
+func TestPruneRemovesOnlyTheEnvironmentsOfStoppedLanesGoneMachinesAndDestroyedWorkspaces(t *testing.T) {
 	w := newWarmPool(t)
 	w.laneWorkspace("lane-live")
 	w.laneWorkspace("lane-stopped")
@@ -33,17 +33,24 @@ func TestPruneRemovesOnlyTheEnvironmentsOfStoppedLanesAndGoneMachines(t *testing
 	w.pairedTask("lane-gone", "fake", "env-gone", false)
 	w.pairedTask("lane-repaired", "fake", "env-repaired-old", false)
 	w.pairedTask("lane-elsewhere", "other", "env-elsewhere", false)
+	w.laneWorkspace("lane-destroyed")
+	w.pairedTask("lane-destroyed", "fake", "env-destroyed", false)
+	if err := state.Remove(w.session.Config.State().Workspace("lane-destroyed")); err != nil {
+		t.Fatal(err)
+	}
 	saved := []orca.Environment{
 		{ID: "env-live", Name: "lane-live"},
 		{ID: "env-stopped", Name: "lane-stopped"},
 		{ID: "env-gone", Name: "lane-gone"},
 		{ID: "env-repaired-new", Name: "lane-repaired"},
 		{ID: "env-elsewhere", Name: "lane-elsewhere"},
+		{ID: "env-destroyed", Name: "lane-destroyed"},
 		{ID: "env-foreign", Name: "someone-else"},
 	}
 	want := []prunedEnvironment{
 		{Workspace: "lane-stopped", Environment: "env-stopped", Reason: prunedStopped},
 		{Workspace: "lane-gone", Environment: "env-gone", Reason: prunedGone},
+		{Workspace: "lane-destroyed", Environment: "env-destroyed", Reason: prunedDestroyed},
 	}
 
 	dry := newSavedEnvironments(t, saved...)
@@ -63,11 +70,11 @@ func TestPruneRemovesOnlyTheEnvironmentsOfStoppedLanesAndGoneMachines(t *testing
 	if pruned.DryRun || !slices.Equal(pruned.Forgotten, want) {
 		t.Errorf("prune = %+v, want %+v", pruned, want)
 	}
-	if !slices.Equal(environments.removed, []string{"env-stopped", "env-gone"}) {
-		t.Errorf("removed %q, want the stopped lane's and the gone machine's environments only", environments.removed)
+	if !slices.Equal(environments.removed, []string{"env-stopped", "env-gone", "env-destroyed"}) {
+		t.Errorf("removed %q, want the stopped lane's, the gone machine's, and the destroyed workspace's environments only", environments.removed)
 	}
 	dir := w.session.Config.State()
-	for name, kept := range map[string]bool{"lane-live": true, "lane-stopped": true, "lane-gone": false, "lane-repaired": true, "lane-elsewhere": true} {
+	for name, kept := range map[string]bool{"lane-live": true, "lane-stopped": true, "lane-gone": false, "lane-destroyed": false, "lane-repaired": true, "lane-elsewhere": true} {
 		if _, err := os.Stat(dir.OrcaKept(name)); (err == nil) != kept {
 			t.Errorf("%s kept marker after prune: %v, want kept %t", name, err, kept)
 		}
