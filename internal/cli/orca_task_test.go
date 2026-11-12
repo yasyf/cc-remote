@@ -1255,6 +1255,19 @@ func TestExistingPrepareStartsTheFirstWorkerOnTheRetainedCheckout(t *testing.T) 
 	w.free("task-a")
 }
 
+type forgettingOrca struct {
+	*scriptedOrca
+	list, rm, emptied string
+}
+
+func (f *forgettingOrca) Run(ctx context.Context, args ...string) ([]byte, error) {
+	reply, err := f.scriptedOrca.Run(ctx, args...)
+	if strings.Join(args, " ") == f.rm {
+		f.replies[f.list] = f.emptied
+	}
+	return reply, err
+}
+
 func TestExistingPrepareContinuesTheRecordedTaskOnItsRetainedCheckout(t *testing.T) {
 	w := newFirstWorker(t, nil, true)
 	first, _ := w.native()
@@ -1273,12 +1286,13 @@ func TestExistingPrepareContinuesTheRecordedTaskOnItsRetainedCheckout(t *testing
 	status := gitOutput(t, w.root, "status", "--porcelain", "--untracked-files=all")
 	calls, ssh := len(w.provider.Calls()), len(sshCalls(t))
 	native, commands := w.native()
-	forget := []string{"environment list --json", "environment rm --environment env-1 --json"}
+	forget := []string{"environment list --json", "environment rm --environment env-1 --json", "environment list --json"}
 	native.replies[forget[0]] = `{"id":"local","ok":true,"result":{"environments":[{"id":"env-1","name":"task-a"}]},"_meta":{"runtimeId":"local"}}`
 	native.replies[forget[1]] = `{"id":"local","ok":true,"result":{"removed":{"id":"env-1"}},"_meta":{"runtimeId":"local"}}`
+	forgetting := &forgettingOrca{scriptedOrca: native, list: forget[0], rm: forget[1], emptied: `{"id":"local","ok":true,"result":{"environments":[]},"_meta":{"runtimeId":"local"}}`}
 	launch := orcaLaunch{agent: firstAgent, existing: true, author: firstAuthor}
 	var out bytes.Buffer
-	err := launch.start(t.Context(), &out, w.session, native, orca.Runtime{Entry: "tools/orca/AppRun", Supervised: true}, "task-a", func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
+	err := launch.start(t.Context(), &out, w.session, forgetting, orca.Runtime{Entry: "tools/orca/AppRun", Supervised: true}, "task-a", func(ctx context.Context, driver orcaDriver, task *orcaTask) error {
 		return driver.publish(ctx, task, []byte("Read every line.\n"))
 	})
 	if err != nil {
