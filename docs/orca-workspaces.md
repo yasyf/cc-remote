@@ -361,10 +361,10 @@ Neither command initializes WordNet. The brief of a task that needs it in place
 tells the worker to
 [provision it first](tool-inventory.md#provision-wordnet-for-a-task-that-needs-it).
 
-### Prepare the first worker on a recorded workspace
+### Prepare a worker on a recorded workspace
 
-`prepare --existing` starts the first worker of a workspace that
-`cc-remote create` already made, instead of creating a machine. Pass the
+`prepare --existing` starts a worker on a workspace that `cc-remote create` or
+the warm pool already made, instead of creating a machine. Pass the
 workspace's recorded provider and profile:
 
 ```sh
@@ -379,12 +379,22 @@ resets, or cleans, and it records the checkout's actual HEAD as `baseCommit`.
 It takes no `--ref`. Before it reads the API key or starts the runtime, it
 refuses when:
 
-- the workspace already has an Orca task record, complete or partial
 - the recorded machine is missing or lacks the workspace's ownership label,
   as a same-name replacement does
 - the configured project root is not the checkout's top level, or its origin
   is not the configured repository
-- `$HOME/.cc-remote/orca` already exists on the machine
+- the workspace has no Orca task record and `$HOME/.cc-remote/orca` already
+  exists on the machine
+
+A workspace whose Orca task is recorded, complete or partial, is continued, as
+a relaunch of a lane that died with work on its machine needs. The command
+closes that task's forward, removes its Orca environment, and restarts the
+`cc-remote-orca` service, which ends any worker the earlier task left running
+and starts a runtime whose ready line it then reads. The new worker starts on
+the same checkout with the earlier worker's commits and uncommitted changes in
+place, and its brief and task record replace the earlier ones. Only a machine
+whose runtime runs as a sprite-env service is continued; on any other the
+command refuses before it changes anything.
 
 The key, worker, brief, and task record then follow the ordinary `prepare`
 steps. A failure keeps the machine, any saved task record, and any started
@@ -503,7 +513,8 @@ The relaunch then claims a warm workspace. The first worker on a machine never
 adopts the runtime state an earlier one left, so the relaunch does not reuse
 the lane's own workspace. With no warm workspace ready it is refused, because
 it cannot create a second workspace under the lane's name; wait for a pool
-fill to ready one, then launch again.
+fill to ready one, then launch again. A lane that died with work on its own
+workspace is continued there with `prepare --existing` instead.
 
 A ready workspace the provider cannot answer for while it is being claimed,
 such as a Sprites 503, stays ready, and the claim moves to the next one. The

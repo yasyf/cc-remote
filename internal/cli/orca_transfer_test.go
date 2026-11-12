@@ -40,6 +40,7 @@ func fakeRemote(t *testing.T) string {
 	script := `#!/bin/sh
 for arg do
   if [ "$arg" = check ]; then printf 'check\0' >> "$SSH_LOG"; exit 0; fi
+  if [ "$arg" = exit ]; then printf 'exit\0' >> "$SSH_LOG"; exit 0; fi
 done
 for script do :; done
 printf '%s\0' "$script" >> "$SSH_LOG"
@@ -83,6 +84,8 @@ func sshCalls(t *testing.T) []string {
 		switch {
 		case script == "check":
 			kind = "check"
+		case script == "exit":
+			kind = "exit"
 		case strings.Contains(script, "orca guest-bootstrap"):
 			kind = "guest-bootstrap"
 		case strings.Contains(script, "mkfifo"):
@@ -224,6 +227,36 @@ func TestPublishCopiesTheExactBriefOutsideTheCheckout(t *testing.T) {
 	}
 }
 
+func TestPublishReplacesTheBriefAnEarlierTaskLeft(t *testing.T) {
+	home := fakeRemote(t)
+	root, _ := gitCheckout(t)
+	dir := filepath.Join(home, ".cc-remote", "orca", "tasks", "task-a")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.md")
+	if err := os.WriteFile(elsewhere, []byte("kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(dir, briefName)); err != nil {
+		t.Fatal(err)
+	}
+	driver := orcaDriver{state: state.Dir(t.TempDir()), log: slog.New(slog.DiscardHandler)}
+	task := &orcaTask{SchemaVersion: orcaTaskSchema, Workspace: "task-a", Machine: "task-a", ProjectRoot: root, Forward: &orcaTunnel{Host: "task-a"}, Terminal: "term-2"}
+	if err := driver.publish(t.Context(), task, []byte("Continue.\n")); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(task.Brief.Path); err != nil || !info.Mode().IsRegular() {
+		t.Errorf("the brief at %s = %v, %v; want a regular file", task.Brief.Path, info, err)
+	}
+	if copied, err := os.ReadFile(task.Brief.Path); err != nil || string(copied) != "Continue.\n" {
+		t.Errorf("the brief = %q, %v", copied, err)
+	}
+	if kept, err := os.ReadFile(elsewhere); err != nil || string(kept) != "kept\n" {
+		t.Errorf("the write followed the earlier link: %q, %v", kept, err)
+	}
+}
+
 func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -233,11 +266,6 @@ func TestPublishRefusesAnUnverifiedCopy(t *testing.T) {
 		ssh     []string
 	}{
 		{"altered bytes", func(t *testing.T, _, _ string) { t.Setenv("REMOTE_CORRUPT", "1") }, "not the brief's 12 bytes", true, []string{"head", "brief"}},
-		{"directory already there", func(t *testing.T, home, _ string) {
-			if err := os.MkdirAll(filepath.Join(home, ".cc-remote", "orca", "tasks", "task-a"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}, "copy the brief on task-a exited 1: its remote output is withheld", true, []string{"head", "brief"}},
 		{"state linked into the checkout", func(t *testing.T, home, root string) {
 			if err := os.Mkdir(filepath.Join(root, "state"), 0o700); err != nil {
 				t.Fatal(err)
