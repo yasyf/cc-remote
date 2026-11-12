@@ -65,7 +65,11 @@ type jobsKeep struct {
 	Coalesced bool     `json:"coalesced,omitempty"`
 }
 
-type CommandExit struct{ *exec.ExitError }
+type CommandExit struct{ Code int }
+
+func (e *CommandExit) Error() string { return fmt.Sprintf("exit status %d", e.Code) }
+
+func (e *CommandExit) ExitCode() int { return e.Code }
 
 type jobPool struct {
 	cfg      *config.Config
@@ -375,7 +379,7 @@ func (p *jobPool) run(ctx context.Context, holder string, wait time.Duration, ar
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 	ran := command.Run()
 	if exited, ok := errors.AsType[*exec.ExitError](ran); ok {
-		ran = &CommandExit{exited}
+		ran = &CommandExit{exited.ExitCode()}
 	}
 	return errors.Join(ran, p.release(context.WithoutCancel(ctx), name))
 }

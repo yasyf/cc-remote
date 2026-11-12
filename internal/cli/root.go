@@ -31,6 +31,7 @@ func NewRootCmd() *cobra.Command {
 		newImagesCmd(),
 		newPayloadCmd(),
 		newJobsCmd(),
+		newStepCmd(),
 		newOrcaCmd(runner),
 	)
 	return root
