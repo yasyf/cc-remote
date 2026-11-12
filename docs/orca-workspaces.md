@@ -165,9 +165,9 @@ worker, and exports `CCX_GITHUB_APP_TOKEN_FILE` naming it, so the worker's ccx
 reads GitHub on that installation through its cache instead of on `GH_TOKEN`,
 which stays the token git and gh write with. The app's private key never
 leaves the Mac. A token lasts an hour, so `cc-remote orca keep` runs the
-command again on each pass and writes any line it has not yet written into
-each kept worker's file, and ccx mints a new token once the one it printed has
-under 55 minutes left.
+command of each kept worker's config again on each pass and writes any line it
+has not yet written into that worker's file, and ccx mints a new token once the
+one it printed has under 55 minutes left.
 
 An optional `orca.keys.aws` command, also with no default, prints an AWS
 session as the process credentials
@@ -179,9 +179,9 @@ prints, with its `Expiration`. The worker's terminal writes the session to
 `AWS_CONFIG_FILE` naming it, so the AWS CLI and SDKs on the worker sign with the
 session and read the file again once the session they hold expires. Once the
 session it last printed has under an hour left, `cc-remote orca keep` runs the
-command again and writes the new session into each kept worker's file, so a
-worker's AWS access lasts as long as the worker while the Mac is awake, and the
-identity that mints the session never leaves the Mac. Static AWS variables
+command of each kept worker's config again and writes the new session into that
+worker's file, so a worker's AWS access lasts as long as the worker while the
+Mac is awake, and the identity that mints the session never leaves the Mac. Static AWS variables
 outrank `AWS_CONFIG_FILE`, so an `orca.keys.env` command beside this one must not
 print the session's `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` or
 `AWS_SESSION_TOKEN`.
@@ -318,6 +318,17 @@ ready` for a few seconds. `orca stop` and `destroy` release the task before
 they close its forward, so keep never reopens a stopped lane's forward. A task
 launched by a release without keep is not kept until `reconnect` runs on it.
 keep logs to `orca/keeper.log` in the state directory.
+
+Each kept task records the config its `create`, `prepare` or `reconnect` named
+in its `orca-kept/<workspace>` file in the state directory. Every pass loads
+each of those configs again and renews a task's `orca.keys.github_app` and
+`orca.keys.aws` with the commands its own config names, whatever config the
+running keep started with. A key added to a config reaches the workers launched
+with it at the next pass, with no restart of keep or new release.
+Workers whose configs name the same command share what it prints, so one
+session serves them all. A config that no longer loads is logged on each pass
+and renews nothing for its tasks until it loads again. A task kept by an earlier
+release records no config, so keep renews nothing for it.
 
 A keep that finds another running records itself in `orca/keeper-successor.json`
 when it is a newer release than the successor already recorded there, and exits.

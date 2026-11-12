@@ -90,6 +90,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **`cc-remote orca keep` renews each worker with the keys of the config that
+  launched it.** One keep runs per state directory, and it read
+  `orca.keys.github_app` and `orca.keys.aws` once, from the config of the launch
+  that started it. Lanes launched from other configs got only that config's
+  keys, and a key added to a config reached no worker until a newer release
+  took the keep over. A keep started from a config without `orca.keys.aws`
+  never renewed any worker's AWS session. Each kept task now records the config its
+  `create`, `prepare` or `reconnect` named, and every pass loads that config
+  again and renews the task with the commands it names. Workers whose configs
+  name the same command share one run of it.
 - **A launch from a newer release takes `cc-remote orca keep` over.** One keep
   runs per state directory, and a newer keep that found an older one running
   exited, so a keep started before a pin change ran the old release's code

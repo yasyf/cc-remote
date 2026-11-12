@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,12 +157,48 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 
 func (w *firstWorker) keptLanes(names ...string) {
 	w.t.Helper()
+	w.keptUnder(w.session.Config.Path, names...)
+}
+
+func (w *firstWorker) keptUnder(config string, names ...string) {
+	w.t.Helper()
 	driver := orcaDriver{state: w.session.Config.State(), log: slog.New(slog.DiscardHandler)}
 	for _, name := range names {
 		w.laneWorkspace(name)
-		if err := driver.keep(w.liveTask(name), w.session.Config.Path); err != nil {
+		if err := driver.keep(w.liveTask(name), config); err != nil {
 			w.t.Fatal(err)
 		}
+	}
+}
+
+func keysConfig(t *testing.T, keys map[string]string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeKeys(t, path, keys)
+	return path
+}
+
+func writeKeys(t *testing.T, path string, keys map[string]string) {
+	t.Helper()
+	var named strings.Builder
+	for _, key := range slices.Sorted(maps.Keys(keys)) {
+		fmt.Fprintf(&named, "    %s: [%q]\n", key, keys[key])
+	}
+	body := "repository: https://github.com/example/app\nref: main\nprovider: absent\nprofile: lean\ninventory: missing.yaml\nproviders:\n  absent: {}\nworkspace_dirs:\n  absent: /home/agent\nprofiles:\n  lean: {}\norca:\n  keys:\n" + named.String()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func renewPass(t *testing.T, r *renewal, dir state.Dir) {
+	t.Helper()
+	quiet := slog.New(slog.DiscardHandler)
+	keys, err := keptKeys(dir, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.renew(t.Context(), dir, quiet, keys); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -272,14 +309,6 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 	w := newWarmPool(t)
 	standInKeeper(t)
 	dir := w.session.Config.State()
-	quiet := slog.New(slog.DiscardHandler)
-	driver := orcaDriver{state: dir, log: quiet}
-	for _, name := range []string{"lane-a", "lane-b"} {
-		w.laneWorkspace(name)
-		if err := driver.keep(w.liveTask(name), w.session.Config.Path); err != nil {
-			t.Fatal(err)
-		}
-	}
 	bin, sent, down := t.TempDir(), t.TempDir(), t.TempDir()
 	ssh := "#!/bin/sh\nfor arg do\n  test \"$arg\" = sh && break\n  host=$arg\ndone\ncase \" $* \" in *' -O check '*) test ! -e " + down + "/\"$host\"; exit $?;; esac\ncat >> " + sent + "/\"$host\"\n"
 	minted := filepath.Join(bin, "minted")
@@ -290,6 +319,7 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 		}
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	w.keptUnder(keysConfig(t, map[string]string{config.KeyGitHubApp: mint}), "lane-a", "lane-b")
 	received := func(name string) string {
 		raw, err := os.ReadFile(filepath.Join(sent, name))
 		if err != nil && !os.IsNotExist(err) {
@@ -297,15 +327,13 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 		}
 		return string(raw)
 	}
-	tokens := &renewal{key: config.KeyGitHubApp, command: []string{mint}, capture: captureAppToken, script: orca.GitHubAppScript, sent: map[string][]byte{}}
+	tokens := newRenewal(config.KeyGitHubApp, captureAppToken, orca.GitHubAppScript)
 	pass := func(line string) {
 		t.Helper()
 		if err := os.WriteFile(minted, []byte(line), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := tokens.renew(t.Context(), dir, quiet); err != nil {
-			t.Fatal(err)
-		}
+		renewPass(t, tokens, dir)
 	}
 	if err := os.WriteFile(filepath.Join(down, "lane-b"), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -329,72 +357,133 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 	if err := os.WriteFile(mint, []byte("#!/bin/sh\nexit 3\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := tokens.renew(t.Context(), dir, quiet); err != nil || received("lane-b") != `{"token":"first"}{"token":"second"}` {
-		t.Errorf("a failed mint = %v, lane-b got %q; want no error and nothing new sent", err, received("lane-b"))
+	renewPass(t, tokens, dir)
+	if b := received("lane-b"); b != `{"token":"first"}{"token":"second"}` {
+		t.Errorf("after a failed mint lane-b got %q; want nothing new sent", b)
 	}
+}
+
+type awsWorkers struct {
+	t         *testing.T
+	bin, sent string
+}
+
+func stubAWSWorkers(t *testing.T) awsWorkers {
+	t.Helper()
+	w := awsWorkers{t: t, bin: t.TempDir(), sent: t.TempDir()}
+	ssh := "#!/bin/sh\nfor arg do\n  test \"$arg\" = sh && break\n  host=$arg\ndone\ncase \" $* \" in *' -O check '*) exit 0;; esac\ncat >> " + w.sent + "/\"$host\"\necho >> " + w.sent + "/\"$host\"\n"
+	if err := os.WriteFile(filepath.Join(w.bin, "ssh"), []byte(ssh), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", w.bin+":"+os.Getenv("PATH"))
+	return w
+}
+
+func (w awsWorkers) mints(name, session string) string {
+	w.t.Helper()
+	path := filepath.Join(w.bin, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho >> "+path+".runs\ncat "+path+".out\n"), 0o700); err != nil {
+		w.t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".out", []byte(session), 0o600); err != nil {
+		w.t.Fatal(err)
+	}
+	return path
+}
+
+func (w awsWorkers) runs(name string) int {
+	w.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(w.bin, name+".runs"))
+	if err != nil && !os.IsNotExist(err) {
+		w.t.Fatal(err)
+	}
+	return strings.Count(string(raw), "\n")
+}
+
+func (w awsWorkers) received(name string) string {
+	w.t.Helper()
+	raw, err := os.ReadFile(filepath.Join(w.sent, name))
+	if err != nil && !os.IsNotExist(err) {
+		w.t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func awsSession(id string, left time.Duration) string {
+	return fmt.Sprintf("{\n  \"Version\": 1,\n  \"AccessKeyId\": %q,\n  \"SecretAccessKey\": \"secret\",\n  \"SessionToken\": \"token\",\n  \"Expiration\": %q\n}\n", id, time.Now().Add(left).UTC().Format(time.RFC3339))
+}
+
+func awsLine(t *testing.T, session string) string {
+	t.Helper()
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(session)); err != nil {
+		t.Fatal(err)
+	}
+	return compact.String() + "\n"
 }
 
 func TestKeepSendsEachKeptWorkerANewAWSSessionOnceTheOneItHoldsHasUnderAnHourLeft(t *testing.T) {
 	w := newWarmPool(t)
 	standInKeeper(t)
 	dir := w.session.Config.State()
-	quiet := slog.New(slog.DiscardHandler)
-	w.keptLanes("lane-a", "lane-b")
-	bin, sent := t.TempDir(), t.TempDir()
-	ssh := "#!/bin/sh\nfor arg do\n  test \"$arg\" = sh && break\n  host=$arg\ndone\ncase \" $* \" in *' -O check '*) exit 0;; esac\ncat >> " + sent + "/\"$host\"\necho >> " + sent + "/\"$host\"\n"
-	minted, mints := filepath.Join(bin, "minted"), filepath.Join(bin, "mints")
-	mint := filepath.Join(bin, "mint")
-	for path, body := range map[string]string{filepath.Join(bin, "ssh"): ssh, mint: "#!/bin/sh\necho >> " + mints + "\ncat " + minted + "\n"} {
-		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	session := func(id string, left time.Duration) string {
-		return fmt.Sprintf("{\n  \"Version\": 1,\n  \"AccessKeyId\": %q,\n  \"SecretAccessKey\": \"secret\",\n  \"SessionToken\": \"token\",\n  \"Expiration\": %q\n}\n", id, time.Now().Add(left).UTC().Format(time.RFC3339))
-	}
-	line := func(out string) string {
-		var compact bytes.Buffer
-		if err := json.Compact(&compact, []byte(out)); err != nil {
-			t.Fatal(err)
-		}
-		return compact.String() + "\n"
-	}
-	sessions := &renewal{key: config.KeyAWS, command: []string{mint}, capture: captureAWS, script: orca.AWSScript, sent: map[string][]byte{}}
-	pass := func(out string) {
+	workers := stubAWSWorkers(t)
+	w.keptUnder(keysConfig(t, map[string]string{config.KeyAWS: workers.mints("mint", "")}), "lane-a", "lane-b")
+	sessions := newRenewal(config.KeyAWS, captureAWS, orca.AWSScript)
+	pass := func(session string) {
 		t.Helper()
-		if err := os.WriteFile(minted, []byte(out), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := sessions.renew(t.Context(), dir, quiet); err != nil {
-			t.Fatal(err)
-		}
-	}
-	received := func(name string) string {
-		raw, err := os.ReadFile(filepath.Join(sent, name))
-		if err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
-		}
-		return string(raw)
-	}
-	minting := func() int {
-		raw, err := os.ReadFile(mints)
-		if err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
-		}
-		return strings.Count(string(raw), "\n")
+		workers.mints("mint", session)
+		renewPass(t, sessions, dir)
 	}
 
-	expiring, fresh, unused := session("ASIA-expiring", 50*time.Minute), session("ASIA-fresh", 4*time.Hour), session("ASIA-unused", 4*time.Hour)
+	expiring, fresh, unused := awsSession("ASIA-expiring", 50*time.Minute), awsSession("ASIA-fresh", 4*time.Hour), awsSession("ASIA-unused", 4*time.Hour)
 	pass(expiring)
 	pass(fresh)
 	pass(unused)
-	want := line(expiring) + line(fresh)
-	if a, b := received("lane-a"), received("lane-b"); a != want || b != want {
+	want := awsLine(t, expiring) + awsLine(t, fresh)
+	if a, b := workers.received("lane-a"), workers.received("lane-b"); a != want || b != want {
 		t.Errorf("lane-a got %q and lane-b %q; want the session with 50 minutes left, then the fresh one, each once", a, b)
 	}
-	if n := minting(); n != 2 {
+	if n := workers.runs("mint"); n != 2 {
 		t.Errorf("the mint ran %d times over three passes, want twice: once for the first session and once because it had under an hour left, not while the fresh one has four hours", n)
+	}
+}
+
+func TestKeepRenewsEachTaskWithTheKeysOfTheConfigThatKeptItReadAgainEachPass(t *testing.T) {
+	w := newWarmPool(t)
+	standInKeeper(t)
+	dir := w.session.Config.State()
+	workers := stubAWSWorkers(t)
+	first, second := awsSession("ASIA-first", 4*time.Hour), awsSession("ASIA-second", 4*time.Hour)
+	withAWS := keysConfig(t, map[string]string{config.KeyAWS: workers.mints("mint-first", first)})
+	withoutAWS := keysConfig(t, nil)
+	w.keptUnder(withAWS, "lane-a", "lane-b")
+	w.keptUnder(withoutAWS, "lane-c")
+	w.keptUnder("", "lane-old")
+	sessions := newRenewal(config.KeyAWS, captureAWS, orca.AWSScript)
+
+	renewPass(t, sessions, dir)
+	if a, b, c := workers.received("lane-a"), workers.received("lane-b"), workers.received("lane-c"); a != awsLine(t, first) || b != a || c != "" {
+		t.Fatalf("lane-a got %q, lane-b %q and lane-c %q; want the two lanes kept under the config naming orca.keys.aws to get its session, and lane-c, whose config names none, nothing", a, b, c)
+	}
+	if n := workers.runs("mint-first"); n != 1 {
+		t.Errorf("two lanes kept under one config ran its orca.keys.aws command %d times, want once", n)
+	}
+
+	writeKeys(t, withoutAWS, map[string]string{config.KeyAWS: workers.mints("mint-second", second)})
+	renewPass(t, sessions, dir)
+	if c := workers.received("lane-c"); c != awsLine(t, second) {
+		t.Errorf("once its config named orca.keys.aws, lane-c got %q; want that command's session on the same keep's next pass", c)
+	}
+	if a := workers.received("lane-a"); a != awsLine(t, first) {
+		t.Errorf("lane-a got %q; want its own config's session once, untouched by lane-c's config", a)
+	}
+
+	if err := os.Remove(withAWS); err != nil {
+		t.Fatal(err)
+	}
+	renewPass(t, sessions, dir)
+	if old := workers.received("lane-old"); old != "" {
+		t.Errorf("lane-old, kept by a release that recorded no config, got %q; want nothing", old)
 	}
 }
 
