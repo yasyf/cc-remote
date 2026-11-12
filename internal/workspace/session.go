@@ -37,6 +37,7 @@ const (
 	tailnetTimeout      = 60 * time.Second
 	urlCommandTimeout   = 60 * time.Second
 	urlCommandWaitDelay = 2 * time.Second
+	payloadMountWithin  = 3 * time.Minute
 )
 
 type Session struct {
@@ -681,7 +682,27 @@ func (s *Session) wake(ctx context.Context, machine string) error {
 	if err := s.BindHome(ctx, machine); err != nil {
 		return err
 	}
+	if err := s.mountPayloadForBoot(ctx, machine); err != nil {
+		return err
+	}
 	return s.limitMemory(ctx, machine)
+}
+
+func (s *Session) mountPayloadForBoot(ctx context.Context, machine string) error {
+	if s.payload == nil {
+		return nil
+	}
+	return s.timed(ctx, laneMount, "payload.boot", machine, func() error {
+		ctx, cancel := context.WithTimeout(ctx, payloadMountWithin)
+		defer cancel()
+		if err := s.Scripts.MountPayloadForBoot(ctx, s.exec(machine)); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("the payload holding the tools was not mounted within %s of the wake: %w", payloadMountWithin, err)
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 func (s *Session) BindHome(ctx context.Context, machine string) error {

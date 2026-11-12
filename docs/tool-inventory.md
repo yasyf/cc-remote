@@ -329,7 +329,11 @@ and SSH/tailnet state. Packing also excludes `.in_use` and `.orphaned_at`.
 The `cc-remote-payload` service checks each stored payload, or the loop device
 behind its existing mount, against its digest and remounts the files at boot.
 It verifies every `*.sqfs` and ignores `.partial` and `.admitted` files.
-Inventory services registered with `sprite-env` depend on it.
+Inventory services registered with `sprite-env` depend on it. A cold-booted
+Sprite answers commands before its services finish, so `resume` and a warm-pool
+claim run the service's script themselves right after the wake, waiting up to
+three minutes for it, before any command reads the tools; the log names that
+wait as the `payload.boot` phase.
 
 ## Script phases
 

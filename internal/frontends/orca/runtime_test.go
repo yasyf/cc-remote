@@ -75,7 +75,7 @@ func TestParseReadyChecksTheListenerAndTheAdvertisedPortApart(t *testing.T) {
 	}
 }
 
-func TestProbeScriptReadsTheRunningRuntimeWithoutStartingOne(t *testing.T) {
+func TestProbeScriptWaitsForTheRunningRuntimeWithoutStartingOne(t *testing.T) {
 	if out, err := exec.Command("sh", "-n", "-c", orca.ProbeScript).CombinedOutput(); err != nil {
 		t.Fatalf("probe script does not parse: %v: %s", err, out)
 	}
@@ -84,7 +84,7 @@ func TestProbeScriptReadsTheRunningRuntimeWithoutStartingOne(t *testing.T) {
 			t.Errorf("the probe script carries %q, which could start a runtime", launch)
 		}
 	}
-	for _, read := range []string{"flock -n 9", "exit 3", `grep '"type":"orca_server_ready"' serve.json | tail -n 1`} {
+	for _, read := range []string{"flock -n 9", "exit 3", `until grep -q '"type":"orca_server_ready"'`, "within 120s", "| tail -n 1"} {
 		if !strings.Contains(orca.ProbeScript, read) {
 			t.Errorf("the probe script lacks %q", read)
 		}

@@ -615,6 +615,31 @@ func TestAResumeBindsTheHomeAgainBeforeItReadsTheTools(t *testing.T) {
 	h.ordered(from, "cc-remote-local-disk", readies)
 }
 
+func TestAResumeMountsThePayloadForThisBootBeforeItRunsTheTools(t *testing.T) {
+	const mounts = "sudo -n /opt/cc-remote/payload-mount.sh"
+	h := newPayloadHarness(t)
+	if _, err := h.session.Create(context.Background(), "ws-1", Source{Ref: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	from := len(h.machine.scripts["ws-1"])
+	if _, err := h.session.Resume(context.Background(), "ws-1"); err != nil {
+		t.Fatal(err)
+	}
+	h.ordered(from, mounts, readies, configures)
+	from = len(h.machine.scripts["ws-1"])
+	h.machine.answer = func(script string) (providers.Result, bool) {
+		return providers.Result{Stderr: []byte("cc-remote: the payload's sha256 does not match"), ExitCode: 1}, strings.Contains(script, mounts)
+	}
+	if _, err := h.session.Resume(context.Background(), "ws-1"); err == nil || !strings.Contains(err.Error(), "mount the payload for this boot") {
+		t.Fatalf("resume = %v, want the failed mount", err)
+	}
+	if ran := h.machine.scripts["ws-1"][from:]; slices.ContainsFunc(ran, func(script string) bool {
+		return strings.Contains(script, readies) || strings.Contains(script, configures)
+	}) {
+		t.Errorf("a resume whose payload did not mount ran the tools: %q", ran)
+	}
+}
+
 func TestACreateLimitsTheMachinesMemoryRightAfterTheMoveAndAResumeLimitsItAgain(t *testing.T) {
 	const limitsMemory = "sudo --preserve-env=PATH bash -s 8192 4096"
 	h := build(t, true, inventory, "{}", providers.Traits{Supervisor: providers.SupervisorSpriteEnv, LocalDisk: "/fast", LocalDiskReserve: 7168, MemoryMax: 8192, MemoryHigh: 4096})

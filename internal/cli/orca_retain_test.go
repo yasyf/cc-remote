@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -295,21 +296,22 @@ func TestComputeLaunchReachesItsRuntimeThroughTheRetainedGateway(t *testing.T) {
 	}
 }
 
-func TestServerResumeAdoptsOnlyTheSavedRuntime(t *testing.T) {
+func TestServerResumeAdoptsTheRuntimeTheMachineRuns(t *testing.T) {
 	tests := []struct {
-		name  string
-		probe func(loopback int) providers.Result
-		want  string
+		name    string
+		probe   func(loopback int) providers.Result
+		want    string
+		runtime string
 	}{
 		{"the saved runtime", func(loopback int) providers.Result {
 			return providers.Result{Stdout: []byte(computeReady("rt-1", loopback) + "\n")}
-		}, ""},
-		{"a replaced runtime", func(loopback int) providers.Result {
+		}, "", "rt-1"},
+		{"the runtime a cold boot started", func(loopback int) providers.Result {
 			return providers.Result{Stdout: []byte(computeReady("rt-2", loopback) + "\n")}
-		}, "task-a now answers as Orca runtime rt-2, not its saved rt-1; the other runtime is not adopted, and the saved task and every process are kept"},
+		}, "", "rt-2"},
 		{"no runtime", func(int) providers.Result {
 			return providers.Result{Stderr: []byte("cc-remote: no Orca runtime holds serve.lock\n"), ExitCode: 3}
-		}, "task-a has no running Orca runtime rt-1 to resume (cc-remote: no Orca runtime holds serve.lock); none is started in its place, and the saved task is kept"},
+		}, "task-a has no running Orca runtime to resume (cc-remote: no Orca runtime holds serve.lock); none is started in its place, and the saved task is kept", "rt-1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -345,13 +347,13 @@ func TestServerResumeAdoptsOnlyTheSavedRuntime(t *testing.T) {
 			pairing, err := driver.serve(t.Context(), session, task, orca.Runtime{Entry: "tools/orca/AppRun"}, true)
 			switch {
 			case tt.want == "" && (err != nil || pairing != "orca://pair?code=private"):
-				t.Errorf("serve = %q, %v; want the saved runtime's pairing", pairing, err)
+				t.Errorf("serve = %q, %v; want the machine's runtime's pairing", pairing, err)
 			case tt.want != "" && (err == nil || err.Error() != tt.want || pairing != ""):
 				t.Errorf("serve = %q, %v; want %q", pairing, err, tt.want)
 			}
 			after, err := os.ReadFile(driver.state.Orca("task-a"))
-			if err != nil || !bytes.Equal(before, after) {
-				t.Errorf("the saved task changed on resume:\n%s\nwant\n%s", after, before)
+			if want := bytes.ReplaceAll(before, []byte(`"rt-1"`), []byte(strconv.Quote(tt.runtime))); err != nil || !bytes.Equal(after, want) {
+				t.Errorf("the saved task after resume:\n%s\nwant\n%s", after, want)
 			}
 			if got := provider.Calls(); len(got) != 2 || !strings.HasPrefix(got[1], "exec task-a") {
 				t.Errorf("provider calls = %q, want one probe", got)

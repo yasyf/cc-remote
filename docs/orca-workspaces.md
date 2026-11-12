@@ -204,7 +204,7 @@ orca:
 | Command | Result |
 | --- | --- |
 | `cc-remote orca status task-name` | Reports the forward and whether the environment answers from the recorded runtime. |
-| `cc-remote orca reconnect task-name` | Reopens the SSH forward and verifies the recorded live runtime. |
+| `cc-remote orca reconnect task-name` | Reopens the SSH forward and verifies the runtime the machine runs, adopting its id. |
 | `cc-remote orca send task-name --prompt-file next.md` | Sends a prompt and prints its receipt. |
 | `cc-remote orca read task-name` | Prints the worker terminal's rendered screen. |
 
@@ -262,9 +262,13 @@ name stays, and it never touches an environment no task paired. It also
 releases a task whose machine is gone, so keep stops reopening that forward.
 The records stay.
 
-`reconnect` restores only the transport to an existing runtime. It does not
-resume a machine, restart a runtime, or recover a worker after process loss.
-The recorded runtime and receipt identities remain unchanged.
+`reconnect` restores only the transport to the runtime the machine's launcher
+runs. It reads that runtime's ready line, waiting up to two minutes for a
+cold-booted machine to print it, and records its runtime id when it differs from
+the recorded one, as after a restart or a cold boot. It does not resume a
+machine, start a runtime, or recover a worker after process loss. Receipt
+identities remain unchanged. `resume --connection server` adopts the runtime
+the same way.
 
 The machine itself restarts a runtime that exits. Its launcher,
 `$HOME/.cc-remote/orca/serve.sh`, runs the runtime in a loop and waits before
@@ -276,8 +280,8 @@ each restart the launcher writes `cc-remote: the Orca runtime exited <status>;
 starting it again in <delay>s` to its stderr and to `serve.log`. When that run
 logged `ENOSPC`, or the disk under the home has less than 64 MiB free, it first
 writes a line naming that disk's mount point, its device and the MiB it has
-free. A restarted runtime answers under a new runtime id, so `reconnect` and
-`status`, which ask for the recorded one, fail for that task.
+free. A restarted runtime answers under a new runtime id, so `status`, which asks for
+the recorded one, fails for that task until `reconnect` records the new id.
 
 An SSH forward can exit on its own while its worker keeps running, for example
 after 45 seconds without an answer from the Sprite. Once `create`, `prepare`, or
@@ -285,8 +289,9 @@ after 45 seconds without an answer from the Sprite. Once `create`, `prepare`, or
 starts `cc-remote orca keep` in the background. One keep runs per state
 directory, so a Mac runs one however many lanes it holds. Every 30 seconds it
 reopens each kept forward that has exited, the way `reconnect` does, and it
-exits once no task is kept. Each reopen gets one minute, so a machine that
-answers nothing costs a pass that minute and never holds up the forwards after
+exits once no task is kept. Each reopen gets two minutes, since a cold Sprite
+took about 67 seconds from boot to its Orca runtime, so a machine that answers
+nothing costs a pass those two minutes and never holds up the forwards after
 it. When a reopen fails, keep asks the provider whether the machine's storage is
 reachable. A machine that still reports its storage gone 10 minutes after its
 first failed reopen runs nothing again, so keep releases its task, logs that

@@ -82,14 +82,24 @@ chmod 700 "$dir"
 mkfifo -m 600 "$dir/key"
 printf '%s\n' "$dir"`
 
-const ProbeScript = `set -eu
-cd "` + runtimeDir + `"
-exec 9>> serve.lock
-if flock -n 9; then
-  echo "` + remote.Prefix + `: no Orca runtime holds ` + runtimeDir + `/serve.lock" >&2
-  exit 3
-fi
-grep '"type":"` + readyType + `"' serve.json | tail -n 1`
+var awaitReady = []string{
+	"i=0",
+	`until grep -q '"type":"` + readyType + `"' "` + readyFile + `" 2> /dev/null; do`,
+	`  i=$((i + 1))`,
+	`  test "$i" -lt ` + strconv.Itoa(readyTries) + ` || { echo "` + remote.Prefix + `: the Orca runtime printed no ` + readyType + ` within 120s; see ` + runtimeDir + `/serve.log" >&2; exit 1; }`,
+	"  sleep 0.5",
+	"done",
+	`grep '"type":"` + readyType + `"' "` + readyFile + `" | tail -n 1`,
+}
+
+var ProbeScript = remote.Script(slices.Concat([]string{
+	`cd "` + runtimeDir + `"`,
+	"exec 9>> serve.lock",
+	"if flock -n 9; then",
+	`  echo "` + remote.Prefix + `: no Orca runtime holds ` + runtimeDir + `/serve.lock" >&2`,
+	"  exit 3",
+	"fi",
+}, awaitReady)...)
 
 const FirstUseCheck = `test ! -e "` + runtimeDir + `" && test ! -L "` + runtimeDir + `"`
 
@@ -165,25 +175,18 @@ func (r Runtime) start() string {
 }
 
 func (r Runtime) EnsureScript() string {
-	return remote.Script(
+	return remote.Script(slices.Concat([]string{
 		"umask 077",
-		`mkdir -p "`+runtimeDir+`"`,
-		`chmod 700 "`+runtimeDir+`"`,
-		`test -x "$HOME/"`+remote.Quote(r.Entry)+` || { echo "`+remote.Prefix+`: $HOME/`+r.Entry+` is not an executable Orca runtime; the inventory's runtime tool provides it" >&2; exit 1; }`,
-		`cat > "`+launcher+`.tmp" <<'SH'`,
+		`mkdir -p "` + runtimeDir + `"`,
+		`chmod 700 "` + runtimeDir + `"`,
+		`test -x "$HOME/"` + remote.Quote(r.Entry) + ` || { echo "` + remote.Prefix + `: $HOME/` + r.Entry + ` is not an executable Orca runtime; the inventory's runtime tool provides it" >&2; exit 1; }`,
+		`cat > "` + launcher + `.tmp" <<'SH'`,
 		r.Launcher(),
 		"SH",
-		`chmod 700 "`+launcher+`.tmp"`,
-		`mv "`+launcher+`.tmp" "`+launcher+`"`,
+		`chmod 700 "` + launcher + `.tmp"`,
+		`mv "` + launcher + `.tmp" "` + launcher + `"`,
 		r.start(),
-		"i=0",
-		`until grep -q '"type":"`+readyType+`"' "`+readyFile+`" 2> /dev/null; do`,
-		`  i=$((i + 1))`,
-		`  test "$i" -lt `+strconv.Itoa(readyTries)+` || { echo "`+remote.Prefix+`: the Orca runtime printed no `+readyType+` within 120s; see `+runtimeDir+`/serve.log" >&2; exit 1; }`,
-		"  sleep 0.5",
-		"done",
-		`grep '"type":"`+readyType+`"' "`+readyFile+`" | tail -n 1`,
-	)
+	}, awaitReady)...)
 }
 
 func ParseReady(line []byte, listen, advertise int) (Ready, string, error) {
