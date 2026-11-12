@@ -68,12 +68,14 @@ has reported its storage gone for 10 minutes, keep releases its task, logs that 
 no more; orca reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
 never reopens a stopped lane's forward. Every 10 minutes, starting with its first pass, it also runs
 orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
-reading and retrying. When orca.keys.github_app names a command, each pass runs it and writes a line it
-has not yet written to a kept task's machine into that machine's GitHub App token file, so a worker's
-ccx keeps reading on the app's quota past the hour its launch token lasts. When orca.keys.aws names a
+reading and retrying. Each pass reads again the config that kept each task, the one its create,
+prepare or reconnect named, so a key added to that config reaches the task with no restart of keep.
+When a task's config names an orca.keys.github_app command, the pass runs it and writes a line it has
+not yet written to that task's machine into its GitHub App token file, so a worker's ccx keeps reading
+on the app's quota past the hour its launch token lasts. When a task's config names an orca.keys.aws
 command, a pass runs it once the session it last printed has under an hour left and writes the new
-session into each kept task's AWS credentials file the same way, so a worker's AWS reads outlive the
-session its launch captured. One keep runs per state directory: a keep that finds another running
+session into the worker's AWS credentials file the same way, so a worker's AWS reads outlive the
+session its launch captured. Tasks whose configs name the same command share what it prints. One keep runs per state directory: a keep that finds another running
 records itself as that keep's successor and exits, the running keep execs a successor of a newer
 release at its next pass, so a pin change reaches the keep, and a keep exits once no task is kept.`,
 		Hidden: true,
@@ -107,8 +109,8 @@ release at its next pass, so a pin change reaches the keep, and a keep exits onc
 				return err
 			}
 			renewals := []*renewal{
-				{key: config.KeyGitHubApp, command: cfg.Orca.Keys[config.KeyGitHubApp], capture: captureAppToken, script: orca.GitHubAppScript, sent: map[string][]byte{}},
-				{key: config.KeyAWS, command: cfg.Orca.Keys[config.KeyAWS], capture: captureAWS, script: orca.AWSScript, sent: map[string][]byte{}},
+				newRenewal(config.KeyGitHubApp, captureAppToken, orca.GitHubAppScript),
+				newRenewal(config.KeyAWS, captureAWS, orca.AWSScript),
 			}
 			self := successor{Version: version.String(), Binary: binary, Config: cfg.Path}
 			return keepForwards(cmd.Context(), cfg.State(), slog.Default(), prune, storage, renewals, self)
@@ -122,7 +124,7 @@ func (d orcaDriver) keep(task *orcaTask, config string) error {
 	if task.Forward == nil {
 		return nil
 	}
-	if err := state.Write(d.state.OrcaKept(task.Workspace), nil); err != nil {
+	if err := state.Write(d.state.OrcaKept(task.Workspace), []byte(config)); err != nil {
 		return err
 	}
 	if err := spawnKeeper(d.state, config); err != nil {
@@ -205,8 +207,12 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 		if err != nil || kept == 0 {
 			return nil, err
 		}
+		keys, err := keptKeys(dir, log)
+		if err != nil {
+			return nil, err
+		}
 		for _, r := range renewals {
-			if err := r.renew(ctx, dir, log); err != nil {
+			if err := r.renew(ctx, dir, log, keys); err != nil {
 				return nil, err
 			}
 		}
@@ -333,12 +339,19 @@ func reopenForward(ctx context.Context, dir state.Dir, task *orcaTask) (bool, er
 
 type renewal struct {
 	key     string
-	command []string
 	capture func(context.Context, []string) ([]byte, time.Time, error)
 	script  string
+	minted  map[string]minted
+	sent    map[string][]byte
+}
+
+type minted struct {
 	line    []byte
 	expires time.Time
-	sent    map[string][]byte
+}
+
+func newRenewal(key string, capture func(context.Context, []string) ([]byte, time.Time, error), script string) *renewal {
+	return &renewal{key: key, capture: capture, script: script, minted: map[string]minted{}, sent: map[string][]byte{}}
 }
 
 func captureAppToken(ctx context.Context, command []string) ([]byte, time.Time, error) {
@@ -346,46 +359,86 @@ func captureAppToken(ctx context.Context, command []string) ([]byte, time.Time, 
 	return line, time.Time{}, err
 }
 
-func (r *renewal) renew(ctx context.Context, dir state.Dir, log *slog.Logger) error {
-	if len(r.command) == 0 {
-		return nil
-	}
-	if time.Until(r.expires) < renewBefore {
-		line, expires, err := r.capture(ctx, r.command)
-		if err != nil {
-			log.Warn("an orca.keys command keep renews failed, so each worker reads through what it holds until a later pass renews it", "key", r.key, "error", err)
-			return nil
-		}
-		r.line, r.expires = line, expires
-	}
+func keptKeys(dir state.Dir, log *slog.Logger) (map[string]map[string][]string, error) {
 	names, err := keptNames(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	configs := map[string]*config.Config{}
+	keys := map[string]map[string][]string{}
 	for _, name := range names {
-		if bytes.Equal(r.sent[name], r.line) {
+		path, err := os.ReadFile(dir.OrcaKept(name))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			return nil, err
+		case len(path) == 0:
+			continue
+		}
+		cfg, read := configs[string(path)]
+		if !read {
+			if cfg, err = config.Load(string(path)); err != nil {
+				log.Warn("the config that kept a task did not load, so keep renews none of the keys of the tasks it kept until a later pass loads it", "config", string(path), "error", err)
+			}
+			configs[string(path)] = cfg
+		}
+		if cfg != nil {
+			keys[name] = cfg.Orca.Keys
+		}
+	}
+	return keys, nil
+}
+
+func (r *renewal) renew(ctx context.Context, dir state.Dir, log *slog.Logger, keys map[string]map[string][]string) error {
+	lines := map[string][]byte{}
+	for _, name := range slices.Sorted(maps.Keys(keys)) {
+		command := keys[name][r.key]
+		if len(command) == 0 {
+			continue
+		}
+		id := fmt.Sprintf("%q", command)
+		line, tried := lines[id]
+		if !tried {
+			line = r.mint(ctx, log, id, command)
+			lines[id] = line
+		}
+		if line == nil || bytes.Equal(r.sent[name], line) {
 			continue
 		}
 		task, err := loadTask(dir, name)
 		if err != nil {
 			return err
 		}
-		if err := r.send(ctx, task); err != nil {
+		if err := r.send(ctx, task, line); err != nil {
 			log.Warn("a kept task's renewed key did not reach it, and the next pass tries again", "key", r.key, "workspace", name, "error", err)
 			continue
 		}
-		r.sent[name] = r.line
+		r.sent[name] = line
 	}
 	return nil
 }
 
-func (r *renewal) send(ctx context.Context, task *orcaTask) error {
+func (r *renewal) mint(ctx context.Context, log *slog.Logger, id string, command []string) []byte {
+	if held := r.minted[id]; time.Until(held.expires) >= renewBefore {
+		return held.line
+	}
+	line, expires, err := r.capture(ctx, command)
+	if err != nil {
+		log.Warn("an orca.keys command keep renews failed, so each worker reads through what it holds until a later pass renews it", "key", r.key, "error", err)
+		return nil
+	}
+	r.minted[id] = minted{line: line, expires: expires}
+	return line
+}
+
+func (r *renewal) send(ctx context.Context, task *orcaTask, line []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, answerWithin)
 	defer cancel()
 	if !task.Forward.up(ctx) {
 		return errors.New("its forward is down")
 	}
-	_, err := task.run(ctx, r.script, bytes.NewReader(r.line))
+	_, err := task.run(ctx, r.script, bytes.NewReader(line))
 	return err
 }
 
