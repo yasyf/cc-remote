@@ -124,7 +124,7 @@ func TestForgetEnvironmentRemovesEverySavedEnvironmentWithTheName(t *testing.T) 
 		return `{"id":"local","ok":true,"result":` + result + `,"_meta":{"runtimeId":"local"}}`
 	}
 	saved := local(`{"environments":[{"id":"env-1","name":"task-a"},{"id":"env-2","name":"task-b"},{"id":"env-3","name":"task-a"}]}`)
-	fake := newFakeOrca(t).on(list, saved).
+	fake := newFakeOrca(t).on(list, saved).on(list, local(`{"environments":[{"id":"env-2","name":"task-b"}]}`)).
 		on("environment rm --environment env-1 --json", local(`{"removed":{"id":"env-1","name":"task-a"}}`)).
 		on("environment rm --environment env-3 --json", local(`{"removed":{"id":"env-3","name":"task-a"}}`))
 	if err := orca.NewClient(fake).ForgetEnvironment(context.Background(), env); err != nil {
@@ -139,11 +139,32 @@ func TestForgetEnvironmentRemovesEverySavedEnvironmentWithTheName(t *testing.T) 
 		t.Errorf("ForgetEnvironment with nothing saved = %v after %q, want only the list", err, none.calls)
 	}
 
-	refused := newFakeOrca(t).on(list, saved).
-		fail("environment rm --environment env-1 --json", `{"id":"local","ok":false,"error":{"code":"invalid_argument","message":"Unknown environment: env-1"},"_meta":{"runtimeId":null}}`, errors.New("exit status 1"))
-	if err := orca.NewClient(refused).ForgetEnvironment(context.Background(), env); err == nil || !strings.Contains(err.Error(), "invalid_argument: Unknown environment: env-1") {
-		t.Errorf("ForgetEnvironment after a refused rm = %v, want the refusal", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		refusal := `{"id":"local","ok":false,"error":{"code":"invalid_argument","message":"Unknown environment: env-1"},"_meta":{"runtimeId":null}}`
+		refused := newFakeOrca(t).on(list, saved).
+			fail("environment rm --environment env-1 --json", refusal, errors.New("exit status 1")).
+			on("environment rm --environment env-3 --json", local(`{"removed":{"id":"env-3","name":"task-a"}}`))
+		err := orca.NewClient(refused).ForgetEnvironment(t.Context(), env)
+		if err == nil || !strings.Contains(err.Error(), "invalid_argument: Unknown environment: env-1") || !strings.Contains(err.Error(), "still lists environment "+env+" after 4 tries") {
+			t.Errorf("ForgetEnvironment after refused rms = %v, want the refusal and the tries", err)
+		}
+		if refused.called(list) != 5 || refused.called("environment rm --environment env-1 --json") != 4 {
+			t.Errorf("calls = %q, want five lists and four removals of env-1", refused.calls)
+		}
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		slow := newFakeOrca(t).on(list, saved).on(list, saved).on(list, local(`{"environments":[{"id":"env-2","name":"task-b"}]}`)).
+			fail("environment rm --environment env-1 --json", "", context.DeadlineExceeded).
+			on("environment rm --environment env-1 --json", local(`{"removed":{"id":"env-1","name":"task-a"}}`)).
+			on("environment rm --environment env-3 --json", local(`{"removed":{"id":"env-3","name":"task-a"}}`))
+		if err := orca.NewClient(slow).ForgetEnvironment(t.Context(), env); err != nil {
+			t.Errorf("ForgetEnvironment after a timed-out rm = %v, want the retry to remove it", err)
+		}
+		if slow.called(list) != 3 || slow.called("environment rm --environment env-1 --json") != 2 {
+			t.Errorf("calls = %q, want three lists and env-1 removed on the second try", slow.calls)
+		}
+	})
 }
 
 func TestStatusRequiresTheRecordedRuntime(t *testing.T) {

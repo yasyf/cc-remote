@@ -2,6 +2,7 @@ package orca
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,12 @@ const (
 	tuiIdle           = "tui-idle"
 	turnStarted       = "turn_started"
 	oldHost           = "old-host"
+)
+
+var (
+	forgetTries      = 4
+	forgetPause      = 2 * time.Second
+	forgetCallWithin = 30 * time.Second
 )
 
 type Environment struct {
@@ -149,19 +156,36 @@ func (c Client) RemoveEnvironment(ctx context.Context, id string) error {
 }
 
 func (c Client) ForgetEnvironment(ctx context.Context, name string) error {
-	saved, err := c.Environments(ctx)
-	if err != nil {
-		return err
-	}
-	for _, environment := range saved {
-		if environment.Name != name {
-			continue
+	var failed error
+	for try := 0; ; try++ {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return errors.Join(failed, ctx.Err())
+			case <-time.After(forgetPause << (try - 1)):
+			}
 		}
-		if err := c.RemoveEnvironment(ctx, environment.ID); err != nil {
-			return err
+		named, err := c.named(ctx, name)
+		if err == nil && len(named) == 0 {
+			return nil
 		}
+		if try == forgetTries {
+			return errors.Join(fmt.Errorf("orca still lists environment %s after %d tries to remove it", name, forgetTries), err, failed)
+		}
+		for _, environment := range named {
+			within, cancel := context.WithTimeout(ctx, forgetCallWithin)
+			err = errors.Join(err, c.RemoveEnvironment(within, environment.ID))
+			cancel()
+		}
+		failed = cmp.Or(err, failed)
 	}
-	return nil
+}
+
+func (c Client) named(ctx context.Context, name string) ([]Environment, error) {
+	within, cancel := context.WithTimeout(ctx, forgetCallWithin)
+	defer cancel()
+	saved, err := c.Environments(within)
+	return slices.DeleteFunc(saved, func(environment Environment) bool { return environment.Name != name }), err
 }
 
 func (c Client) On(environment, runtimeID string) Remote {

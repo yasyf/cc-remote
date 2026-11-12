@@ -215,8 +215,8 @@ func (l *orcaLaunch) allocate(ctx context.Context, out io.Writer, session *works
 			allocation.Head, allocation.HookDrift = allocation.Task.BaseCommit, allocation.Task.drift
 			return errors.Join(withEarlier(failed, err), emit(out, allocation))
 		}
-		session.Log.Warn("a claimed warm workspace failed before its worker started, so the lane stops it and tries the next", "lane", lane, "workspace", member.Name, "failure", failureOf(err).describe())
-		stopErr := pool.stopUnstarted(context.WithoutCancel(ctx), orca.NewClient(runner), member.Name, err)
+		session.Log.Warn("a claimed warm workspace failed before its worker started, so the lane destroys it and tries the next", "lane", lane, "workspace", member.Name, "failure", failureOf(err).describe())
+		stopErr := pool.destroyUnstarted(context.WithoutCancel(ctx), orca.NewClient(runner), member.Name, err)
 		release()
 		if stopErr != nil {
 			session.Log.Warn("a failed warm workspace stays running", "lane", lane, "workspace", member.Name, "failure", failureOf(stopErr).describe())
@@ -360,7 +360,7 @@ func (p *orcaPool) stop(name string) error {
 	})
 }
 
-func (p *orcaPool) stopUnstarted(ctx context.Context, client orca.Client, name string, cause error) error {
+func (p *orcaPool) destroyUnstarted(ctx context.Context, client orca.Client, name string, cause error) error {
 	if errors.As(cause, new(*unconfirmed)) {
 		return fmt.Errorf("warm workspace %s stays running as failed, since its claim never confirmed it unused", name)
 	}
@@ -379,8 +379,15 @@ func (p *orcaPool) stopUnstarted(ctx context.Context, client orca.Client, name s
 	if err := disconnect(ctx, p.dir, client, name); err != nil {
 		return err
 	}
-	if err := p.session.Suspend(ctx, name); err != nil && !errors.Is(err, providers.ErrNoStorage) {
-		return fmt.Errorf("stop failed warm workspace %s: %w", name, err)
+	member, err := p.load(name)
+	if err != nil {
+		return err
+	}
+	if err := p.session.Destroy(ctx, name); err != nil {
+		return fmt.Errorf("destroy failed warm workspace %s: %w", name, err)
+	}
+	if err := p.save(member); err != nil {
+		return err
 	}
 	return p.stop(name)
 }
@@ -585,9 +592,20 @@ func (p *orcaPool) build(ctx context.Context, spare *reservation) error {
 		if errors.As(err, &refusal) {
 			member.Reason = refusal.Error()
 		}
-		return errors.Join(&spareFailure{member: member}, p.save(member))
+		return errors.Join(&spareFailure{member: member}, p.retire(ctx, member))
 	}
 	member.State = memberReady
+	return p.save(member)
+}
+
+func (p *orcaPool) retire(ctx context.Context, member *orcaMember) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedStopWithin)
+	defer cancel()
+	if record, err := p.session.Recorded(member.Name); err == nil && !record.Unverified {
+		if err := p.session.Destroy(ctx, member.Name); err != nil {
+			p.session.Log.Warn("a failed warm workspace create left a machine its destroy could not remove", "workspace", member.Name, "failure", failureOf(err).describe())
+		}
+	}
 	return p.save(member)
 }
 

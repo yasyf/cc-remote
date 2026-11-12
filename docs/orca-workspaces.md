@@ -474,10 +474,10 @@ recorded `failed` with its error's metadata only: the step that failed, the
 error's class, the exit code when one was observed, the HTTP status when a
 provider lookup answered one, and the message's byte length and SHA-256, never
 its text. When that happens before the worker's terminal starts, the command
-logs a warning and stops that workspace's machine. It first checks that no
+logs a warning and destroys that workspace's machine. It first checks that no
 agent process runs there, then removes the workspace's Orca environment,
-suspends the machine as `cc-remote orca stop` does, and records the claim
-`stopped`, keeping its disk and records. A machine where an agent runs, or one
+destroys the machine as `cc-remote destroy` does, and records the claim
+`stopped`, keeping its pool and task records with the failure's metadata. A machine where an agent runs, or one
 that does not answer the check, stays running and `failed`. So does one the
 claim never confirmed unused, such as a checkout that cannot be read or a
 machine that already holds Orca runtime state, because the claim did not make

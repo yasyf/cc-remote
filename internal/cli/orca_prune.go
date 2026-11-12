@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	prunedStopped = "its lane was stopped"
-	prunedGone    = "its machine is gone"
+	prunedStopped   = "its lane was stopped"
+	prunedGone      = "its machine is gone"
+	prunedDestroyed = "its workspace was destroyed"
 )
 
 type orcaPruned struct {
@@ -36,14 +37,16 @@ func newOrcaPruneCmd(runner orca.Runner) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "prune",
-		Short: "Remove the Orca environment of every task whose lane was stopped or whose machine is gone",
+		Short: "Remove the Orca environment of every task whose lane was stopped or whose workspace or machine is gone",
 		Long: `prune removes each saved Orca environment that a task record on this provider paired, once that
-task's lane was stopped or the provider no longer has its machine. Orca rereads every saved
+task's lane was stopped, its workspace was destroyed, or the provider no longer has its machine,
+and closes the task's SSH forward. Orca rereads every saved
 environment on each lookup and retries one that does not answer, so a stopped or deleted
 workspace's environment costs Orca work until it is removed. An environment matches a task only by
 the id the task recorded, so a later pairing under the same name is kept, and an environment no
-task paired is never touched. A task on a gone machine is also released, so orca keep no longer
-reopens its forward. Its records stay. --dry-run names what prune would remove.`,
+task paired is never touched. A task on a gone machine or a destroyed workspace is also released, so
+orca keep no longer reopens its forward. Its records stay. One environment Orca fails to remove does
+not stop prune from removing the rest. --dry-run names what prune would remove.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			session, err := flags.open()
@@ -51,10 +54,10 @@ reopens its forward. Its records stay. --dry-run names what prune would remove.`
 				return err
 			}
 			pruned, err := pruneEnvironments(cmd.Context(), session, orca.NewClient(runner), dryRun)
-			if err != nil {
+			if pruned == nil {
 				return err
 			}
-			return emit(cmd.OutOrStdout(), pruned)
+			return errors.Join(err, emit(cmd.OutOrStdout(), pruned))
 		},
 	}
 	flags.bind(cmd)
@@ -87,17 +90,21 @@ func pruneEnvironments(ctx context.Context, session *workspace.Session, client o
 		}
 	}
 	pruned := &orcaPruned{DryRun: dryRun, Forgotten: []prunedEnvironment{}}
+	var failed error
 	for _, environment := range saved {
 		task, ok := paired[environment.ID]
 		if !ok || task.Environment != environment.Name {
 			continue
 		}
+		_, recorded := session.Recorded(task.Workspace)
 		reason := ""
 		switch {
 		case task.Stopped:
 			reason = prunedStopped
 		case !alive[task.Machine]:
 			reason = prunedGone
+		case errors.Is(recorded, workspace.ErrNotRecorded):
+			reason = prunedDestroyed
 		default:
 			continue
 		}
@@ -105,16 +112,23 @@ func pruneEnvironments(ctx context.Context, session *workspace.Session, client o
 		if dryRun {
 			continue
 		}
-		if reason == prunedGone {
-			if err := state.Remove(dir.OrcaKept(task.Workspace)); err != nil {
-				return nil, err
-			}
-		}
-		if err := client.RemoveEnvironment(ctx, environment.ID); err != nil {
-			return nil, err
+		failed = errors.Join(failed, forget(ctx, dir, client, task, environment.ID, reason))
+	}
+	return pruned, failed
+}
+
+func forget(ctx context.Context, dir state.Dir, client orca.Client, task *orcaTask, environment, reason string) error {
+	if reason != prunedStopped {
+		if err := state.Remove(dir.OrcaKept(task.Workspace)); err != nil {
+			return err
 		}
 	}
-	return pruned, nil
+	if task.Forward != nil {
+		if err := task.Forward.close(ctx); err != nil {
+			return err
+		}
+	}
+	return client.RemoveEnvironment(ctx, environment)
 }
 
 func recordedTasks(dir state.Dir) ([]*orcaTask, error) {

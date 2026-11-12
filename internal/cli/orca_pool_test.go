@@ -470,7 +470,7 @@ func TestCompetingRequestsAreRefusedBeforeTheClaimedSpareIsTouched(t *testing.T)
 	w.free("lane-a")
 }
 
-func TestAFailedClaimIsStoppedAndTheLaneTakesTheNextSpare(t *testing.T) {
+func TestAFailedClaimIsDestroyedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	w := newWarmPool(t, "pool-a", "pool-b")
 	w.oneExecAtATime()
 	*w.session.Config.Orca.Pool.Ready = 2
@@ -502,8 +502,8 @@ func TestAFailedClaimIsStoppedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	if member := w.member("pool-a"); member.State != memberStopped || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 || len(member.Failure.SHA256) != 64 {
 		t.Errorf("pool-a = %+v, want it stopped for lane-a with its failure's metadata", member)
 	}
-	if machine, err := w.provider.Get(t.Context(), "pool-a"); err != nil || machine.State != providers.StateSuspended {
-		t.Errorf("pool-a's machine after its failed claim = %+v, %v; want it stopped, not running", machine, err)
+	if machine, err := w.provider.Get(t.Context(), "pool-a"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("pool-a's machine after its failed claim = %+v, %v; want it destroyed", machine, err)
 	}
 	if stored, err := os.ReadFile(w.session.Config.State().Pool("pool-a")); err != nil || bytes.Contains(stored, []byte("sk-leakedsecret")) || bytes.Contains(stored, []byte("failed to connect")) {
 		t.Errorf("the pool record kept error text: %s, %v", stored, err)
@@ -512,8 +512,8 @@ func TestAFailedClaimIsStoppedAndTheLaneTakesTheNextSpare(t *testing.T) {
 		t.Errorf("pool-b = %+v, want it prepared for lane-a", member)
 	}
 	for _, call := range w.provider.Calls()[calls:] {
-		if strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") {
-			t.Errorf("the lane created or destroyed a workspace while a spare was ready: %q", call)
+		if strings.HasPrefix(call, "create ") || strings.HasPrefix(call, "destroy ") && call != "destroy pool-a" {
+			t.Errorf("the lane created a workspace, or destroyed one other than its failed claim, while a spare was ready: %q", call)
 		}
 	}
 	if fills.Load() != 2 {
@@ -887,8 +887,8 @@ func TestALaneStopsAfterTwoFailedClaimsAndItsRelaunchPreparesTheNextSpare(t *tes
 		if member := w.member(name); member.State != memberStopped || member.Lane != "lane-a" || member.Failure == nil {
 			t.Errorf("%s = %+v, want it stopped for lane-a with its failure", name, member)
 		}
-		if machine, err := w.provider.Get(t.Context(), name); err != nil || machine.State != providers.StateSuspended {
-			t.Errorf("%s's machine = %+v, %v; want it stopped", name, machine, err)
+		if machine, err := w.provider.Get(t.Context(), name); !errors.Is(err, providers.ErrNotFound) {
+			t.Errorf("%s's machine = %+v, %v; want it destroyed", name, machine, err)
 		}
 	}
 	if member := w.member("pool-c"); member.State != memberReady || member.Lane != "" {
