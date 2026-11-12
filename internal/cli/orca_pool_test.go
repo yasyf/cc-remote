@@ -1407,6 +1407,36 @@ func TestAFillKeepsItsReadySpareWhenAParallelCreateIsRejected(t *testing.T) {
 	}
 }
 
+func TestAFillDestroysASpareLeftReadyADayUnderAnOldPoolKey(t *testing.T) {
+	w := newWarmPool(t)
+	*w.session.Config.Orca.Pool.Ready = 0
+	pool := openPool(w.session)
+	for name, age := range map[string]time.Duration{"pool-old": 25 * time.Hour, "pool-fresh": time.Hour} {
+		w.spare(pool, name)
+		member := w.member(name)
+		member.Key, member.UpdatedAt = strings.Repeat("0", 64), time.Now().UTC().Add(-age)
+		if err := state.Save(w.session.Config.State().Pool(name), member); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fill, err := pool.fill(t.Context())
+	if err != nil || !slices.Equal(fill.Retired, []string{"pool-old"}) || len(fill.Created) != 0 {
+		t.Fatalf("fill = %+v, %v; want only pool-old retired and nothing created", fill, err)
+	}
+	if _, err := w.provider.Get(t.Context(), "pool-old"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("pool-old after the fill = %v, want its machine destroyed", err)
+	}
+	if member := w.member("pool-old"); member.State != memberRefused || !strings.Contains(member.Reason, "pool key no claim takes") {
+		t.Errorf("pool-old = %+v, want it refused for its old key", member)
+	}
+	if machine, err := w.provider.Get(t.Context(), "pool-fresh"); err != nil || machine.State != providers.StateRunning {
+		t.Errorf("pool-fresh = %+v, %v; want a spare readied an hour ago under the old key kept", machine, err)
+	}
+	if member := w.member("pool-fresh"); member.State != memberReady {
+		t.Errorf("pool-fresh = %+v, want it still ready", member)
+	}
+}
+
 func TestWarmFillRecordsAFailedCreateWithoutRetrying(t *testing.T) {
 	w := newWarmPool(t, "pool-a")
 	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {

@@ -40,6 +40,7 @@ type fakeSprites struct {
 	createFails     string
 	readbackStatus  int
 	destroySurvives bool
+	flaky           []int
 
 	mu      sync.Mutex
 	sprites map[string]*fakeSprite
@@ -119,6 +120,11 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 			f.t.Fatal(err)
 		}
 		return providers.Result{Stdout: fmt.Appendf(raw, "\n%d", status)}, nil
+	}
+	if len(f.flaky) > 0 {
+		status := f.flaky[0]
+		f.flaky = f.flaky[1:]
+		return respond(status, map[string]string{"error": "failed to access sprite"})
 	}
 	if f.status != 0 {
 		return respond(f.status, map[string]string{"error": "unauthorized"})
