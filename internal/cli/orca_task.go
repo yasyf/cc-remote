@@ -1242,6 +1242,7 @@ func orcaRuntime(session *workspace.Session) (orca.Runtime, error) {
 		Args:            cfg.Orca.Args,
 		Supervised:      traits.Supervisor == providers.SupervisorSpriteEnv,
 		GoBuildJobs:     traits.GoBuildJobs,
+		CargoBuildJobs:  traits.CargoBuildJobs,
 		GoMemoryLimit:   traits.GoMemoryLimit,
 		BuildCacheFloor: traits.BuildCacheFloor,
 	}, nil

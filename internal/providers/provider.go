@@ -72,6 +72,7 @@ type Traits struct {
 	Supervisor       Supervisor
 	Platform         string
 	GoBuildJobs      int
+	CargoBuildJobs   int
 	GoMemoryLimit    int64
 	BuildCacheFloor  int64
 	MemoryMax        int64
