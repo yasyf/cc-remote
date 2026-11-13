@@ -98,6 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A Claude worker's codex is signed in.** A Claude worker received the
+  `openai` key only as `OPENAI_API_KEY`, which codex never reads, so on a fresh
+  machine `codex login status` printed `Not logged in` and every `codex exec`
+  and `codex-ask` call failed with `401 Unauthorized: Missing bearer or basic
+  authentication in header` until someone ran `codex login` by hand. The
+  worker's terminal now pipes that key into `codex login --with-api-key` before
+  Claude starts, on every launch, so a reused machine signs in with the current
+  key. A machine with no `codex` skips the sign-in.
 - **A payload download whose staging write stops fails instead of hanging.**
   Each ranged fetch inherited the read end of every other range's FIFO. Once
   the staging write stopped reading, the range being copied had no reader
