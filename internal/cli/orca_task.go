@@ -292,6 +292,7 @@ func (l *orcaLaunch) bind(cmd *cobra.Command, mcp string) {
 	cmd.Flags().StringVar(&l.agent.Tier, "service-tier", "", "codex only: the worker's explicit service_tier, such as fast (default none)")
 	cmd.Flags().StringArrayVar(&l.agent.MCP, "mcp-config", nil, mcp)
 	cmd.Flags().StringArrayVar(&l.agent.Env, "env", nil, "NAME=VALUE the worker's environment exports (repeatable)")
+	cmd.Flags().StringVar(&l.agent.Settings, "settings", "", "claude only: a JSON object of settings the worker starts on, merged under cc-remote's own into its one --settings")
 	cmd.Flags().StringVar(&l.title, "title", "", "Orca terminal title (default the workspace name)")
 	_ = cmd.MarkFlagRequired("model")
 	_ = cmd.MarkFlagRequired("effort")

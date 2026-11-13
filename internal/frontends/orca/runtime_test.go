@@ -428,6 +428,11 @@ func TestAgentArgv(t *testing.T) {
 			"--strict-mcp-config", "--mcp-config", "/srv/a.json", "/srv/b.json",
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "m", "--effort", "high",
 		}},
+		{"claude with lane settings merged under its own", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", Settings: `{"skipDangerousModePermissionPrompt":false,"spinnerTipsEnabled":false,"permissions":{"deny":["AskUserQuestion","PushNotification"]}}`}, orca.ShellPolicy{}, []string{
+			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"permissions":{"deny":["AskUserQuestion","PushNotification"]},"skipDangerousModePermissionPrompt":true,"spinnerTipsEnabled":false}`,
+			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
+		}},
 		{"claude ignores a codex shell policy", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, legacy, []string{
 			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"skipDangerousModePermissionPrompt":true}`,
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
@@ -501,6 +506,10 @@ func TestAgentValidate(t *testing.T) {
 		{"fable on codex", orca.Agent{Kind: orca.AgentCodex, Model: "fable5", Effort: "xhigh"}, "Fable requires an explicit local choice"},
 		{"claude service tier", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", Tier: "fast"}, "codex setting"},
 		{"quoted service tier", orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e", Tier: `fast"`}, "--service-tier"},
+		{"codex settings", orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e", Settings: `{}`}, "claude setting"},
+		{"settings not an object", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Settings: `["verbose"]`}, "not a JSON object"},
+		{"invalid settings", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Settings: `{"verbose":`}, "not a JSON object"},
+		{"null settings", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Settings: `null`}, "not a JSON object"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
