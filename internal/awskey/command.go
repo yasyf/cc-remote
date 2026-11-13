@@ -1,6 +1,7 @@
 package awskey
 
 import (
+	"cmp"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ type operation int
 const (
 	getParameter operation = iota + 1
 	exportCredentials
+	getToken
 )
 
 type Command struct {
@@ -21,7 +23,7 @@ type Command struct {
 	decrypt bool
 }
 
-var valueFlags = []string{"--profile", "--region", "--name", "--query", "--output", "--format"}
+var valueFlags = []string{"--profile", "--region", "--name", "--query", "--output", "--format", "--cluster-name"}
 
 func Parse(argv []string) (Command, bool) {
 	if len(argv) == 0 || filepath.Base(argv[0]) != "aws" {
@@ -55,8 +57,19 @@ func Parse(argv []string) (Command, bool) {
 		command.op = getParameter
 	case slices.Equal(words, []string{"configure", "export-credentials"}) && values["--format"] == "process" && len(values) == 1 && !decrypt:
 		command.op = exportCredentials
+	case slices.Equal(words, []string{"eks", "get-token"}) && values["--cluster-name"] != "" && !decrypt && only(values, "--cluster-name", "--output") && cmp.Or(values["--output"], "json") == "json":
+		command.op, command.name = getToken, values["--cluster-name"]
 	default:
 		return Command{}, false
 	}
 	return command, true
+}
+
+func only(values map[string]string, allowed ...string) bool {
+	for flag := range values {
+		if !slices.Contains(allowed, flag) {
+			return false
+		}
+	}
+	return true
 }
