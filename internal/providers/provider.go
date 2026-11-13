@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,16 @@ type Extender interface {
 
 type StorageChecker interface {
 	CheckStorage(ctx context.Context, id string) error
+}
+
+type Tunnel interface {
+	Dial(network, address string) (net.Conn, error)
+	Wait() error
+	Close() error
+}
+
+type Tunneler interface {
+	Tunnel(ctx context.Context, id string) (Tunnel, error)
 }
 
 var (

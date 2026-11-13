@@ -98,6 +98,10 @@ func (d Dir) OrcaGatewayLock(name, instance string) string {
 	return filepath.Join(string(d), "orca", name+"."+instance+".gateway.lock")
 }
 
+func (d Dir) OrcaProxyLock(name string) string {
+	return filepath.Join(string(d), "orca", name+".proxy.lock")
+}
+
 func (d Dir) OrcaLease(name, instance string) string {
 	return filepath.Join(string(d), "orca", name+"."+instance+".lease.json")
 }

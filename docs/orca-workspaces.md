@@ -101,8 +101,9 @@ SSH. Orca-server transport requires a separate implementation.
 
 `cc-remote orca create` runs a task without the composer. The command creates
 a workspace on a fresh machine and starts the Orca runtime there as a provider
-service. An SSH forward carries the runtime's loopback port to this machine,
-whose Orca CLI pairs with it as an environment named after the workspace. The
+service. A forward carries the runtime's loopback port to this machine: an SSH
+forward, or `cc-remote orca keep` itself for a Sprite. This machine's Orca CLI
+pairs with that port as an environment named after the workspace. The
 workspace's existing checkout becomes an Orca repo, and the worker starts in an
 Orca terminal on that checkout.
 
@@ -318,6 +319,18 @@ ready` for a few seconds. `orca stop` and `destroy` release the task before
 they close its forward, so keep never reopens a stopped lane's forward. A task
 launched by a release without keep is not kept until `reconnect` runs on it.
 keep logs to `orca/keeper.log` in the state directory.
+
+A Sprite task has no SSH forward. `cc-remote orca keep` listens on the task's
+recorded 127.0.0.1 port itself and carries each connection to the same port on
+the Sprite over the Sprites API's port proxy, so one process serves every kept
+Sprite task. `create`, `prepare`, and `reconnect` keep a Sprite task as soon as
+they need its forward and wait for keep to hold the port. keep reads the kept
+tasks every second, so `orca stop` and `destroy` close a Sprite lane's port and
+its open connections at once. For a Sprite task an earlier release recorded
+with an SSH forward, keep closes that forward's master and holds the same port,
+so Orca's saved environment still reaches the runtime. When a newer keep takes
+over, open connections drop for the moment between the two processes, and Orca
+connects again.
 
 Each kept task records the config its `create`, `prepare` or `reconnect` named
 in its `orca-kept/<workspace>` file in the state directory. Every pass loads

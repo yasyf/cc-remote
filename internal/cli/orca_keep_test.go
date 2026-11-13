@@ -81,6 +81,10 @@ func (w *firstWorker) liveTask(name string) *orcaTask {
 
 func storageReachable(context.Context, *orcaTask) error { return nil }
 
+func noOpen(task *orcaTask) (providers.Provider, error) {
+	return nil, fmt.Errorf("this test opens no %s provider", task.Provider)
+}
+
 func storageGoneFor(machines ...string) storageCheck {
 	return func(_ context.Context, task *orcaTask) error {
 		if slices.Contains(machines, task.Machine) {
@@ -112,14 +116,14 @@ func TestKeepReopensAKeptForwardThatExitedButNotAStoppedOrUnkeptOne(t *testing.T
 	}
 
 	gone := map[string]time.Time{}
-	kept, err := reopenForwards(t.Context(), dir, quiet, storageReachable, gone)
+	kept, err := reopenForwards(t.Context(), dir, quiet, storageReachable, newProxies(dir, quiet, noOpen), gone)
 	if err != nil || kept != 1 {
 		t.Fatalf("a keeper pass = %d kept, %v; want lane-a alone kept", kept, err)
 	}
 	if got := opened(); !slices.Equal(got, []string{"lane-a"}) {
 		t.Errorf("forwards opened = %q, want only lane-a's, not the stopped lane-b's or the never-kept lane-c's", got)
 	}
-	if _, err := reopenForwards(t.Context(), dir, quiet, storageReachable, gone); err != nil || len(opened()) != 1 {
+	if _, err := reopenForwards(t.Context(), dir, quiet, storageReachable, newProxies(dir, quiet, noOpen), gone); err != nil || len(opened()) != 1 {
 		t.Errorf("a pass over a forward that is up = %v, opened %q; want nothing reopened", err, opened())
 	}
 	if starts.Load() != 2 {
@@ -142,7 +146,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("hold the keeper lock = %t, %v", held, err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, nil, successor{}); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, noOpen, nil, successor{}); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep beside a running one = %v, opened %q; want it to exit at once", err, opened())
 	}
 	unlock()
@@ -150,7 +154,7 @@ func TestKeepRunsOncePerStateDirectoryAndExitsWhenNothingIsKept(t *testing.T) {
 	if err := state.Remove(dir.OrcaKept("lane-a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, nil, successor{}); err != nil || len(opened()) != 0 {
+	if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, noOpen, nil, successor{}); err != nil || len(opened()) != 0 {
 		t.Errorf("a keep with nothing kept = %v, opened %q; want it to exit at once", err, opened())
 	}
 }
@@ -197,7 +201,7 @@ func renewPass(t *testing.T, r *renewal, dir state.Dir) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.renew(t.Context(), dir, quiet, keys); err != nil {
+	if err := r.renew(t.Context(), dir, quiet, noOpen, keys); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -213,7 +217,7 @@ func TestKeepGivesEachReopenItsOwnDeadlineSoAHungForwardHoldsUpNoOther(t *testin
 	var logged bytes.Buffer
 
 	started := time.Now()
-	kept, err := reopenForwards(t.Context(), w.session.Config.State(), slog.New(slog.NewTextHandler(&logged, nil)), storageReachable, map[string]time.Time{})
+	kept, err := reopenForwards(t.Context(), w.session.Config.State(), slog.New(slog.NewTextHandler(&logged, nil)), storageReachable, newProxies(w.session.Config.State(), slog.New(slog.DiscardHandler), noOpen), map[string]time.Time{})
 	if err != nil || kept != 2 {
 		t.Fatalf("a pass = %d kept, %v; want both still kept", kept, err)
 	}
@@ -242,13 +246,13 @@ func TestKeepReleasesAForwardWhoseMachineKeepsReportingItsStorageGoneAndSaysSoOn
 	seen := map[string]time.Time{}
 	storage := storageGoneFor("lane-dead")
 
-	if kept, err := reopenForwards(t.Context(), dir, log, storage, seen); err != nil || kept != 3 {
+	if kept, err := reopenForwards(t.Context(), dir, log, storage, newProxies(dir, log, noOpen), seen); err != nil || kept != 3 {
 		t.Fatalf("the first pass = %d kept, %v; want all three kept, since one look at a gone storage releases nothing", kept, err)
 	}
 	if strings.Contains(logged.String(), "lane-dead") {
 		t.Errorf("the first look at lane-dead's gone storage logged %q, want nothing until it is released", logged.String())
 	}
-	if kept, err := reopenForwards(t.Context(), dir, log, storage, seen); err != nil || kept != 2 {
+	if kept, err := reopenForwards(t.Context(), dir, log, storage, newProxies(dir, log, noOpen), seen); err != nil || kept != 2 {
 		t.Fatalf("the second pass = %d kept, %v; want lane-dead released", kept, err)
 	}
 	if _, err := os.Stat(dir.OrcaKept("lane-dead")); !os.IsNotExist(err) {
@@ -259,7 +263,7 @@ func TestKeepReleasesAForwardWhoseMachineKeepsReportingItsStorageGoneAndSaysSoOn
 			t.Errorf("%s was released, want it kept: %v", still, err)
 		}
 	}
-	if kept, err := reopenForwards(t.Context(), dir, log, storage, seen); err != nil || kept != 2 {
+	if kept, err := reopenForwards(t.Context(), dir, log, storage, newProxies(dir, log, noOpen), seen); err != nil || kept != 2 {
 		t.Fatalf("the third pass = %d kept, %v", kept, err)
 	}
 	if n := strings.Count(logged.String(), "released a kept forward"); n != 1 || !strings.Contains(logged.String(), "workspace=lane-dead") {
@@ -285,22 +289,22 @@ func TestKeepForgetsAGoneStorageSightingOnceItsLaneIsNoLongerKept(t *testing.T) 
 	quiet := slog.New(slog.DiscardHandler)
 	seen := map[string]time.Time{}
 	storage := storageGoneFor("lane-dead")
-	if _, err := reopenForwards(t.Context(), dir, quiet, storage, seen); err != nil {
+	if _, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.Remove(dir.OrcaKept("lane-dead")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reopenForwards(t.Context(), dir, quiet, storage, seen); err != nil {
+	if _, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.Write(dir.OrcaKept("lane-dead"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, seen); err != nil || kept != 2 {
+	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil || kept != 2 {
 		t.Fatalf("the first pass after lane-dead was kept again = %d kept, %v; want its sighting from before counted as new", kept, err)
 	}
-	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, seen); err != nil || kept != 1 {
+	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil || kept != 1 {
 		t.Errorf("the second pass after it was kept again = %d kept, %v; want it released", kept, err)
 	}
 }
@@ -510,7 +514,7 @@ func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
 		t.Fatalf("hold the keeper lock = %t, %v", held, err)
 	}
 	for _, offered := range []successor{newer, older, {Version: "dev", Binary: "/dev/cc-remote"}} {
-		if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, nil, offered); err != nil {
+		if err := keepForwards(t.Context(), dir, quiet, noPrune, storageReachable, noOpen, nil, offered); err != nil {
 			t.Fatalf("a %s keep beside the running one = %v; want it to exit at once", offered.Version, err)
 		}
 	}
@@ -521,7 +525,7 @@ func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, nil, running); !errors.Is(err, context.DeadlineExceeded) {
+	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, noOpen, nil, running); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("the 0.27.9 keep = %v; want it to keep holding after the handoff failed", err)
 	}
 	if !slices.Equal(started, []successor{newer}) {
@@ -536,7 +540,7 @@ func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
 	}
 	ctx, cancel = context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, nil, running); !errors.Is(err, context.DeadlineExceeded) || len(started) != 1 {
+	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, noOpen, nil, running); !errors.Is(err, context.DeadlineExceeded) || len(started) != 1 {
 		t.Errorf("the 0.27.9 keep beside a recorded 0.27.8 successor = %v, started %+v; want no handoff to an older release", err, started)
 	}
 }
