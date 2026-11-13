@@ -123,7 +123,7 @@ func (r Runtime) Launcher() string {
 		`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"`,
 	}
 	if r.GoBuildJobs > 0 {
-		lines = append(lines, "export GOFLAGS=-p="+strconv.Itoa(r.GoBuildJobs))
+		lines = append(lines, "export GOFLAGS=-p="+strconv.Itoa(r.GoBuildJobs), "export CARGO_BUILD_JOBS="+strconv.Itoa(r.GoBuildJobs))
 	}
 	if r.GoMemoryLimit > 0 {
 		lines = append(lines, "export GOMEMLIMIT="+strconv.FormatInt(r.GoMemoryLimit, 10))

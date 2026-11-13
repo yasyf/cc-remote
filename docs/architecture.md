@@ -147,9 +147,10 @@ the daemon keeps its memory. The throttle level is what keeps the machine up: on
 a scratch Sprite a 10 GiB allocation crawled at 7.5 GiB for five minutes and the
 machine kept running, and the same allocation under the cap alone restarted it.
 The provider also names `GoBuildJobs` and `GoMemoryLimit`, 2 and 2 GiB on
-Sprites, which the Orca runtime exports as `GOFLAGS=-p=2` and `GOMEMLIMIT` to
-every lane, so a Go build or test runs two jobs at a time and each Go process
-collects its garbage before it passes 2 GiB.
+Sprites, which the Orca runtime exports as `GOFLAGS=-p=2`, `CARGO_BUILD_JOBS=2`
+and `GOMEMLIMIT` to every lane, so a Go or Rust build or test runs two jobs at a
+time, cargo's C and C++ build scripts included, and each Go process collects its
+garbage before it passes 2 GiB.
 
 Go's module cache, build cache and temporary build directory, and mise's data
 directory, are the exceptions to the volume on a Sprite. The tool install points

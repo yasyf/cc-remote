@@ -169,6 +169,7 @@ func TestRuntimeLauncher(t *testing.T) {
 		"umask 077",
 		`export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"`,
 		"export GOFLAGS=-p=2",
+		"export CARGO_BUILD_JOBS=2",
 		"export GOMEMLIMIT=2147483648",
 		`cd "$HOME/.cc-remote/orca"`,
 		"exec 9> serve.lock",
