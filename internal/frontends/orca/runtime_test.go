@@ -659,8 +659,13 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
+			if tt.kind == orca.AgentClaude {
+				if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(codexLogin), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cmd := exec.Command("sh", "-c", agent.Command(dir, orca.ShellPolicy{}))
-			cmd.Env = append(append(withoutCredentials(), stale...), "PATH="+bin+":"+os.Getenv("PATH"))
+			cmd.Env = append(append(withoutCredentials(), stale...), "PATH="+bin+":"+os.Getenv("PATH"), "CODEX_HOME="+t.TempDir())
 			go func() {
 				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
 				if err != nil {
@@ -678,6 +683,62 @@ func TestAgentCommandHandsEachActorOnlyItsDeliveredJudgeKey(t *testing.T) {
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
 				t.Errorf("the key directory survived: %v", err)
+			}
+		})
+	}
+}
+
+const codexLogin = "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$(cat)\" > \"$CODEX_HOME/login\"\n"
+
+func TestClaudeCommandSignsCodexInWithTheJudgeKey(t *testing.T) {
+	worker := "#!/bin/sh\ncat \"$CODEX_HOME/login\" 2>/dev/null || echo unset\n"
+	tests := []struct {
+		name, payload string
+		codex         bool
+		want          string
+	}{
+		{"with a judge key", "sk-test-key\nsk-judge-key\n", true, "login --with-api-key|sk-judge-key"},
+		{"without one", "sk-test-key\n", true, "unset"},
+		{"on a machine without codex", "sk-test-key\nsk-judge-key\n", false, "unset"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}
+			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Mkfifo(filepath.Join(dir, "key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(worker), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tt.codex {
+				if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(codexLogin), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := agent.Command(dir, orca.ShellPolicy{})
+			if strings.Contains(command, "sk-judge-key") {
+				t.Errorf("the command text carries the judge key: %s", command)
+			}
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Env = append(withoutCredentials(), "PATH="+bin+":/usr/bin:/bin", "CODEX_HOME="+t.TempDir())
+			go func() {
+				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = fifo.WriteString(tt.payload)
+				_ = fifo.Close()
+			}()
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tt.want {
+				t.Errorf("codex login saw %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -953,8 +1014,11 @@ func TestClaudeCommandCarriesItsSettingsThroughTheShell(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(worker), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(codexLogin), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("sh", "-c", agent.Command(dir, orca.ShellPolicy{}))
-	cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"))
+	cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"), "CODEX_HOME="+t.TempDir())
 	go func() {
 		fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
 		if err != nil {

@@ -139,7 +139,13 @@ there is refused.
 
 The worker's API key comes from the `orca.keys`
 command for its provider; the defaults read the macOS keychain items
-`cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. An optional
+`cc-remote-anthropic-api-key` and `cc-remote-openai-api-key`. A Claude worker
+also receives the `openai` key as `OPENAI_API_KEY`, which codex never reads, so
+its terminal signs the machine's codex in with that key through
+`codex login --with-api-key` before Claude starts, and `codex exec` and
+`codex-ask` there send it. A machine with no `codex` skips the sign-in. A Codex
+worker signs nothing in: `~/.codex/auth.json` would hand its own key to the
+shell tools its policy keeps it from. An optional
 `orca.keys.typesafe` command, which has no default, adds a TypeSafe key that
 every worker receives as `TYPESAFE_API_KEY`, the variable capt-hook's
 `evt.decide` reads on an API actor. Codex excludes it from its shell tools
