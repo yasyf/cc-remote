@@ -114,7 +114,7 @@ func (s *Store) export(ctx context.Context, cfg aws.Config, command Command) ([]
 		expires := creds.Expires.UTC()
 		out.Expiration = &expires
 	}
-	raw, err := json.MarshalIndent(out, "", "    ")
+	raw, err := json.MarshalIndent(out, "", "    ") //nolint:gosec // printing these credentials is the command's whole output, as aws configure export-credentials prints them
 	if err != nil {
 		return nil, err
 	}
