@@ -181,8 +181,9 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 }
 
-func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiGitHubLoginAndGitHubAppLines(t *testing.T) {
+func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiAndGitHubLoginLinesAndLeavesTheGitHubAppTokenToKeep(t *testing.T) {
 	dir := t.TempDir()
+	app := filepath.Join(dir, "app-ran")
 	script := func(name, line string) []string {
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+line+"'\n"), 0o700); err != nil {
@@ -192,22 +193,25 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiGitHubLoginAndGitHubA
 	}
 	for _, kind := range []string{orca.AgentClaude, orca.AgentCodex} {
 		agent := orca.Agent{Kind: kind}
-		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel"), config.KeyGemini: script("gemini", "gemini-sentinel"), config.KeyGitHubLogin: script("login", "login-sentinel"), config.KeyGitHubApp: script("app", "app-sentinel")}
+		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel"), config.KeyGemini: script("gemini", "gemini-sentinel"), config.KeyGitHubLogin: script("login", "login-sentinel"), config.KeyGitHubApp: {"sh", "-c", "touch " + app + "; exit 1"}}
 		got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" || string(got.githubLogin) != "login-sentinel" || string(got.githubApp) != "app-sentinel" {
-			t.Fatalf("Trunk key = %q, Gemini key = %q, GitHub login = %q, GitHub App token = %q", got.trunk, got.gemini, got.githubLogin, got.githubApp)
+		if string(got.trunk) != "trunk-sentinel" || string(got.gemini) != "gemini-sentinel" || string(got.githubLogin) != "login-sentinel" {
+			t.Fatalf("Trunk key = %q, Gemini key = %q, GitHub login = %q", got.trunk, got.gemini, got.githubLogin)
 		}
-		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\napp-sentinel\n\n"
+		if _, err := os.Stat(app); err == nil {
+			t.Error("the launch ran the github_app command, which only keep runs")
+		}
+		want := "model-sentinel\n\n\n\nAda O'Launcher\nada@example.test\ntrunk-sentinel\ngemini-sentinel\nlogin-sentinel\n\n" + orca.GitHubAppFile + "\n\n"
 		if payload := string(got.payload(firstAuthor)); payload != want {
 			t.Errorf("payload = %q, want %q", payload, want)
 		}
-		trunk, gemini, login, app := got.trunk, got.gemini, got.githubLogin, got.githubApp
+		trunk, gemini, login := got.trunk, got.gemini, got.githubLogin
 		got.clear()
-		if bytes.Count(trunk, []byte{0}) != len(trunk) || bytes.Count(gemini, []byte{0}) != len(gemini) || bytes.Count(login, []byte{0}) != len(login) || bytes.Count(app, []byte{0}) != len(app) {
-			t.Error("Trunk, Gemini, GitHub login or GitHub App token bytes survived clear")
+		if bytes.Count(trunk, []byte{0}) != len(trunk) || bytes.Count(gemini, []byte{0}) != len(gemini) || bytes.Count(login, []byte{0}) != len(login) {
+			t.Error("Trunk, Gemini or GitHub login bytes survived clear")
 		}
 		failing := filepath.Join(dir, "failing")
 		if err := os.WriteFile(failing, []byte("#!/bin/sh\necho trunk-leaked-sentinel; exit 3\n"), 0o700); err != nil {
