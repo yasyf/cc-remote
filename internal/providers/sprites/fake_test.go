@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os/exec"
 	"slices"
@@ -41,6 +43,8 @@ type fakeSprites struct {
 	readbackStatus  int
 	destroySurvives bool
 	flaky           []int
+	token           string
+	served          int
 
 	mu      sync.Mutex
 	sprites map[string]*fakeSprite
@@ -61,15 +65,19 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, slices.Clone(cmd.Args))
 	verb, args := cmd.Args[0], cmd.Args[1:]
 	if len(args) < 2 || args[0] != "-o" || args[1] != f.org {
 		f.t.Fatalf("sprite %s without -o %s: %q", verb, f.org, cmd.Args)
 	}
+	if want := f.childEnv(); !slices.Equal(cmd.Env, want) {
+		f.t.Errorf("sprite %s ran with environment %d entries, want %d carrying the provider token", verb, len(cmd.Env), len(want))
+	}
 	args = args[2:]
+	if verb == "api" {
+		return f.cliAPI(args)
+	}
+	f.calls = append(f.calls, slices.Clone(cmd.Args))
 	switch verb {
-	case "api":
-		return f.api(args)
 	case "create":
 		if len(args) != 2 || args[0] != "--skip-console" {
 			f.t.Fatalf("sprite create %q", args)
@@ -106,20 +114,57 @@ func (f *fakeSprites) Run(ctx context.Context, cmd providers.Command) (providers
 	return providers.Result{}, nil
 }
 
-func (f *fakeSprites) api(args []string) (providers.Result, error) {
+func (f *fakeSprites) childEnv() []string {
+	if f.token == "" {
+		return nil
+	}
+	return []string{tokenEnv + "=" + f.token}
+}
+
+func (f *fakeSprites) cliAPI(args []string) (providers.Result, error) {
 	if len(args) < 5 || args[1] != "--" || args[2] != "-sS" || args[3] != "-w" || args[4] != "\n%{http_code}" {
 		f.t.Fatalf("sprite api %q", args)
 	}
-	post := slices.Equal(args[5:], []string{"-X", "POST"})
-	if !post && len(args) != 5 {
+	method := http.MethodGet
+	switch {
+	case slices.Equal(args[5:], []string{"-X", http.MethodPost}):
+		method = http.MethodPost
+	case len(args) != 5:
 		f.t.Fatalf("sprite api %q", args)
 	}
-	respond := func(status int, body any) (providers.Result, error) {
+	status, body := f.answer(method, args[0])
+	return providers.Result{Stdout: fmt.Appendf(body, "\n%d", status)}, nil
+}
+
+func (f *fakeSprites) RoundTrip(r *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	f.ServeHTTP(recorder, r)
+	return recorder.Result(), nil
+}
+
+func (f *fakeSprites) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if got := r.Header.Get("Authorization"); got != "Bearer "+f.token {
+		f.t.Errorf("sprites api %s %s with authorization %q, want the bearer token", r.Method, r.URL, got)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.served++
+	status, body := f.answer(r.Method, r.URL.RequestURI())
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+func (f *fakeSprites) answer(method, target string) (int, []byte) {
+	f.calls = append(f.calls, []string{"api", method, target})
+	post := method == http.MethodPost
+	respond := func(status int, body any) (int, []byte) {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			f.t.Fatal(err)
+			f.t.Error(err)
 		}
-		return providers.Result{Stdout: fmt.Appendf(raw, "\n%d", status)}, nil
+		return status, raw
 	}
 	if len(f.flaky) > 0 {
 		status := f.flaky[0]
@@ -129,9 +174,10 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 	if f.status != 0 {
 		return respond(f.status, map[string]string{"error": "unauthorized"})
 	}
-	path, err := url.Parse(args[0])
+	path, err := url.Parse(target)
 	if err != nil {
-		f.t.Fatal(err)
+		f.t.Error(err)
+		return http.StatusBadRequest, nil
 	}
 	if rest, ok := strings.CutPrefix(path.Path, "/v1/sprites/"); ok {
 		name, sub, _ := strings.Cut(rest, "/")
@@ -143,7 +189,7 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 		case sub == "" && !post:
 			return respond(200, f.resource(name, sprite))
 		case sub == "services" && !post && sprite.noStorage:
-			return providers.Result{Stdout: []byte(storageNotReady + "\n503")}, nil
+			return http.StatusServiceUnavailable, []byte(storageNotReady)
 		case sub == "services" && !post:
 			listed := []map[string]any{}
 			for _, named := range slices.Sorted(maps.Keys(sprite.services)) {
@@ -158,10 +204,12 @@ func (f *fakeSprites) api(args []string) (providers.Result, error) {
 			sprite.idle()
 			return respond(200, map[string]string{})
 		}
-		f.t.Fatalf("sprite api %q", args)
+		f.t.Errorf("sprite api %s %s", method, target)
+		return http.StatusBadRequest, nil
 	}
 	if path.Path != "/v1/sprites" {
-		f.t.Fatalf("sprite api %s", args[0])
+		f.t.Errorf("sprite api %s %s", method, target)
+		return http.StatusBadRequest, nil
 	}
 	names := slices.Sorted(maps.Keys(f.sprites))
 	start := 0

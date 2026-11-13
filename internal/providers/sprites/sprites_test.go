@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,7 +52,8 @@ func newProvider(t *testing.T) (*Provider, *fakeSprites) {
 		t.Fatal(err)
 	}
 	fake := newFakeSprites(t, cli, "acme")
-	p.Runner = fake
+	fake.token = "test-token"
+	p.Runner, p.client, p.base, p.token = fake, &http.Client{Transport: fake}, "http://sprites.test", func() string { return fake.token }
 	return p, fake
 }
 
@@ -234,7 +236,7 @@ func TestCheck(t *testing.T) {
 	}{
 		{"logged in", func(*Provider, *fakeSprites) {}, ""},
 		{"logged out", func(_ *Provider, f *fakeSprites) { f.status = 401 }, "not logged in to sprites org acme; run 'sprite login -o acme'"},
-		{"no CLI", func(_ *Provider, f *fakeSprites) { f.cli = "elsewhere" }, "not found; install it from https://sprites.dev"},
+		{"no CLI", func(p *Provider, _ *fakeSprites) { p.CLI = filepath.Join(filepath.Dir(p.CLI), "elsewhere") }, "not found; install it from https://sprites.dev"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -460,7 +462,7 @@ func TestSuspendStopsEveryServiceAndReturnsOnceTheSpritePauses(t *testing.T) {
 	var stops []string
 	for _, call := range fake.calls {
 		if call[0] == "api" && slices.Contains(call, "POST") {
-			stops = append(stops, call[3])
+			stops = append(stops, call[2])
 		}
 	}
 	want := []string{"/v1/sprites/alpha/services/cc-remote-orca/stop", "/v1/sprites/alpha/services/cc-remote-payload/stop", "/v1/sprites/alpha/services/sshd/stop"}
@@ -728,4 +730,55 @@ func TestHelperOutlivesTheBinaryThatInstalledIt(t *testing.T) {
 		t.Error("an unchanged helper was rewritten")
 	}
 	install("v2")
+}
+
+func TestRESTGoesOverHTTPWithATokenAndThroughTheCLIWithout(t *testing.T) {
+	for _, token := range []string{"test-token", ""} {
+		t.Run("token "+strconv.Quote(token), func(t *testing.T) {
+			p, fake := newProvider(t)
+			fake.token = token
+			if _, err := p.Create(t.Context(), spec("alpha", nil)); err != nil {
+				t.Fatal(err)
+			}
+			fake.sprites["alpha"].services = map[string]string{"sshd": "running"}
+			if err := p.Suspend(t.Context(), "alpha"); err != nil {
+				t.Fatal(err)
+			}
+			if machine, err := p.Get(t.Context(), "alpha"); err != nil || machine.State != providers.StateSuspended {
+				t.Errorf("after the suspend, Get = %+v, %v; want it paused", machine, err)
+			}
+			api := 0
+			for _, call := range fake.calls {
+				if call[0] == "api" {
+					api++
+				}
+			}
+			want := api
+			if token == "" {
+				want = 0
+			}
+			if api == 0 || fake.served != want {
+				t.Errorf("served %d of %d API calls over HTTP, want %d", fake.served, api, want)
+			}
+		})
+	}
+}
+
+func TestDecodeKeyringReadsTheGoKeyringEncoding(t *testing.T) {
+	tests := []struct {
+		name, stored, want string
+		fails              bool
+	}{
+		{name: "base64", stored: keyringBase64 + "b3JnL3Rva2VuLWlkL3NlY3JldA==", want: "org/token-id/secret"},
+		{name: "raw", stored: "org/token-id/secret", want: "org/token-id/secret"},
+		{name: "corrupt base64", stored: keyringBase64 + "!!", fails: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeKeyring(tt.stored)
+			if (err != nil) != tt.fails || got != tt.want {
+				t.Errorf("decodeKeyring(%q) = %q, %v; want %q, failure %t", tt.stored, got, err, tt.want, tt.fails)
+			}
+		})
+	}
 }
