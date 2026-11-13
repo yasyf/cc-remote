@@ -446,6 +446,15 @@ place, and its brief and task record replace the earlier ones. Only a machine
 whose runtime runs as a sprite-env service is continued; on any other the
 command refuses before it changes anything.
 
+`--resume <session-id>`, claude only and only with `--existing`, starts the
+continued worker as `claude --resume <session-id>`, so a worker whose machine
+restarted under it keeps its whole conversation instead of starting over from
+its commits. The session's transcript must be in the machine's
+`~/.claude/projects` for the checkout. When Claude asks whether to resume an
+old, large session from a summary, the startup picks the full session, and it
+takes Claude's `bypass permissions on` status line as ready, since a resumed
+screen shows the conversation's end, not the startup banner.
+
 The key, worker, brief, and task record then follow the ordinary `prepare`
 steps. A failure keeps the machine, any saved task record, and any started
 worker or forward as they are.

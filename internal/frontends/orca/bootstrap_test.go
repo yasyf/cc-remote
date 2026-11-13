@@ -77,6 +77,26 @@ func TestBootstrapWalksClaudesFirstRunScreens(t *testing.T) {
 	})
 }
 
+func TestBootstrapResumesTheFullSessionAndTakesItsStatusLineAsReady(t *testing.T) {
+	summary := screenOf(t, "This session is 3h old and 240k tokens.", "❯ 1. Resume from summary (recommended)", "  2. Resume full session as-is", "  3. Don't ask me again")
+	full := screenOf(t, "This session is 3h old and 240k tokens.", "  1. Resume from summary (recommended)", "❯ 2. Resume full session as-is", "  3. Don't ask me again")
+	resumed := screenOf(t, "❯ ", "  ⏵⏵ bypass permissions on (shift+tab to cycle)")
+	fake := newFakeOrca(t).on(sendEnter, ok(accepted)).on(sendDown, ok(accepted)).
+		on(waitIdle, ok(`{"wait":{"handle":"term-1","condition":"tui-idle","satisfied":true,"status":"running","exitCode":null}}`))
+	for _, screen := range []string{summary, full, resumed, resumed} {
+		fake.on(readScreen, screen)
+	}
+	steps, err := orca.NewClient(fake).On(env, runtimeID).Bootstrap(context.Background(), "term-1", orca.ClaudeStartup, true, bootstrapPoll)
+	if err != nil || strings.Join(steps, ",") != "resume" {
+		t.Fatalf("Bootstrap = %v, %v", steps, err)
+	}
+	for command, want := range map[string]int{sendDown: 1, sendEnter: 1, waitIdle: 1} {
+		if got := fake.called(command); got != want {
+			t.Errorf("%q called %d times, want %d", command, got, want)
+		}
+	}
+}
+
 func TestBootstrapPollsOnlyWhenTheNextScreenIsNotReady(t *testing.T) {
 	for _, loading := range []bool{false, true} {
 		t.Run(fmt.Sprint(loading), func(t *testing.T) {

@@ -38,6 +38,7 @@ var (
 	agentValue = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	fableModel = regexp.MustCompile(`(?i)(^|[-_.])fable([-_.0-9]|$)`)
 	keyDir     = regexp.MustCompile(`^/[A-Za-z0-9._/-]+/\.cc-remote/orca/key\.[A-Za-z0-9]+$`)
+	sessionID  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 )
 
 type Runtime struct {
@@ -74,6 +75,7 @@ type Agent struct {
 	MCP      []string `json:"mcp,omitempty"`
 	Env      []string `json:"env,omitempty"`
 	Settings string   `json:"settings,omitempty"`
+	Resume   string   `json:"resume,omitempty"`
 }
 
 const KeyDirScript = `set -eu
@@ -325,6 +327,12 @@ func (a Agent) Validate() error {
 			return fmt.Errorf("--settings %q is not a JSON object, and claude drops an invalid --settings whole", a.Settings)
 		}
 	}
+	if a.Resume != "" && a.Kind != AgentClaude {
+		return fmt.Errorf("--resume is a claude setting; %s takes none", a.Kind)
+	}
+	if a.Resume != "" && !sessionID.MatchString(a.Resume) {
+		return fmt.Errorf("--resume %q is not a Claude session id", a.Resume)
+	}
 	if a.Kind == AgentCodex && len(a.MCP) > 1 {
 		return errors.New("codex takes one --mcp-config, the TOML inline table that becomes its whole mcp_servers")
 	}
@@ -406,11 +414,15 @@ func (a Agent) Argv(policy ShellPolicy) []string {
 	if len(servers) == 0 {
 		servers = []string{noClaudeMCP}
 	}
-	return slices.Concat(
+	argv := slices.Concat(
 		[]string{"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", a.settings()},
 		[]string{"--strict-mcp-config", "--mcp-config"}, servers,
 		[]string{"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", a.Model, "--effort", a.Effort},
 	)
+	if a.Resume != "" {
+		argv = append(argv, "--resume", a.Resume)
+	}
+	return argv
 }
 
 func (a Agent) settings() string {

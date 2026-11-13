@@ -893,6 +893,8 @@ func TestPrepareRefusesBadInputBeforeAnyEffect(t *testing.T) {
 		{"existing with an empty ref", slices.Concat(claude, []string{"--existing", "--ref=", "--brief-file", brief}), "takes no --ref"},
 		{"existing reaches the config", slices.Concat(claude, []string{"--existing", "--brief-file", brief}), "read config"},
 		{"warm with existing", slices.Concat(claude, []string{"--warm", "--existing", "--brief-file", brief}), "pass only one"},
+		{"resume without existing", slices.Concat(claude, []string{"--resume", "5d576546-4c87-4a78-94b4-945eb9e49c86", "--brief-file", brief}), "needs --existing"},
+		{"existing resume reaches the config", slices.Concat(claude, []string{"--existing", "--resume", "5d576546-4c87-4a78-94b4-945eb9e49c86", "--brief-file", brief}), "read config"},
 		{"warm with a ref reaches the config", slices.Concat(claude, []string{"--warm", "--ref", "feature", "--brief-file", brief}), "read config"},
 	}
 	for _, tt := range tests {

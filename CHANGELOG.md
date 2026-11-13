@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca prepare --existing --resume <session-id>` resumes a Claude worker's
+  own session.** A worker whose Sprite restarted under it was restarted fresh
+  on its checkout and lost its conversation. With `--resume`, the continued
+  worker runs `claude --resume <session-id>` from the transcript on the
+  machine, the startup answers Claude's resume-from-summary prompt with the
+  full session, and it takes the `bypass permissions on` status line as ready
+  when the banner has scrolled away. `--resume` takes a session id and refuses
+  codex and a prepare without `--existing`.
 - **`orca.keys.aws` keeps a worker's AWS session fresh for as long as the
   worker runs.** An AWS session that `orca.keys.env` exports lasts as long as
   the session the launch minted, four hours for a typical role, and a worker
