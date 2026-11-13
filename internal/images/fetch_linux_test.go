@@ -2,6 +2,7 @@ package images
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
@@ -234,5 +235,41 @@ func TestFetchAdmitsRangesInOrder(t *testing.T) {
 				t.Errorf("the server was asked for %q, want each range once: %q", requested, want)
 			}
 		})
+	}
+}
+
+func TestFetchFailsOnceTheStagingWriteStopsReading(t *testing.T) {
+	const size, span = 4 << 20, 1 << 20
+	payload := make([]byte, size)
+	sum := sha256.Sum256(payload)
+	sha := hex.EncodeToString(sum[:])
+	dd, err := exec.LookPath("dd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(serveRanges(payload))
+	t.Cleanup(server.Close)
+	root, fakes := t.TempDir(), t.TempDir()
+	store, bundle := filepath.Join(root, "store"), filepath.Join(root, "ca.pem")
+	if err := os.WriteFile(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeFakes(t, fakes, map[string]string{"dd": "#!/bin/sh\ncase \"$1\" in of=*) head -c 1 > /dev/null; exit 5 ;; esac\nexec " + quote(dd) + " \"$@\"\n"})
+	stale := stageStaleDownload(t, store, sha, PayloadArtifact)
+	fetch := strings.Replace(PayloadArtifact.fetchScript(), "store="+PayloadStore+"\n", "store="+quote(store)+"\n", 1)
+	fetch = strings.Replace(fetch, "range="+strconv.Itoa(fetchRange)+"\n", "range="+strconv.Itoa(span)+"\n", 1)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "-c", fetch, "fetch-payload", sha, strconv.Itoa(size))
+	cmd.WaitDelay = time.Second
+	cmd.Stdin = bytes.NewReader(PayloadURL{raw: server.URL + "/tools.sqfs"}.curlConfig())
+	cmd.Env = append(os.Environ(), "CURL_CA_BUNDLE="+bundle, "PATH="+fakes+":"+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("fetch was still running after a minute with its staging write gone:\n%s", out)
+	}
+	assertOnlyTheStaleDownloadRemains(t, store, stale)
+	if want := "dd exit 5, openssl exit 0)"; exitCode(err) != 1 || !strings.Contains(string(out), "cc-remote: the payload download failed (") || !strings.Contains(string(out), want) {
+		t.Fatalf("fetch = %v\n%s\nwant exit 1 with a failed download ending %q", err, out, want)
 	}
 }

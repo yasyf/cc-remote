@@ -207,6 +207,13 @@ streams=` + strconv.Itoa(fetchStreams) + `
 range=` + strconv.Itoa(fetchRange) + `
 config="$(cat)"
 
+close_fds() {
+  local fd
+  for fd; do
+    exec {fd}>&-
+  done
+}
+
 fetch_ranges() {
   local count=$(((size + range - 1) / range)) index=0 launched=0 start end status code hold reader writer
   local -a pids=() readers=()
@@ -223,14 +230,18 @@ fetch_ranges() {
       exec {hold}>&-
       rm -f "$work/part"
       echo 1 > "$work/exit.$launched"
+      readers+=("$reader")
       {
+        close_fds "${readers[@]:index}" "$writer"
         curl -q --config <(printf '%s\n' "$config") --silent --fail --proto =https --connect-timeout 30 --max-time 600 \
           --range "$start-$end" --max-filesize "$((end - start + 1))" \
           --write-out '%{stderr}%{http_code}' 2> "$work/http.$launched"
         echo "$?" > "$work/exit.$launched"
-      } | dd bs="$range" iflag=fullblock status=none >&"$writer" &
+      } | {
+        close_fds "${readers[@]:index}"
+        exec dd bs="$range" iflag=fullblock status=none >&"$writer"
+      } &
       pids+=("$!")
-      readers+=("$reader")
       exec {writer}>&-
       launched=$((launched + 1))
     done
