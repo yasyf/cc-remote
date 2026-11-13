@@ -8,6 +8,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.4
+	golang.org/x/crypto v0.59.0
 	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.11
 	namespacelabs.dev/integrations v0.0.11-0.20260930225230-b8b7cb1d5dda
@@ -22,10 +23,10 @@ require (
 	github.com/jxskiss/base62 v1.1.0 // indirect
 	github.com/segmentio/ksuid v1.0.4 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
-	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	inet.af/tcpproxy v0.0.0-20231102063150-2862066fc2a9 // indirect
 	namespacelabs.dev/go-ids v0.0.0-20221124082625-9fc72ee06af7 // indirect

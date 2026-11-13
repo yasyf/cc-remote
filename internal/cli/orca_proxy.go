@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
@@ -26,10 +28,6 @@ var (
 )
 
 type taskProvider func(task *orcaTask) (providers.Provider, error)
-
-type portDialer interface {
-	Dial(ctx context.Context, id string, port int) (io.ReadWriteCloser, error)
-}
 
 type proxies struct {
 	dir  state.Dir
@@ -52,6 +50,10 @@ type heldProxy struct {
 	cancel   context.CancelFunc
 	bridges  sync.WaitGroup
 	serving  chan struct{}
+	tunneler providers.Tunneler
+
+	dialing sync.Mutex
+	tunnel  providers.Tunnel
 }
 
 func newProxies(dir state.Dir, log *slog.Logger, open taskProvider) *proxies {
@@ -81,7 +83,6 @@ func (t *orcaTask) hold(ctx context.Context, config string) error {
 			}
 		}
 	}
-	t.Forward = nil
 	return nil
 }
 
@@ -197,9 +198,9 @@ func (p *proxies) hold(ctx context.Context, task *orcaTask) error {
 	if err != nil {
 		return err
 	}
-	dialer, ok := provider.(portDialer)
+	tunneler, ok := provider.(providers.Tunneler)
 	if !ok {
-		return fmt.Errorf("provider %s dials no machine port", task.Provider)
+		return fmt.Errorf("provider %s opens no tunnel to a machine", task.Provider)
 	}
 	address := net.JoinHostPort(orca.Loopback, strconv.Itoa(task.Port))
 	listener, err := net.Listen("tcp", address)
@@ -215,10 +216,10 @@ func (p *proxies) hold(ctx context.Context, task *orcaTask) error {
 		return errors.Join(err, listener.Close())
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	held := &heldProxy{task: task, listener: listener, unlock: unlock, cancel: cancel, serving: make(chan struct{})}
+	held := &heldProxy{task: task, listener: listener, unlock: unlock, cancel: cancel, serving: make(chan struct{}), tunneler: tunneler}
 	p.held[task.Workspace] = held
 	p.succeed(task.Workspace)
-	go p.serve(ctx, held, dialer)
+	go p.serve(ctx, held)
 	return nil
 }
 
@@ -228,11 +229,12 @@ func (p *proxies) drop(name string) {
 	held.cancel()
 	_ = held.listener.Close()
 	<-held.serving
+	held.close()
 	held.bridges.Wait()
 	held.unlock()
 }
 
-func (p *proxies) serve(ctx context.Context, held *heldProxy, dialer portDialer) {
+func (p *proxies) serve(ctx context.Context, held *heldProxy) {
 	defer close(held.serving)
 	for {
 		local, err := held.listener.Accept()
@@ -242,30 +244,78 @@ func (p *proxies) serve(ctx context.Context, held *heldProxy, dialer portDialer)
 			}
 			return
 		}
-		held.bridges.Go(func() { p.bridge(ctx, held.task, dialer, local) })
+		held.bridges.Go(func() { p.bridge(ctx, held, local) })
 	}
 }
 
-func (p *proxies) bridge(ctx context.Context, task *orcaTask, dialer portDialer, local net.Conn) {
+func (p *proxies) bridge(ctx context.Context, held *heldProxy, local net.Conn) {
 	defer func() { _ = local.Close() }()
-	remote, err := dialer.Dial(ctx, task.Machine, task.Port)
+	task := held.task
+	remote, err := held.dial(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			p.fail(task.Workspace, fmt.Errorf("dialing port %d on %s: %w", task.Port, task.Machine, err))
+			p.fail(task.Workspace, fmt.Errorf("reaching port %d on %s: %w", task.Port, task.Machine, err))
 		}
 		return
 	}
 	p.succeed(task.Workspace)
+	defer func() { _ = remote.Close() }()
+	stop := context.AfterFunc(ctx, func() { _ = local.Close() })
+	defer stop()
 	sent := make(chan struct{})
 	go func() {
 		defer close(sent)
 		_, _ = io.Copy(remote, local)
-		_ = remote.Close()
+		_ = closeWrite(remote)
 	}()
 	_, _ = io.Copy(local, remote)
-	_ = remote.Close()
-	_ = local.Close()
+	_ = closeWrite(local)
 	<-sent
+}
+
+func (h *heldProxy) dial(ctx context.Context) (net.Conn, error) {
+	h.dialing.Lock()
+	defer h.dialing.Unlock()
+	if h.tunnel == nil {
+		tunnel, err := h.tunneler.Tunnel(ctx, h.task.Machine)
+		if err != nil {
+			return nil, err
+		}
+		h.tunnel = tunnel
+		go h.forget(tunnel)
+	}
+	conn, err := h.tunnel.Dial("tcp", net.JoinHostPort(orca.Loopback, strconv.Itoa(h.task.Port)))
+	var refused *ssh.OpenChannelError
+	if err != nil && !errors.As(err, &refused) {
+		_ = h.tunnel.Close()
+		h.tunnel = nil
+	}
+	return conn, err
+}
+
+func (h *heldProxy) forget(tunnel providers.Tunnel) {
+	_ = tunnel.Wait()
+	h.dialing.Lock()
+	defer h.dialing.Unlock()
+	if h.tunnel == tunnel {
+		h.tunnel = nil
+	}
+}
+
+func (h *heldProxy) close() {
+	h.dialing.Lock()
+	defer h.dialing.Unlock()
+	if h.tunnel != nil {
+		_ = h.tunnel.Close()
+		h.tunnel = nil
+	}
+}
+
+func closeWrite(conn net.Conn) error {
+	if half, ok := conn.(interface{ CloseWrite() error }); ok {
+		return half.CloseWrite()
+	}
+	return conn.Close()
 }
 
 func (p *proxies) fail(name string, err error) {

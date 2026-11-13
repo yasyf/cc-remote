@@ -59,7 +59,7 @@ type piped struct {
 	closed sync.Once
 }
 
-func (p *Provider) Dial(ctx context.Context, id string, port int) (io.ReadWriteCloser, error) {
+func (p *Provider) dial(ctx context.Context, id string, port int) (io.ReadWriteCloser, error) {
 	if providers.CheckName(id, nameLimit) != nil {
 		return nil, fmt.Errorf("sprite %q: %w", id, providers.ErrNotFound)
 	}

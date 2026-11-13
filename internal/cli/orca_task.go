@@ -851,7 +851,6 @@ func (d orcaDriver) taskOn(result *workspace.Result, agent orca.Agent, provider 
 	switch {
 	case result.Compute != nil:
 		task.Gateway = &orcaGateway{Instance: result.Machine, ContainerPort: result.Compute.ContainerPort, Lock: d.state.OrcaGatewayLock(result.Name, result.Machine), Log: d.state.OrcaForwardLog(result.Name)}
-	case task.proxied():
 	default:
 		control, err := state.NewOrcaControl()
 		if err != nil {

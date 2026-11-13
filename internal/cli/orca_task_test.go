@@ -428,8 +428,9 @@ func TestOrcaTaskRoundTripsWithoutSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded, err := loadTask(dir, "task-b"); err != nil || sprite.Forward != nil || sprite.Gateway != nil || loaded.Forward != nil || !loaded.proxied() || loaded.dir != dir {
-		t.Errorf("a Sprite task = %+v, loaded %+v, %v; want no SSH forward and the keeper's proxy", sprite, loaded, err)
+	t.Cleanup(func() { _ = os.Remove(filepath.Dir(sprite.Forward.Control)) })
+	if loaded, err := loadTask(dir, "task-b"); err != nil || sprite.Gateway != nil || *loaded.Forward != *sprite.Forward || !loaded.proxied() || loaded.dir != dir {
+		t.Errorf("a Sprite task = %+v, loaded %+v, %v; want it proxied by the keeper, its SSH forward still recorded for a keeper of an earlier release", sprite, loaded, err)
 	}
 }
 
