@@ -235,12 +235,15 @@ func TestReleaseLeavesAKeptSpriteTasksForwardHeld(t *testing.T) {
 	}
 }
 
-func TestKeepClosesASpriteTasksRecordedSSHForwardAndHoldsItsPort(t *testing.T) {
+func TestKeepLeavesALiveRecordedSSHForwardAndHoldsItsPortOnceItsMasterExits(t *testing.T) {
 	fastProxies(t)
 	standInKeeper(t)
-	bin, calls := t.TempDir(), filepath.Join(t.TempDir(), "ssh")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + calls + "\n"
+	bin, calls, live := t.TempDir(), filepath.Join(t.TempDir(), "ssh"), filepath.Join(t.TempDir(), "live")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + calls + "\n[ -e " + live + " ]\n"
 	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(live, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
@@ -249,21 +252,41 @@ func TestKeepClosesASpriteTasksRecordedSSHForwardAndHoldsItsPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(control)) })
-	if err := os.WriteFile(filepath.Join(filepath.Dir(control), "master"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	dir := state.Dir(t.TempDir())
 	runProxies(t, dir, newEchoTunnels(t))
 	recorded := &orcaTunnel{Host: "lane-a", Config: "/recorded/ssh", Control: control, Log: dir.OrcaForwardLog("lane-a")}
 	task := spriteTask(t, dir, "lane-a", recorded)
+	check := strings.Join(recorded.args("-O", "check"), " ")
+	ran := func() []string {
+		raw, err := os.ReadFile(calls)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(string(raw)), "\n")
+	}
 
 	if err := state.Write(dir.OrcaKept("lane-a"), []byte("/recorded/config.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
+	for len(ran()) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("the keeper never checked the recorded master three times")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if task.up(t.Context()) {
+		t.Error("the keeper held the port of a task whose recorded master still answers")
+	}
+	if err := os.Remove(live); err != nil {
+		t.Fatal(err)
+	}
 	for !task.up(t.Context()) {
 		if time.Now().After(deadline) {
-			t.Fatal("the keeper never held the migrated task's port")
+			t.Fatal("the keeper never held the port once the recorded master exited")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -271,14 +294,10 @@ func TestKeepClosesASpriteTasksRecordedSSHForwardAndHoldsItsPort(t *testing.T) {
 		t.Errorf("after the migration the task records %+v, %v; want its SSH forward kept for a keeper of an earlier release", loaded, err)
 	}
 	echoes(t, task.Port)
-	raw, err := os.ReadFile(calls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ssh := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	want := []string{strings.Join(recorded.args("-O", "check"), " "), strings.Join(recorded.args("-O", "exit"), " ")}
-	if !slices.Equal(ssh, want) {
-		t.Errorf("ssh ran %q, want the recorded master checked and closed", ssh)
+	for _, call := range ran() {
+		if call != check {
+			t.Errorf("ssh ran %q; want only the recorded master checked, never closed, since a prepare of an earlier release runs through it", call)
+		}
 	}
 }
 

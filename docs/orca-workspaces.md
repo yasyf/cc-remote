@@ -351,8 +351,10 @@ Sprite task. `create`, `prepare`, and `reconnect` keep a Sprite task as soon as
 they need its forward and wait for keep to hold the port. keep reads the kept
 tasks every second, so `orca stop` and `destroy` close a Sprite lane's port and
 its open connections at once. For a Sprite task an earlier release recorded
-with an SSH forward, keep closes that forward's master and holds the same port,
-so Orca's saved environment still reaches the runtime. When a newer keep takes
+with an SSH forward, keep leaves that forward running while its master answers,
+since a `prepare` of that release still runs its guest bootstrap and brief
+through it, and holds the same port once the master exits, so Orca's saved
+environment still reaches the runtime. When a newer keep takes
 over, open connections drop for the moment between the two processes, and Orca
 connects again.
 
