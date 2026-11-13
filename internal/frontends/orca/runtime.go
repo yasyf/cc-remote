@@ -458,8 +458,8 @@ func (a Agent) JudgeKeyProvider() string {
 func (a Agent) Command(dir string, policy ShellPolicy) string {
 	judge := a.judge()
 	script := strings.Join([]string{
-		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; IFS= read -r environment || environment=; IFS= read -r app || app=; IFS= read -r aws || aws=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable, githubAppVariable, awsVariable}, githubVariables), " "),
+		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; IFS= read -r environment || environment=; IFS= read -r aws || aws=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable, awsVariable}, githubVariables), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || export ` + judge.variable() + `="$judge"; }`,
 		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
@@ -469,9 +469,9 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$gemini" || export ` + geminiVariable + `="$gemini"; }`,
 		`{ test -z "$login" || gh config set -h github.com user "$login"; }`,
 		`{ test -z "$environment" || export $environment; }`,
-		`{ test -z "$app" || { printf '%s' "$app" | (` + GitHubAppScript + `) && export ` + githubAppVariable + `=` + githubAppFile + `; }; }`,
+		"export " + githubAppVariable + "=" + githubAppFile,
 		`{ test -z "$aws" || { printf '%s' "$aws" | (` + AWSScript + `) && printf '[default]\ncredential_process = cat ` + awsFile + `\n' > ` + awsConfigFile + ` && export ` + awsVariable + `=` + awsConfigFile + `; }; }`,
-		"unset key judge typesafe github trunk gemini name email login environment app aws",
+		"unset key judge typesafe github trunk gemini name email login environment aws",
 		"export " + strings.Join(a.exports(), " "),
 		"exec " + remote.QuoteAll(a.Argv(policy)),
 	}, " && ")

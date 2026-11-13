@@ -85,6 +85,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its `Depends` names.
 
 ### Changed
+- **A launch no longer waits on, or fails at, the GitHub App token.** A
+  launch ran `orca.keys.github_app` on the Mac before it started the worker,
+  so one failed mint failed the launch, and a warm claim destroyed the Sprite
+  it had already claimed and claimed another. ccx refuses every mint for five
+  minutes after one fails, its own 10-second deadline killing a stalled
+  private key command included, so a failure on a busy Mac failed every launch
+  in those five minutes. A launch now never runs the command, and
+  `cc-remote orca keep`, which already wrote each renewed token to every kept
+  worker, writes the first one too, at its first pass after the launch. Every
+  worker's terminal exports `CCX_GITHUB_APP_TOKEN_FILE` naming
+  `/dev/shm/cc-remote/github-app.json`, and the worker's ccx reads on
+  `GH_TOKEN` until that file appears.
 - **A blobless checkout is an opt-in profile value.** A profile's `checkout`
   stays `shallow` by default, a depth-1 clone of the requested ref.
   `checkout: blobless` opts into a clone with the whole history and no file

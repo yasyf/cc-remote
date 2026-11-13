@@ -72,8 +72,9 @@ orca prune, so a stopped lane's or a gone machine's Orca environment does not li
 reading and retrying. Each pass reads again the config that kept each task, the one its create,
 prepare or reconnect named, so a key added to that config reaches the task with no restart of keep.
 When a task's config names an orca.keys.github_app command, the pass runs it and writes a line it has
-not yet written to that task's machine into its GitHub App token file, so a worker's ccx keeps reading
-on the app's quota past the hour its launch token lasts. When a task's config names an orca.keys.aws
+not yet written to that task's machine into its GitHub App token file. A launch never runs that
+command, so this write hands a worker its first token as well as each renewal, and a failed mint on
+the Mac never fails a launch. When a task's config names an orca.keys.aws
 command, a pass runs it once the session it last printed has under an hour left and writes the new
 session into the worker's AWS credentials file the same way, so a worker's AWS reads outlive the
 session its launch captured. Tasks whose configs name the same command share what it prints. One keep runs per state directory: a keep that finds another running

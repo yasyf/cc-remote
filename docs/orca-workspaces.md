@@ -160,15 +160,18 @@ never the token.
 An optional `orca.keys.github_app` command, also with no default, prints a
 GitHub App installation token as the one JSON line
 `[ccx, vcs, auth, token, --json, owner/name]` prints on a Mac that holds
-the app's key. The worker's terminal writes it to
-`/dev/shm/cc-remote/github-app.json`, in memory and readable only by the
-worker, and exports `CCX_GITHUB_APP_TOKEN_FILE` naming it, so the worker's ccx
-reads GitHub on that installation through its cache instead of on `GH_TOKEN`,
-which stays the token git and gh write with. The app's private key never
-leaves the Mac. A token lasts an hour, so `cc-remote orca keep` runs the
-command of each kept worker's config again on each pass and writes any line it
-has not yet written into that worker's file, and ccx mints a new token once the
-one it printed has under 55 minutes left.
+the app's key. A launch never runs it: `cc-remote orca keep` runs the command
+of each kept worker's config on each pass and writes any line it has not yet
+written to `/dev/shm/cc-remote/github-app.json` on that worker, in memory and
+readable only by the worker, so a mint that fails on the Mac costs a worker
+its app reads until a later pass, never its launch. Every worker's terminal
+exports `CCX_GITHUB_APP_TOKEN_FILE` naming that file, and ccx reads it again
+on each call: until keep's first write after the launch, usually within one
+30-second pass, the worker's ccx reads on `GH_TOKEN`, and from then on it reads
+GitHub on that installation through its cache. `GH_TOKEN` stays the token git
+and gh write with, and the app's private key never leaves the Mac. A token
+lasts an hour, and ccx mints a new one once the one it printed has under 55
+minutes left, which keep's next pass writes.
 
 An optional `orca.keys.aws` command, also with no default, prints an AWS
 session as the process credentials

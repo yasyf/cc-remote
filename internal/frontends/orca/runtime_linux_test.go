@@ -11,21 +11,29 @@ import (
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 )
 
-func TestAgentCommandPointsCcxAtTheGitHubAppTokenItWroteToMemory(t *testing.T) {
+func TestAgentCommandPointsCcxAtTheGitHubAppTokenFileKeepWrites(t *testing.T) {
 	const file = "/dev/shm/cc-remote/github-app.json"
 	if _, err := os.Stat(file); err == nil {
 		t.Skip("a worker on this machine reads " + file)
 	}
 	t.Cleanup(func() { _ = os.Remove(file) })
-	worker := "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"${CCX_GITHUB_APP_TOKEN_FILE-unset}\" \"$(cat \"$CCX_GITHUB_APP_TOKEN_FILE\" 2>/dev/null)\" \"$(stat -c %a \"$CCX_GITHUB_APP_TOKEN_FILE\" 2>/dev/null)\" \"${app-unset}\"\n"
+	worker := "#!/bin/sh\nprintf '%s|%s|%s\\n' \"${CCX_GITHUB_APP_TOKEN_FILE-unset}\" \"$(cat \"$CCX_GITHUB_APP_TOKEN_FILE\" 2>/dev/null)\" \"$(stat -c %a \"$CCX_GITHUB_APP_TOKEN_FILE\" 2>/dev/null)\"\n"
 	tests := []struct {
-		name, kind, payload, want string
+		name, kind, written, want string
 	}{
-		{"claude with a pushed token", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n\n\n\n\n{\"token\":\"ghs-sentinel\"}\n", file + `|{"token":"ghs-sentinel"}|600|unset`},
-		{"codex without one", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "unset|||unset"},
+		{"claude before keep writes a token", orca.AgentClaude, "", file + "||"},
+		{"codex once keep wrote one", orca.AgentCodex, `{"token":"ghs-sentinel"}`, file + `|{"token":"ghs-sentinel"}|600`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			_ = os.Remove(file)
+			if tt.written != "" {
+				keep := exec.Command("sh", "-c", orca.GitHubAppScript)
+				keep.Stdin = strings.NewReader(tt.written)
+				if out, err := keep.CombinedOutput(); err != nil {
+					t.Fatalf("keep's write: %v: %s", err, out)
+				}
+			}
 			agent := orca.Agent{Kind: tt.kind, Model: "m", Effort: "e"}
 			bin, dir := t.TempDir(), filepath.Join(t.TempDir(), "key.abc")
 			if err := os.Mkdir(dir, 0o700); err != nil {
@@ -37,18 +45,14 @@ func TestAgentCommandPointsCcxAtTheGitHubAppTokenItWroteToMemory(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(bin, tt.kind), []byte(worker), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			command := agent.Command(dir, orca.ShellPolicy{})
-			if strings.Contains(command, "ghs-sentinel") {
-				t.Errorf("the command text carries the token: %s", command)
-			}
-			cmd := exec.Command("sh", "-c", command)
-			cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"), "CCX_GITHUB_APP_TOKEN_FILE=stale", "app=stale")
+			cmd := exec.Command("sh", "-c", agent.Command(dir, orca.ShellPolicy{}))
+			cmd.Env = append(withoutCredentials(), "PATH="+bin+":"+os.Getenv("PATH"), "CCX_GITHUB_APP_TOKEN_FILE=stale")
 			go func() {
 				fifo, err := os.OpenFile(filepath.Join(dir, "key"), os.O_WRONLY, 0)
 				if err != nil {
 					return
 				}
-				_, _ = fifo.WriteString(tt.payload)
+				_, _ = fifo.WriteString("sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n")
 				_ = fifo.Close()
 			}()
 			out, err := cmd.Output()
@@ -80,7 +84,7 @@ printf '%s|%s|%s|%s\n' "${AWS_CONFIG_FILE-unset}" "$(sh -c "$process" 2>/dev/nul
 		name, kind, payload, want string
 	}{
 		{"codex without a session", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "unset|||unset"},
-		{"claude with a session", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n\n\n\n\n\n" + session + "\n", config + "|" + session + "|600|unset"},
+		{"claude with a session", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n\n\n\n\n" + session + "\n", config + "|" + session + "|600|unset"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
