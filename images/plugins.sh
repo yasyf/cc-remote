@@ -42,7 +42,7 @@ claude_json() {
 }
 
 plugin_path() {
-  jq -er --arg id "$2" '.[] | select(.id == $id) | .installPath' <<< "$1"
+  jq -er --arg id "$2" '.[] | select(.id == $id and .scope == "user") | .installPath' <<< "$1"
 }
 
 pinned_blob() {
@@ -238,7 +238,7 @@ PINS
 }
 
 healthy_plugins() {
-  jq -r --args '.[] | select((.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$1" \
+  jq -r --args '.[] | select(.scope == "user" and (.id | IN($ARGS.positional[])) and .enabled and (.errors | length) == 0) | "\(.id) \(.version)"'{{range .Claude.Plugins}} {{q .ID}}{{end}} <<< "$1" \
     | sort
 }
 
@@ -360,7 +360,7 @@ verify_branch_marketplace() {
 
 install_plugin() {
   local current
-  current="$(jq -r --arg id "$1" '.[] | select(.id == $id) | .version' <<< "$3")"
+  current="$(jq -r --arg id "$1" '.[] | select(.id == $id and .scope == "user") | .version' <<< "$3")"
   if [ -z "$current" ]; then
     claude plugin install "$1"
   elif [ "$current" != "$2" ]; then

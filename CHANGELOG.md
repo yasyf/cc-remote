@@ -98,6 +98,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A machine whose project also installed a pinned plugin prepares again.**
+  Claude Code installs the plugins a project's `.claude/settings.json` enables
+  at project scope, so a Sprite that ran a lane in such a project lists a
+  pinned plugin twice in `claude plugin list --json`. The pin check compared
+  both entries to the one pinned line and failed every `orca prepare
+  --existing` whose payload changed. The plugin step now reads and checks only
+  the user-scope install it manages.
 - **A Sprite's home volume leaves out the image's unused agent CLIs and mise's
   installs.** The copy of the home onto the 12 GiB volume carried every agent
   CLI the Sprite image installs, 2.5 GiB. Lanes run the payload's Claude Code

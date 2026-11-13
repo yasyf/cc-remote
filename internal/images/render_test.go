@@ -824,13 +824,16 @@ mise_data() {
 					"system_bin_dir=/usr/local/bin\n", "system_bin_dir=/usr/local/bin\nroot_cache_dir=/var/tmp/cc-remote\n",
 					"\nclaude_env() {\n", "\n"+goCaches+"\n\nclaude_env() {\n",
 					"  mkdir -p \"$bin_dir\"\n", "  mkdir -p \"$bin_dir\"\n  go_caches\n  mise_data\n",
+					`select(.id == $id) | .installPath`, `select(.id == $id and .scope == "user") | .installPath`,
+					`select(.id == $id) | .version`, `select(.id == $id and .scope == "user") | .version`,
+					`select((.id | IN($ARGS.positional[]))`, `select(.scope == "user" and (.id | IN($ARGS.positional[]))`,
 				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction, the staged Codex runtime, the Go caches and the mise data for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction, the staged Codex runtime, the Go caches, the mise data and the user-scope plugin reads for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})
