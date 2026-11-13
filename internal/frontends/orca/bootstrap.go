@@ -52,8 +52,9 @@ var ClaudeStartup = Startup{
 		{Name: "trust", Screen: regexp.MustCompile(`(?i)trust (the files in )?this folder`), Choice: regexp.MustCompile(`\bYes\b`), Move: KeyDown, Trust: true},
 		{Name: "mcp", Screen: regexp.MustCompile(`(?i)MCP servers? found in`), Choice: regexp.MustCompile(`(?i)\benable selected\b`), Move: KeyDown},
 		{Name: "bypass", Screen: regexp.MustCompile(`Bypass Permissions mode`), Choice: regexp.MustCompile(`Yes, I accept`), Move: KeyDown},
+		{Name: "resume", Screen: regexp.MustCompile(`Resume full session as-is`), Choice: regexp.MustCompile(`Resume full session as-is`), Move: KeyDown},
 	},
-	Ready: regexp.MustCompile(`API Usage Billing`),
+	Ready: regexp.MustCompile(`API Usage Billing|bypass permissions on`),
 }
 
 func StartupOf(agent Agent) Startup {

@@ -433,6 +433,12 @@ func TestAgentArgv(t *testing.T) {
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
 			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
 		}},
+		{"claude resuming a session", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh", Resume: "5d576546-4c87-4a78-94b4-945eb9e49c86"}, orca.ShellPolicy{}, []string{
+			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"skipDangerousModePermissionPrompt":true}`,
+			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
+			"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", "claude-opus-5-5", "--effort", "xhigh",
+			"--resume", "5d576546-4c87-4a78-94b4-945eb9e49c86",
+		}},
 		{"claude ignores a codex shell policy", orca.Agent{Kind: orca.AgentClaude, Model: "claude-opus-5-5", Effort: "xhigh"}, legacy, []string{
 			"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", `{"skipDangerousModePermissionPrompt":true}`,
 			"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,
@@ -510,6 +516,8 @@ func TestAgentValidate(t *testing.T) {
 		{"settings not an object", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Settings: `["verbose"]`}, "not a JSON object"},
 		{"invalid settings", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Settings: `{"verbose":`}, "not a JSON object"},
 		{"null settings", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Settings: `null`}, "not a JSON object"},
+		{"codex resume", orca.Agent{Kind: orca.AgentCodex, Model: "m", Effort: "e", Resume: "5d576546-4c87-4a78-94b4-945eb9e49c86"}, "claude setting"},
+		{"resume not a session id", orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e", Resume: "--fork-session"}, "not a Claude session id"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

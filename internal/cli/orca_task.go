@@ -578,6 +578,10 @@ and replaces the task record and the brief. Only a machine whose runtime runs as
 continued. It refuses a machine without the workspace's ownership and a checkout or origin that differs from the
 config, and it takes no --ref.
 
+With --resume, the claude worker that --existing starts resumes that Claude session from the machine instead of
+starting a new one, keeping the whole context of a worker whose machine restarted under it, and its startup takes
+the full session over a summary when Claude offers one.
+
 With --before-worker-file, the file's script runs with sh on the machine after the checkout and before the worker
 starts, so the worker's first session sees whatever it installs. A nonzero exit stops prepare with no worker. The
 task record carries the script's stdout as beforeWorker.`,
@@ -594,6 +598,9 @@ task record carries the script's stdout as beforeWorker.`,
 			}
 			if launch.existing && cmd.Flags().Changed("ref") {
 				return errors.New("--existing starts a worker on the workspace's retained checkout, so it takes no --ref")
+			}
+			if launch.agent.Resume != "" && !launch.existing {
+				return errors.New("--resume continues a Claude session recorded on the workspace's machine, so it needs --existing")
 			}
 			brief, err := readBrief(briefFile)
 			if err != nil {
@@ -615,6 +622,7 @@ task record carries the script's stdout as beforeWorker.`,
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
 	cmd.Flags().StringVar(&beforeWorkerFile, "before-worker-file", "", "file holding a script to run on the machine before the worker starts; a nonzero exit stops prepare with no worker")
 	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start a worker on the recorded workspace's machine and retained checkout instead of creating one, continuing its recorded Orca task")
+	cmd.Flags().StringVar(&launch.agent.Resume, "resume", "", "claude only, with --existing: the id of a Claude session on the machine that the worker resumes instead of starting a new one")
 	cmd.Flags().BoolVar(&launch.warm, "warm", false, "treat the name as a lane: claim an unused warm pool Sprite refreshed to --ref, moving to the next when one fails before its worker starts, or create the lane's workspace when none is left, refilling the pool in the background after each claim")
 	_ = cmd.MarkFlagRequired("brief-file")
 	return cmd
