@@ -98,6 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A payload download whose staging write stops fails instead of hanging.**
+  Each ranged fetch inherited the read end of every other range's FIFO. Once
+  the staging write stopped reading, the range being copied had no reader
+  left that would ever drain it, yet its writer never got `SIGPIPE`, and the
+  fetch waited on it forever. A re-prepare of a Sprite sat there for more than
+  30 minutes holding the machine's Orca task. Each range's `curl` and `dd`
+  now close the FIFO ends of the other ranges, so the fetch exits with the
+  failed download's report.
 - **A machine whose project also installed a pinned plugin prepares again.**
   Claude Code installs the plugins a project's `.claude/settings.json` enables
   at project scope, so a Sprite that ran a lane in such a project lists a
