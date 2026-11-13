@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +86,9 @@ func (c Config) validate() error {
 type Provider struct {
 	Config
 	Runner providers.Runner
+	token  func() string
+	client *http.Client
+	base   string
 }
 
 var (
@@ -107,7 +111,7 @@ func New(config Config) (*Provider, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	return &Provider{Config: config, Runner: providers.OSRunner{}}, nil
+	return &Provider{Config: config, Runner: providers.OSRunner{}, token: credential(config.Org), client: http.DefaultClient, base: apiBase}, nil
 }
 
 func (p *Provider) Traits() providers.Traits {
@@ -124,7 +128,11 @@ func (p *Provider) Traits() providers.Traits {
 }
 
 func (p *Provider) command(stdin io.Reader, args ...string) providers.Command {
-	return providers.Command{Name: p.CLI, Args: args, Stdin: stdin}
+	command := providers.Command{Name: p.CLI, Args: args, Stdin: stdin}
+	if token := p.token(); token != "" {
+		command.Env = []string{tokenEnv + "=" + token}
+	}
+	return command
 }
 
 func (p *Provider) records() providers.Records {
@@ -132,10 +140,11 @@ func (p *Provider) records() providers.Records {
 }
 
 func (p *Provider) Check(ctx context.Context) error {
-	status, body, err := p.api(ctx, "/v1/sprites?max_results=1")
+	if _, err := exec.LookPath(p.CLI); err != nil {
+		return fmt.Errorf("sprite CLI %q not found; install it from https://sprites.dev: %w", p.CLI, err)
+	}
+	status, body, err := p.api(ctx, http.MethodGet, "/v1/sprites?max_results=1")
 	switch {
-	case errors.Is(err, exec.ErrNotFound):
-		return fmt.Errorf("sprite CLI %q not found; install it from https://sprites.dev", p.CLI)
 	case err != nil:
 		return fmt.Errorf("sprites org %s is not reachable; run 'sprite login -o %s': %w", p.Org, p.Org, err)
 	case status == 401 || status == 403:
@@ -229,7 +238,7 @@ func (p *Provider) Get(ctx context.Context, id string) (providers.Machine, error
 	if providers.CheckName(id, nameLimit) != nil {
 		return providers.Machine{}, fmt.Errorf("sprite %q: %w", id, providers.ErrNotFound)
 	}
-	status, body, err := p.api(ctx, "/v1/sprites/"+id)
+	status, body, err := p.api(ctx, http.MethodGet, "/v1/sprites/"+id)
 	if err != nil {
 		return providers.Machine{}, err
 	}
@@ -255,7 +264,7 @@ func (p *Provider) List(ctx context.Context, labels map[string]string) ([]provid
 		if token != "" {
 			query.Set("continuation_token", token)
 		}
-		status, body, err := p.api(ctx, "/v1/sprites?"+query.Encode())
+		status, body, err := p.api(ctx, http.MethodGet, "/v1/sprites?"+query.Encode())
 		if err != nil {
 			return nil, err
 		}
@@ -306,7 +315,7 @@ func (p *Provider) Suspend(ctx context.Context, id string) error {
 		if running.State.Status == "stopped" {
 			continue
 		}
-		status, body, err := p.api(ctx, services+"/"+url.PathEscape(running.Name)+"/stop", "-X", "POST")
+		status, body, err := p.api(ctx, http.MethodPost, services+"/"+url.PathEscape(running.Name)+"/stop")
 		if err != nil {
 			return err
 		}
@@ -323,7 +332,7 @@ func (p *Provider) CheckStorage(ctx context.Context, id string) error {
 }
 
 func (p *Provider) services(ctx context.Context, id string) ([]service, error) {
-	status, body, err := p.api(ctx, "/v1/sprites/"+id+"/services")
+	status, body, err := p.api(ctx, http.MethodGet, "/v1/sprites/"+id+"/services")
 	if err != nil {
 		return nil, err
 	}
@@ -472,8 +481,34 @@ func (c *byteCount) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (p *Provider) api(ctx context.Context, path string, curl ...string) (int, []byte, error) {
-	out, err := providers.Output(ctx, p.Runner, p.command(nil, append([]string{"api", "-o", p.Org, path, "--", "-sS", "-w", "\n%{http_code}"}, curl...)...))
+func (p *Provider) api(ctx context.Context, method, path string) (int, []byte, error) {
+	token := p.token()
+	if token == "" {
+		return p.cliAPI(ctx, method, path)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, p.base+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := p.client.Do(request)
+	if err != nil {
+		return 0, nil, fmt.Errorf("sprites api %s %s: %w", method, path, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("sprites api %s %s: reading the answer: %w", method, path, err)
+	}
+	return response.StatusCode, body, nil
+}
+
+func (p *Provider) cliAPI(ctx context.Context, method, path string) (int, []byte, error) {
+	args := []string{"api", "-o", p.Org, path, "--", "-sS", "-w", "\n%{http_code}"}
+	if method != http.MethodGet {
+		args = append(args, "-X", method)
+	}
+	out, err := providers.Output(ctx, p.Runner, p.command(nil, args...))
 	if err != nil {
 		return 0, nil, err
 	}
