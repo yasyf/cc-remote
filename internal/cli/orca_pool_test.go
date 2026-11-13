@@ -1407,11 +1407,11 @@ func TestAFillKeepsItsReadySpareWhenAParallelCreateIsRejected(t *testing.T) {
 	}
 }
 
-func TestAFillDestroysASpareLeftReadyADayUnderAnOldPoolKey(t *testing.T) {
+func TestAFillDestroysASpareLeftReadyAnHourUnderAnOldPoolKey(t *testing.T) {
 	w := newWarmPool(t)
 	*w.session.Config.Orca.Pool.Ready = 0
 	pool := openPool(w.session)
-	for name, age := range map[string]time.Duration{"pool-old": 25 * time.Hour, "pool-fresh": time.Hour} {
+	for name, age := range map[string]time.Duration{"pool-old": 2 * time.Hour, "pool-fresh": 10 * time.Minute} {
 		w.spare(pool, name)
 		member := w.member(name)
 		member.Key, member.UpdatedAt = strings.Repeat("0", 64), time.Now().UTC().Add(-age)

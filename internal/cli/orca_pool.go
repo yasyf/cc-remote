@@ -151,7 +151,7 @@ type orcaPoolStatus struct {
 var (
 	spareAnswersWithin = time.Minute
 	failedStopWithin   = 4 * time.Minute
-	staleSpareAfter    = 24 * time.Hour
+	staleSpareAfter    = time.Hour
 	agentProcesses     = remote.Script(`processes=$(ps -eo comm=)`, `for name in $processes; do case "$name" in `+orca.AgentCodex+`|`+orca.AgentClaude+`) exit `+strconv.Itoa(exitAgentRunning)+` ;; esac; done`)
 	agentRefusals      = map[int]string{exitAgentRunning: "an agent process runs there"}
 

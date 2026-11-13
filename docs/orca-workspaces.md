@@ -547,9 +547,10 @@ the worker is still prepared.
 
 A new release or config change gives the pool a new compatibility key, and no
 claim takes a workspace readied under an old one. A fill destroys each such
-workspace once it has sat ready for a day, records it `refused`, and lists it
-under `retired`. The day leaves a spare alone while another release that still
-uses the old key may claim it. A failed claim or a create that failed after its
+workspace once it has sat ready for an hour, records it `refused`, and lists it
+under `retired`. The hour leaves a spare alone while a launch already under way
+from a checkout on the old key may still claim it; a key that changes several
+times a day would otherwise leave a full pool of spares behind each time. A failed claim or a create that failed after its
 machine was confirmed destroys that machine too.
 
 Run the fill yourself to top up the pool, then list it:
