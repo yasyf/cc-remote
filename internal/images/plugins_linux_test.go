@@ -142,8 +142,8 @@ elif args[:2] in (["plugin", "install"], ["plugin", "update"]):
         with open(os.path.join(root, "bin", name), "w") as tool:
             tool.write("#!/bin/sh\n")
         os.chmod(os.path.join(root, "bin", name), 0o755)
-    state["plugins"] = [p for p in state["plugins"] if p["id"] != args[2]]
-    state["plugins"].append({"id": args[2], "version": version, "errors": [], "installPath": root})
+    state["plugins"] = [p for p in state["plugins"] if (p["id"], p["scope"]) != (args[2], "user")]
+    state["plugins"].append({"id": args[2], "scope": "user", "version": version, "errors": [], "installPath": root})
     save()
     if args[1] == "install":
         declared = settings()
@@ -459,7 +459,7 @@ func marketplaceCatalog(official string) map[string]any {
 }
 
 func installedPlugin(id, version string) map[string]any {
-	return map[string]any{"id": id, "version": version, "errors": []any{}}
+	return map[string]any{"id": id, "scope": "user", "version": version, "errors": []any{}}
 }
 
 func registered(officialRef any, officialVersion string) fakeState {
@@ -518,6 +518,19 @@ func TestPluginsRegisterMarketplacesByRefAndBranch(t *testing.T) {
 			state:        registered("main", "0.7.17"),
 			settings:     map[string]any{"env": keptEnv, "enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
 			absentCalls:  []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update", "git init -q HOME/.local/share/cc-remote/marketplaces/claude-plugins-official"},
+		},
+		{
+			name:         "a pin a project's settings also installed at project scope",
+			marketplaces: []Marketplace{toolsRef, officialBranch},
+			state: func() fakeState {
+				state := registered("main", "0.7.17")
+				project := installedPlugin("datadog@claude-plugins-official", "0.7.17")
+				project["scope"] = "project"
+				state.Plugins = append(state.Plugins, project)
+				return state
+			}(),
+			settings:    map[string]any{"enabledPlugins": enabledPins, "extraKnownMarketplaces": map[string]any{"claude-plugins-official": declaredOfficial}},
+			absentCalls: []string{"claude plugin marketplace add", "claude plugin marketplace remove", "claude plugin install", "claude plugin update"},
 		},
 		{
 			name:         "pinned official with auto-update turned on",
