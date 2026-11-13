@@ -39,7 +39,16 @@ func ValidateName(name string) error {
 func (d Dir) Workspace(name string) string {
 	return filepath.Join(string(d), "workspaces", name+".json")
 }
-func (d Dir) Tailnet() string { return filepath.Join(string(d), "tailnet") }
+func (d Dir) Tailnet() string     { return filepath.Join(string(d), "tailnet") }
+func (d Dir) AWSSessions() string { return filepath.Join(string(d), "aws") }
+func (d Dir) EnvLine(key string) string {
+	return filepath.Join(string(d), "keys", "env-"+key+".json")
+}
+
+func (d Dir) PayloadURL(key string) string {
+	return filepath.Join(string(d), "urls", key+".json")
+}
+
 func (d Dir) SSH(name string) string {
 	return filepath.Join(string(d), "ssh", name+".ssh")
 }

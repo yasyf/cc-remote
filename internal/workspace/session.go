@@ -38,6 +38,8 @@ const (
 	urlCommandTimeout   = 60 * time.Second
 	urlCommandWaitDelay = 2 * time.Second
 	payloadMountWithin  = 3 * time.Minute
+	signedURLReuse      = 3 * time.Minute
+	signedURLFloor      = 10 * time.Minute
 )
 
 type Session struct {
@@ -932,26 +934,71 @@ func (s *Session) FetchHelper(ctx context.Context, machine string) error {
 }
 
 func (s *Session) sourceURL(ctx context.Context, from artifactSource) (images.PayloadURL, error) {
-	ctx, cancel := context.WithTimeout(ctx, urlCommandTimeout)
-	defer cancel()
 	command := from.source.URLCommand
-	cmd := exec.CommandContext(ctx, s.Config.ScriptPath(command[0]), slices.Concat(command[1:], []string{from.source.SHA256, strconv.FormatInt(from.source.Size, 10)})...)
-	cmd.Dir = filepath.Dir(s.Config.Path)
-	cmd.WaitDelay = urlCommandWaitDelay
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return images.PayloadURL{}, fmt.Errorf("%s url_command %s: %w", from.artifact.Name, command[0], err)
+	argv := slices.Concat([]string{s.Config.ScriptPath(command[0])}, command[1:], []string{from.source.SHA256, strconv.FormatInt(from.source.Size, 10)})
+	digest := sha256.Sum256(fmt.Appendf(nil, "%q", argv))
+	path := s.Config.State().PayloadURL(hex.EncodeToString(digest[:]))
+	unlock, err := state.Lock(path + ".lock")
+	if err != nil {
+		return images.PayloadURL{}, err
 	}
-	line, _, more := strings.Cut(strings.TrimSuffix(stdout.String(), "\n"), "\n")
-	if more {
-		return images.PayloadURL{}, fmt.Errorf("%s url_command %s printed more than one line", from.artifact.Name, command[0])
+	defer unlock()
+	var held heldURL
+	found, err := state.Load(path, &held)
+	if err != nil {
+		return images.PayloadURL{}, err
+	}
+	if found {
+		kept, err := images.ParsePayloadURL(held.Line)
+		if err != nil {
+			return images.PayloadURL{}, fmt.Errorf("%s: %w", path, err)
+		}
+		if reusable(kept, time.Now()) {
+			return kept, nil
+		}
+	}
+	line, err := s.runURLCommand(ctx, from, argv)
+	if err != nil {
+		return images.PayloadURL{}, err
 	}
 	url, err := images.ParsePayloadURL(line)
 	if err != nil {
 		return images.PayloadURL{}, fmt.Errorf("%s url_command %s: %w", from.artifact.Name, command[0], err)
 	}
+	if _, _, signed := url.Signed(); signed {
+		if err := state.Save(path, heldURL{Line: line}); err != nil {
+			return images.PayloadURL{}, err
+		}
+	}
 	return url, nil
+}
+
+type heldURL struct {
+	Line string `json:"line"`
+}
+
+func reusable(url images.PayloadURL, now time.Time) bool {
+	signed, expires, ok := url.Signed()
+	return ok && now.Sub(signed) < signedURLReuse && expires.Sub(now) >= signedURLFloor
+}
+
+func (s *Session) runURLCommand(ctx context.Context, from artifactSource, argv []string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, urlCommandTimeout)
+	defer cancel()
+	command := from.source.URLCommand
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = filepath.Dir(s.Config.Path)
+	cmd.WaitDelay = urlCommandWaitDelay
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%s url_command %s: %w", from.artifact.Name, command[0], err)
+	}
+	line, _, more := strings.Cut(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if more {
+		return "", fmt.Errorf("%s url_command %s printed more than one line", from.artifact.Name, command[0])
+	}
+	return line, nil
 }
 
 func (s *Session) mountPayload(ctx context.Context, machine string, stage transfer) error {

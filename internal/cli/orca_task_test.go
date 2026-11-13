@@ -93,7 +93,7 @@ func TestCaptureKey(t *testing.T) {
 		}
 		return path
 	}
-	key, err := captureKey(t.Context(), []string{script("one", "printf 'sk-test-1\\n'")})
+	key, err := captureKey(t.Context(), state.Dir(t.TempDir()), []string{script("one", "printf 'sk-test-1\\n'")})
 	if err != nil || string(key) != "sk-test-1" {
 		t.Errorf("captureKey = %q, %v", key, err)
 	}
@@ -106,7 +106,7 @@ func TestCaptureKey(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := captureKey(t.Context(), []string{script(tt.name, tt.body), "--service", "cc-remote-test"})
+			_, err := captureKey(t.Context(), state.Dir(t.TempDir()), []string{script(tt.name, tt.body), "--service", "cc-remote-test"})
 			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "--service cc-remote-test") {
 				t.Fatalf("captureKey error = %v, want %q", err, tt.want)
 			}
@@ -145,7 +145,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := captureKeys(t.Context(), tt.keys, orca.Agent{Kind: tt.kind})
+			got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), tt.keys, orca.Agent{Kind: tt.kind})
 			if err != nil || string(got.key) != tt.key || string(got.judge) != tt.judge || string(got.typesafe) != tt.typesafe || string(got.github) != tt.github {
 				t.Errorf("captureKeys = %q, %q, %q, %q, %v; want %q, %q, %q, %q", got.key, got.judge, got.typesafe, got.github, err, tt.key, tt.judge, tt.typesafe, tt.github)
 			}
@@ -161,7 +161,7 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 	}
 	for _, agent := range []orca.Agent{{Kind: orca.AgentClaude}, {Kind: orca.AgentCodex}} {
 		keys := map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), agent.JudgeKeyProvider(): {failing}}
-		got, err := captureKeys(t.Context(), keys, agent)
+		got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "judge key command") || got.key != nil || got.judge != nil {
 			t.Errorf("%s captureKeys with a failing judge = %q, %q, %v", agent.Kind, got.key, got.judge, err)
 		}
@@ -169,12 +169,12 @@ func TestCaptureKeysTakesTheOtherProvidersJudgeKeyOnlyWhenConfigured(t *testing.
 			t.Errorf("the error leaks a key: %v", err)
 		}
 		keys = map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), config.KeyTypeSafe: {failing}}
-		got, err = captureKeys(t.Context(), keys, agent)
+		got, err = captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "typesafe key command") || got.key != nil || got.typesafe != nil {
 			t.Errorf("%s captureKeys with a failing TypeSafe key = %q, %q, %v", agent.Kind, got.key, got.typesafe, err)
 		}
 		keys = map[string][]string{agent.KeyProvider(): script("own-"+agent.Kind, "sk-own-sentinel"), config.KeyGitHub: {failing}}
-		got, err = captureKeys(t.Context(), keys, agent)
+		got, err = captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "github key command") || got.key != nil || got.github != nil {
 			t.Errorf("%s captureKeys with a failing GitHub token = %q, %q, %v", agent.Kind, got.key, got.github, err)
 		}
@@ -193,7 +193,7 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiGitHubLoginAndGitHubA
 	for _, kind := range []string{orca.AgentClaude, orca.AgentCodex} {
 		agent := orca.Agent{Kind: kind}
 		keys := map[string][]string{agent.KeyProvider(): script(kind, "model-sentinel"), config.KeyTrunk: script("trunk", "trunk-sentinel"), config.KeyGemini: script("gemini", "gemini-sentinel"), config.KeyGitHubLogin: script("login", "login-sentinel"), config.KeyGitHubApp: script("app", "app-sentinel")}
-		got, err := captureKeys(t.Context(), keys, agent)
+		got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,7 +214,7 @@ func TestCaptureKeysDeliversAndClearsTheOptionalTrunkGeminiGitHubLoginAndGitHubA
 			t.Fatal(err)
 		}
 		keys[config.KeyTrunk] = []string{failing}
-		got, err = captureKeys(t.Context(), keys, agent)
+		got, err = captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "trunk key command") || got.key != nil || got.trunk != nil {
 			t.Errorf("failed Trunk capture = %+v, %v", got, err)
 		}
@@ -238,7 +238,7 @@ func TestCaptureKeysSendsTheEnvCommandsAssignmentsAsOneLineAndRefusesUnsafeOnes(
 		agent.KeyProvider(): script("model", "model-sentinel"),
 		config.KeyEnv:       script("env", `AWS_ACCESS_KEY_ID=ASIA-sentinel\nAWS_SESSION_TOKEN=Fw+tok/en==\nCI_DOOR_URL=https://door.lambda-url.us-west-2.on.aws/\n`),
 	}
-	got, err := captureKeys(t.Context(), keys, agent)
+	got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestCaptureKeysSendsTheEnvCommandsAssignmentsAsOneLineAndRefusesUnsafeOnes(
 		"a bare word":      `sentinel\n`,
 	} {
 		keys[config.KeyEnv] = script("refused", out)
-		got, err := captureKeys(t.Context(), keys, agent)
+		got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "env command") || got.key != nil || got.env != nil {
 			t.Errorf("%s: captureKeys = %+v, %v; want refused", name, got, err)
 		}
@@ -285,7 +285,7 @@ func TestCaptureKeysSendsTheAWSSessionAsOneLineAndRefusesOutputWithoutAnExpirati
 		agent.KeyProvider(): script("model", "model-sentinel\n"),
 		config.KeyAWS:       script("aws", "{\n  \"Version\": 1,\n  \"AccessKeyId\": \"ASIA-sentinel\",\n  \"SecretAccessKey\": \"secret-sentinel\",\n  \"SessionToken\": \"Fw+tok/en==\",\n  \"Expiration\": \"2026-11-12T17:07:15+00:00\"\n}\n"),
 	}
-	got, err := captureKeys(t.Context(), keys, agent)
+	got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestCaptureKeysSendsTheAWSSessionAsOneLineAndRefusesOutputWithoutAnExpirati
 		"another version": "{\"Version\": 2, \"AccessKeyId\": \"ASIA-sentinel\", \"SecretAccessKey\": \"secret-sentinel\", \"Expiration\": \"2026-11-12T17:07:15Z\"}\n",
 	} {
 		keys[config.KeyAWS] = script("refused", out)
-		got, err := captureKeys(t.Context(), keys, agent)
+		got, err := captureKeys(t.Context(), state.Dir(t.TempDir()), keys, agent)
 		if err == nil || !strings.HasPrefix(err.Error(), "aws command") || got.key != nil || got.aws != nil {
 			t.Errorf("%s: captureKeys = %+v, %v; want refused", name, got, err)
 		}

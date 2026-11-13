@@ -196,7 +196,22 @@ launched worker's terminal exports each of them before the agent starts. Each
 name is uppercase, each value holds only letters, digits and `+/=:._@-`, and a
 name another key command or the launcher's git identity sets is refused, so the
 command cannot replace a model key or inject shell. The assignments travel down
-the same key pipe as one line and stay available to shell tools.
+the same key pipe as one line and stay available to shell tools. A launch reuses
+the line the same command printed in the last 10 minutes, kept in a 0600 file
+under the state directory's `keys/`, so a burst of launches runs it once.
+
+A key command of the form `[aws, ssm, get-parameter, --name, <name>, --query,
+Parameter.Value, --output, text]` or `[aws, configure, export-credentials,
+--format, process]`, each with optional `--profile` and `--region` and the
+parameter with optional `--with-decryption`, never starts the AWS CLI.
+cc-remote reads the parameter or resolves the profile through the AWS SDK with
+the same shared config, and keeps each profile's temporary credentials, never a
+parameter's value, in a 0600 file under the state directory's `aws/`. It
+reuses them until 5 minutes before they expire, or for `export-credentials`
+until an hour before, the margin `cc-remote orca keep` renews at. Any other
+form, including an `aws` call inside an `sh -c` script, runs as written.
+`cc-remote key -- <command>` prints what one key command prints, so a script or
+another tool's config can read a secret the same way.
 
 Every key travels only over SSH stdin into a
 one-use pipe that the worker's terminal reads and removes.
