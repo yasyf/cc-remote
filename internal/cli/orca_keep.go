@@ -102,7 +102,19 @@ for the moment between the two processes, and Orca connects again.`,
 				_, err = pruneEnvironments(ctx, session, orca.NewClient(runner), false)
 				return err
 			}
-			open := func(task *orcaTask) (providers.Provider, error) { return openProvider(cfg, task.Provider) }
+			open := func(task *orcaTask) (providers.Provider, error) {
+				kept, err := os.ReadFile(cfg.State().OrcaKept(task.Workspace))
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return nil, err
+				}
+				source := cfg
+				if len(kept) > 0 {
+					if source, err = config.Load(string(kept)); err != nil {
+						return nil, err
+					}
+				}
+				return openProvider(source, task.Provider)
+			}
 			storage := func(ctx context.Context, task *orcaTask) error {
 				provider, err := open(task)
 				if err != nil {

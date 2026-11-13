@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -72,7 +73,7 @@ func (p *Provider) dial(ctx context.Context, id string, port int) (io.ReadWriteC
 
 func (p *Provider) dialSocket(ctx context.Context, id string, port int, token string) (io.ReadWriteCloser, error) {
 	target := "ws" + strings.TrimPrefix(p.base, "http") + "/v1/sprites/" + id + "/proxy"
-	conn, response, err := proxyDialer.DialContext(ctx, target, http.Header{"Authorization": {"Bearer " + token}})
+	conn, response, err := dialCancelable(ctx, target, http.Header{"Authorization": {"Bearer " + token}})
 	if response != nil && response.StatusCode != http.StatusSwitchingProtocols {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
 		_ = response.Body.Close()
@@ -205,4 +206,28 @@ func (c *piped) Close() error {
 		_ = c.cmd.Wait()
 	})
 	return nil
+}
+
+func dialCancelable(ctx context.Context, target string, header http.Header) (*websocket.Conn, *http.Response, error) {
+	var mu sync.Mutex
+	var raw []net.Conn
+	dialer := *proxyDialer
+	dialer.NetDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err == nil {
+			mu.Lock()
+			raw = append(raw, conn)
+			mu.Unlock()
+		}
+		return conn, err
+	}
+	stop := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range raw {
+			_ = conn.Close()
+		}
+	})
+	defer stop()
+	return dialer.DialContext(ctx, target, header)
 }

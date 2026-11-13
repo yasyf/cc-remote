@@ -131,6 +131,14 @@ func runProxies(t *testing.T, dir state.Dir, tunnels *echoTunnels) {
 
 func spriteTask(t *testing.T, dir state.Dir, name string, forward *orcaTunnel) *orcaTask {
 	t.Helper()
+	if forward == nil {
+		control, err := state.NewOrcaControl()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(control)) })
+		forward = &orcaTunnel{Host: name, Config: filepath.Join(t.TempDir(), "absent-ssh-config"), Control: control, Log: dir.OrcaForwardLog(name)}
+	}
 	port, err := workspace.FreePort()
 	if err != nil {
 		t.Fatal(err)
@@ -249,11 +257,18 @@ func TestKeepClosesASpriteTasksRecordedSSHForwardAndHoldsItsPort(t *testing.T) {
 	recorded := &orcaTunnel{Host: "lane-a", Config: "/recorded/ssh", Control: control, Log: dir.OrcaForwardLog("lane-a")}
 	task := spriteTask(t, dir, "lane-a", recorded)
 
-	if err := task.ensure(t.Context(), "/recorded/config.yaml"); err != nil {
-		t.Fatalf("ensure = %v", err)
+	if err := state.Write(dir.OrcaKept("lane-a"), []byte("/recorded/config.yaml")); err != nil {
+		t.Fatal(err)
 	}
-	if task.Forward != recorded {
-		t.Errorf("ensure replaced the recorded SSH forward with %+v; a keeper of an earlier release reads it", task.Forward)
+	deadline := time.Now().Add(10 * time.Second)
+	for !task.up(t.Context()) {
+		if time.Now().After(deadline) {
+			t.Fatal("the keeper never held the migrated task's port")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if loaded, err := loadTask(dir, "lane-a"); err != nil || loaded.Forward == nil || *loaded.Forward != *recorded {
+		t.Errorf("after the migration the task records %+v, %v; want its SSH forward kept for a keeper of an earlier release", loaded, err)
 	}
 	echoes(t, task.Port)
 	raw, err := os.ReadFile(calls)
@@ -278,5 +293,20 @@ func TestRunsOnASpriteTaskGoThroughTheProviderNotSSH(t *testing.T) {
 	out, err := task.run(t.Context(), "echo hi", nil)
 	if err != nil || string(out) != "sh -c echo hi" {
 		t.Errorf("run = %q, %v; want the script run through the provider's Exec", out, err)
+	}
+}
+
+func TestEnsureAcceptsTheSSHForwardAKeeperOfAnEarlierReleaseOpened(t *testing.T) {
+	fastProxies(t)
+	starts := standInKeeper(t)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	dir := state.Dir(t.TempDir())
+	task := spriteTask(t, dir, "lane-a", nil)
+	if err := task.ensure(t.Context(), "/recorded/config.yaml"); err != nil || starts.Load() != 1 {
+		t.Errorf("ensure beside an older keeper's live SSH forward = %v with %d keepers started; want it accepted after starting one", err, starts.Load())
 	}
 }

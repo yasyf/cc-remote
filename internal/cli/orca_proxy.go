@@ -73,13 +73,13 @@ func (t *orcaTask) hold(ctx context.Context, config string) error {
 			return fmt.Errorf("start the keeper that holds %s:%d for %s: %w", orca.Loopback, t.Port, t.Workspace, err)
 		}
 		deadline := time.After(gatewayStart)
-		for !t.up(ctx) {
+		for !t.up(ctx) && !t.Forward.up(ctx) {
 			select {
 			case <-deadline:
 				return fmt.Errorf("orca keep did not hold %s:%d for %s within %s (see %s)", orca.Loopback, t.Port, t.Workspace, gatewayStart, t.dir.OrcaKeeperLog())
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(gatewayPoll):
+			case <-time.After(proxyEvery):
 			}
 		}
 	}
