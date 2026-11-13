@@ -67,12 +67,13 @@ const (
 )
 
 type Agent struct {
-	Kind   string   `json:"kind"`
-	Model  string   `json:"model"`
-	Effort string   `json:"effort"`
-	Tier   string   `json:"serviceTier,omitempty"`
-	MCP    []string `json:"mcp,omitempty"`
-	Env    []string `json:"env,omitempty"`
+	Kind     string   `json:"kind"`
+	Model    string   `json:"model"`
+	Effort   string   `json:"effort"`
+	Tier     string   `json:"serviceTier,omitempty"`
+	MCP      []string `json:"mcp,omitempty"`
+	Env      []string `json:"env,omitempty"`
+	Settings string   `json:"settings,omitempty"`
 }
 
 const KeyDirScript = `set -eu
@@ -315,6 +316,15 @@ func (a Agent) Validate() error {
 	if a.Tier != "" && !agentValue.MatchString(a.Tier) {
 		return fmt.Errorf("--service-tier %q must be the exact tier name, such as fast", a.Tier)
 	}
+	if a.Settings != "" && a.Kind != AgentClaude {
+		return fmt.Errorf("--settings is a claude setting; %s takes none", a.Kind)
+	}
+	if a.Settings != "" {
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(a.Settings), &settings); err != nil || settings == nil {
+			return fmt.Errorf("--settings %q is not a JSON object, and claude drops an invalid --settings whole", a.Settings)
+		}
+	}
 	if a.Kind == AgentCodex && len(a.MCP) > 1 {
 		return errors.New("codex takes one --mcp-config, the TOML inline table that becomes its whole mcp_servers")
 	}
@@ -397,10 +407,21 @@ func (a Agent) Argv(policy ShellPolicy) []string {
 		servers = []string{noClaudeMCP}
 	}
 	return slices.Concat(
-		[]string{"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", claudeSettings},
+		[]string{"claude", "--allow-dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", a.settings()},
 		[]string{"--strict-mcp-config", "--mcp-config"}, servers,
 		[]string{"--disallowedTools", "AskUserQuestion,EnterPlanMode,ExitPlanMode", "--model", a.Model, "--effort", a.Effort},
 	)
+}
+
+func (a Agent) settings() string {
+	if a.Settings == "" {
+		return claudeSettings
+	}
+	merged := map[string]any{}
+	_ = json.Unmarshal([]byte(a.Settings), &merged)
+	_ = json.Unmarshal([]byte(claudeSettings), &merged)
+	encoded, _ := json.Marshal(merged)
+	return string(encoded)
 }
 
 func (a Agent) exports() []string {

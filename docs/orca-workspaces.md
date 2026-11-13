@@ -211,7 +211,10 @@ workspace record, a receipt, a log, or a file on the machine.
 
 Workers start with no Model Context Protocol servers; `--mcp-config` names the servers a
 worker may start. A Claude worker starts with `DISABLE_AUTOUPDATER=1`, so its
-CLI stays at the version the machine was built with. The frontend accepts Claude and Codex folder trust prompts
+CLI stays at the version the machine was built with. `--settings` takes a JSON
+object of Claude settings, such as a lane's `permissions.deny`, which cc-remote
+merges under its own into the worker's one `--settings`, since Claude keeps only
+the last one and drops an invalid one whole; Codex refuses it. The frontend accepts Claude and Codex folder trust prompts
 only when `orca.trust` lists the repository's owner.
 
 ```yaml
