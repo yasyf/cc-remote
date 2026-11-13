@@ -28,6 +28,7 @@ func NewRootCmd() *cobra.Command {
 		newStatusCmd(),
 		newVerifyCmd(),
 		newProxyCmd(),
+		newKeyCmd(),
 		newImagesCmd(),
 		newPayloadCmd(),
 		newJobsCmd(),

@@ -372,7 +372,7 @@ func reopenForward(ctx context.Context, dir state.Dir, held *proxies, task *orca
 
 type renewal struct {
 	key     string
-	capture func(context.Context, []string) ([]byte, time.Time, error)
+	capture func(context.Context, state.Dir, []string) ([]byte, time.Time, error)
 	script  string
 	minted  map[string]minted
 	sent    map[string][]byte
@@ -383,12 +383,12 @@ type minted struct {
 	expires time.Time
 }
 
-func newRenewal(key string, capture func(context.Context, []string) ([]byte, time.Time, error), script string) *renewal {
+func newRenewal(key string, capture func(context.Context, state.Dir, []string) ([]byte, time.Time, error), script string) *renewal {
 	return &renewal{key: key, capture: capture, script: script, minted: map[string]minted{}, sent: map[string][]byte{}}
 }
 
-func captureAppToken(ctx context.Context, command []string) ([]byte, time.Time, error) {
-	line, err := captureKey(ctx, command)
+func captureAppToken(ctx context.Context, dir state.Dir, command []string) ([]byte, time.Time, error) {
+	line, err := captureKey(ctx, dir, command)
 	return line, time.Time{}, err
 }
 
@@ -433,7 +433,7 @@ func (r *renewal) renew(ctx context.Context, dir state.Dir, log *slog.Logger, op
 		id := fmt.Sprintf("%q", command)
 		line, tried := lines[id]
 		if !tried {
-			line = r.mint(ctx, log, id, command)
+			line = r.mint(ctx, dir, log, id, command)
 			lines[id] = line
 		}
 		if line == nil || bytes.Equal(r.sent[name], line) {
@@ -452,11 +452,11 @@ func (r *renewal) renew(ctx context.Context, dir state.Dir, log *slog.Logger, op
 	return nil
 }
 
-func (r *renewal) mint(ctx context.Context, log *slog.Logger, id string, command []string) []byte {
+func (r *renewal) mint(ctx context.Context, dir state.Dir, log *slog.Logger, id string, command []string) []byte {
 	if held := r.minted[id]; time.Until(held.expires) >= renewBefore {
 		return held.line
 	}
-	line, expires, err := r.capture(ctx, command)
+	line, expires, err := r.capture(ctx, dir, command)
 	if err != nil {
 		log.Warn("an orca.keys command keep renews failed, so each worker reads through what it holds until a later pass renews it", "key", r.key, "error", err)
 		return nil

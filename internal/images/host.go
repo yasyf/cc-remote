@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Exec func(ctx context.Context, argv []string, stdin io.Reader) error
@@ -377,7 +378,11 @@ jq -cn \
     progress: (if $progress == "" then null else $progress end)
   }'`
 
-type PayloadURL struct{ raw string }
+type PayloadURL struct {
+	raw     string
+	signed  time.Time
+	expires time.Time
+}
 
 func ParsePayloadURL(raw string) (PayloadURL, error) {
 	if raw == "" {
@@ -395,7 +400,18 @@ func ParsePayloadURL(raw string) (PayloadURL, error) {
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
 		return PayloadURL{}, errors.New("payload url: the URL must be an absolute https URL with a host and no userinfo")
 	}
-	return PayloadURL{raw: raw}, nil
+	u := PayloadURL{raw: raw}
+	query := parsed.Query()
+	signed, dateErr := time.Parse("20060102T150405Z", query.Get("X-Amz-Date"))
+	seconds, expiresErr := strconv.Atoi(query.Get("X-Amz-Expires"))
+	if dateErr == nil && expiresErr == nil && seconds > 0 {
+		u.signed, u.expires = signed, signed.Add(time.Duration(seconds)*time.Second)
+	}
+	return u, nil
+}
+
+func (u PayloadURL) Signed() (signed, expires time.Time, ok bool) {
+	return u.signed, u.expires, !u.expires.IsZero()
 }
 
 func (PayloadURL) Format(f fmt.State, _ rune) {

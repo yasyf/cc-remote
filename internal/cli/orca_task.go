@@ -400,7 +400,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			return nil, err
 		}
 		if err = checkRetained(ctx, session, result); err == nil {
-			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
+			keys, err = captureKeys(ctx, session.Config.State(), session.Config.Orca.Keys, l.agent)
 		}
 	case openContinued:
 		if result, err = session.Resume(ctx, name); err != nil {
@@ -411,7 +411,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 		}
 		runtime.Restart = true
 		if err = checkCheckout(ctx, session, "check the continued checkout", result.Name, result.Machine, result.ProjectRoot); err == nil {
-			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
+			keys, err = captureKeys(ctx, session.Config.State(), session.Config.Orca.Keys, l.agent)
 		}
 	case openSpare:
 		if result, err = session.Reuse(ctx, name, l.source(session.Config)); err != nil {
@@ -421,7 +421,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 			err = claimHelper(ctx, session, result.Machine)
 		}
 		if err == nil {
-			keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent)
+			keys, err = captureKeys(ctx, session.Config.State(), session.Config.Orca.Keys, l.agent)
 		}
 	case openCreated:
 		var helper *config.BootstrapHelper
@@ -433,7 +433,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 				return ensureHelper(ctx, session, machine, helper)
 			}
 		}
-		if keys, err = captureKeys(ctx, session.Config.Orca.Keys, l.agent); err != nil {
+		if keys, err = captureKeys(ctx, session.Config.State(), session.Config.Orca.Keys, l.agent); err != nil {
 			return nil, err
 		}
 		if result, err = session.Create(ctx, name, l.source(session.Config)); err != nil {
@@ -1264,122 +1264,67 @@ func (s secrets) clear() {
 	clear(s.aws)
 }
 
-func captureKeys(ctx context.Context, keys map[string][]string, agent orca.Agent) (secrets, error) {
+func captureKeys(ctx context.Context, dir state.Dir, keys map[string][]string, agent orca.Agent) (secrets, error) {
 	var captured secrets
 	var err error
-	if captured.key, err = captureKey(ctx, keys[agent.KeyProvider()]); err != nil {
+	if captured.key, err = captureKey(ctx, dir, keys[agent.KeyProvider()]); err != nil {
 		return secrets{}, err
 	}
 	if command, ok := keys[agent.JudgeKeyProvider()]; ok {
-		if captured.judge, err = captureKey(ctx, command); err != nil {
+		if captured.judge, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("judge %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyTypeSafe]; ok {
-		if captured.typesafe, err = captureKey(ctx, command); err != nil {
+		if captured.typesafe, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("typesafe %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyGitHub]; ok {
-		if captured.github, err = captureKey(ctx, command); err != nil {
+		if captured.github, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("github %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyTrunk]; ok {
-		if captured.trunk, err = captureKey(ctx, command); err != nil {
+		if captured.trunk, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("trunk %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyGemini]; ok {
-		if captured.gemini, err = captureKey(ctx, command); err != nil {
+		if captured.gemini, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("gemini %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyGitHubLogin]; ok {
-		if captured.githubLogin, err = captureKey(ctx, command); err != nil {
+		if captured.githubLogin, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("github_login %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyEnv]; ok {
-		if captured.env, err = captureEnv(ctx, command); err != nil {
+		if captured.env, err = captureEnv(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("env %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyGitHubApp]; ok {
-		if captured.githubApp, err = captureKey(ctx, command); err != nil {
+		if captured.githubApp, err = captureKey(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("github_app %w", err)
 		}
 	}
 	if command, ok := keys[config.KeyAWS]; ok {
-		if captured.aws, _, err = captureAWS(ctx, command); err != nil {
+		if captured.aws, _, err = captureAWS(ctx, dir, command); err != nil {
 			captured.clear()
 			return secrets{}, fmt.Errorf("aws %w", err)
 		}
 	}
 	return captured, nil
-}
-
-func captureKey(ctx context.Context, command []string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, keyTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
-	if err != nil {
-		clear(out)
-		return nil, fmt.Errorf("key command %s: %w", strings.Join(command, " "), err)
-	}
-	key := bytes.TrimSpace(out)
-	if len(key) == 0 || bytes.ContainsAny(key, "\r\n") {
-		clear(out)
-		return nil, fmt.Errorf("key command %s must print exactly one non-empty line", strings.Join(command, " "))
-	}
-	return key, nil
-}
-
-func captureEnv(ctx context.Context, command []string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, keyTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
-	defer clear(out)
-	if err != nil {
-		return nil, fmt.Errorf("command %s: %w", strings.Join(command, " "), err)
-	}
-	line, err := orca.EnvLine(out)
-	if err != nil {
-		return nil, fmt.Errorf("command %s %w", strings.Join(command, " "), err)
-	}
-	return line, nil
-}
-
-func captureAWS(ctx context.Context, command []string) ([]byte, time.Time, error) {
-	ctx, cancel := context.WithTimeout(ctx, keyTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
-	defer clear(out)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("command %s: %w", strings.Join(command, " "), err)
-	}
-	var session struct {
-		Version         int
-		AccessKeyID     string `json:"AccessKeyId"`
-		SecretAccessKey string
-		Expiration      time.Time
-	}
-	if err := json.Unmarshal(out, &session); err != nil || session.Version != 1 || session.AccessKeyID == "" || session.SecretAccessKey == "" || session.Expiration.IsZero() {
-		return nil, time.Time{}, fmt.Errorf("command %s must print the AWS process credentials, with their Expiration, that aws configure export-credentials --format process prints", strings.Join(command, " "))
-	}
-	var line bytes.Buffer
-	if err := json.Compact(&line, out); err != nil {
-		return nil, time.Time{}, err
-	}
-	return line.Bytes(), session.Expiration, nil
 }
 
 type author struct {

@@ -193,6 +193,13 @@ The command's output contract is:
 | Exit 0 | Supplies the URL on stdout; malformed output still fails creation, and the new machine is destroyed. |
 | Nonzero exit | Fails creation and destroys the new machine, reported only as `payload url_command <argv0>: <exit status or signal>`. A timeout fails the same way. |
 
+A URL carrying `X-Amz-Date` and `X-Amz-Expires`, as `aws s3 presign` prints,
+is kept in a 0600 file under the state directory's `urls/`. A later create or
+reinstall with the same command, `sha256`, and `size` takes that URL instead of
+running the command. It does so for 3 minutes after the signing, while at least
+10 minutes of its validity remain, so a pool fill presigns each archive once
+instead of once per machine.
+
 A site command can use `aws s3api head-object` to confirm the object exists and
 its `ContentLength` equals the supplied `size`, returning exit status `3`
 otherwise. It then runs
