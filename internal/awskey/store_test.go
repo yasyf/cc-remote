@@ -2,6 +2,7 @@ package awskey
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -127,5 +128,66 @@ func TestStaticCredentialsAreNeverWritten(t *testing.T) {
 	}
 	if files, err := filepath.Glob(filepath.Join(dir, "*.json")); err != nil || len(files) != 0 {
 		t.Errorf("session files = %v, %v; want none", files, err)
+	}
+}
+
+func TestTokenPrintsTheExecCredentialAWSEKSGetTokenPrints(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
+	source := &countingSource{expires: func() time.Time { return now.Add(time.Hour) }}
+	store := testStore(t, dir, &now, source)
+	store.presign = func(ctx context.Context, cfg aws.Config, cluster string) (string, error) {
+		if _, err := cfg.Credentials.Retrieve(ctx); err != nil {
+			return "", err
+		}
+		return "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity&cluster=" + cluster, nil
+	}
+	command := Command{op: getToken, region: "us-west-2", name: "frg-eks"}
+	out, err := store.Output(t.Context(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got execCredential
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("Output = %q: %v", out, err)
+	}
+	encoded, ok := strings.CutPrefix(got.Status.Token, "k8s-aws-v1.")
+	if !ok {
+		t.Fatalf("token = %q, want the k8s-aws-v1. prefix", got.Status.Token)
+	}
+	presigned, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || string(presigned) != "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity&cluster=frg-eks" {
+		t.Errorf("token decodes to %q, %v", presigned, err)
+	}
+	if got.Kind != "ExecCredential" || got.APIVersion != "client.authentication.k8s.io/v1beta1" || !got.Status.ExpirationTimestamp.Equal(now.Add(tokenLife)) {
+		t.Errorf("ExecCredential = %+v", got)
+	}
+	now = now.Add(time.Hour - tokenMargin + time.Second)
+	if _, err := store.Output(t.Context(), command); err != nil {
+		t.Fatal(err)
+	}
+	if source.calls != 2 {
+		t.Errorf("credential retrievals once the session had under the token margin left = %d, want 2", source.calls)
+	}
+}
+
+func TestTokenExpiresNoLaterThanTheCredentialsThatSignedIt(t *testing.T) {
+	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
+	source := &countingSource{expires: func() time.Time { return now.Add(5 * time.Minute) }}
+	store := testStore(t, t.TempDir(), &now, source)
+	store.presign = func(context.Context, aws.Config, string) (string, error) {
+		return "https://sts.amazonaws.com/?Action=GetCallerIdentity", nil
+	}
+	t.Setenv("KUBERNETES_EXEC_INFO", `{"apiVersion":"client.authentication.k8s.io/v1","kind":"ExecCredential"}`)
+	out, err := store.Output(t.Context(), Command{op: getToken, name: "frg-eks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got execCredential
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("Output = %q: %v", out, err)
+	}
+	if !got.Status.ExpirationTimestamp.Equal(now.Add(5*time.Minute)) || got.APIVersion != "client.authentication.k8s.io/v1" {
+		t.Errorf("ExecCredential = %+v; want it to expire with its credentials, on the v1 API kubectl asked for", got)
 	}
 }

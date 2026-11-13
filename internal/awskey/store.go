@@ -3,6 +3,7 @@ package awskey
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/processcreds"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	"github.com/yasyf/cc-remote/internal/state"
 )
@@ -24,6 +27,8 @@ import (
 const (
 	callMargin  = 5 * time.Minute
 	roleSession = time.Hour
+	tokenLife   = 14 * time.Minute
+	tokenMargin = 15 * time.Minute
 )
 
 type Store struct {
@@ -32,6 +37,7 @@ type Store struct {
 	now          func() time.Time
 	load         func(ctx context.Context, command Command) (aws.Config, error)
 	getParameter func(ctx context.Context, cfg aws.Config, input *ssm.GetParameterInput) (*ssm.GetParameterOutput, error)
+	presign      func(ctx context.Context, cfg aws.Config, cluster string) (string, error)
 }
 
 type session struct {
@@ -50,8 +56,20 @@ type processCredentials struct {
 	Expiration      *time.Time `json:",omitempty"`
 }
 
+type execCredential struct {
+	Kind       string            `json:"kind"`
+	APIVersion string            `json:"apiVersion"`
+	Spec       map[string]string `json:"spec"`
+	Status     execStatus        `json:"status"`
+}
+
+type execStatus struct {
+	ExpirationTimestamp time.Time `json:"expirationTimestamp"`
+	Token               string    `json:"token"`
+}
+
 func NewStore(dir string, exportMargin time.Duration) *Store {
-	return &Store{dir: dir, exportMargin: exportMargin, now: time.Now, load: loadConfig, getParameter: fetchParameter}
+	return &Store{dir: dir, exportMargin: exportMargin, now: time.Now, load: loadConfig, getParameter: fetchParameter, presign: presignIdentity}
 }
 
 func loadConfig(ctx context.Context, command Command) (aws.Config, error) {
@@ -75,6 +93,16 @@ func fetchParameter(ctx context.Context, cfg aws.Config, input *ssm.GetParameter
 	return ssm.NewFromConfig(cfg).GetParameter(ctx, input)
 }
 
+func presignIdentity(ctx context.Context, cfg aws.Config, cluster string) (string, error) {
+	presigned, err := sts.NewPresignClient(sts.NewFromConfig(cfg)).PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}, func(o *sts.PresignOptions) {
+		o.ClientOptions = append(o.ClientOptions, sts.WithAPIOptions(smithyhttp.AddHeaderValue("x-k8s-aws-id", cluster), smithyhttp.AddHeaderValue("X-Amz-Expires", "60")))
+	})
+	if err != nil {
+		return "", err
+	}
+	return presigned.URL, nil
+}
+
 func (s *Store) Output(ctx context.Context, command Command) ([]byte, error) {
 	cfg, err := s.load(ctx, command)
 	if err != nil {
@@ -85,6 +113,8 @@ func (s *Store) Output(ctx context.Context, command Command) ([]byte, error) {
 		return s.parameter(ctx, cfg, command)
 	case exportCredentials:
 		return s.export(ctx, cfg, command)
+	case getToken:
+		return s.token(ctx, cfg, command)
 	}
 	panic(fmt.Sprintf("awskey: unknown operation %d", command.op))
 }
@@ -102,6 +132,46 @@ func (s *Store) parameter(ctx context.Context, cfg aws.Config, command Command) 
 		return nil, fmt.Errorf("ssm GetParameter %s returned no value", command.name)
 	}
 	return append([]byte(*out.Parameter.Value), '\n'), nil
+}
+
+func (s *Store) token(ctx context.Context, cfg aws.Config, command Command) ([]byte, error) {
+	creds, err := s.credentials(ctx, cfg.Credentials, command, tokenMargin)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Credentials = aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return creds, nil })
+	if cfg.Region == "" {
+		cfg.Region = "aws-global"
+	}
+	presigned, err := s.presign(ctx, cfg, command.name)
+	if err != nil {
+		return nil, fmt.Errorf("presign the EKS token of %s: %w", command.name, err)
+	}
+	expires := s.now().UTC().Add(tokenLife)
+	if creds.CanExpire && creds.Expires.Before(expires) {
+		expires = creds.Expires.UTC()
+	}
+	out := execCredential{
+		Kind:       "ExecCredential",
+		APIVersion: execAPIVersion(),
+		Spec:       map[string]string{},
+		Status:     execStatus{ExpirationTimestamp: expires.Truncate(time.Second), Token: "k8s-aws-v1." + base64.RawURLEncoding.EncodeToString([]byte(presigned))},
+	}
+	raw, err := json.Marshal(out) //nolint:gosec // the token is the ExecCredential kubectl reads, as aws eks get-token prints it
+	if err != nil {
+		return nil, err
+	}
+	return append(raw, '\n'), nil
+}
+
+func execAPIVersion() string {
+	var info struct {
+		APIVersion string `json:"apiVersion"`
+	}
+	if json.Unmarshal([]byte(os.Getenv("KUBERNETES_EXEC_INFO")), &info) == nil && info.APIVersion == "client.authentication.k8s.io/v1" {
+		return info.APIVersion
+	}
+	return "client.authentication.k8s.io/v1beta1"
 }
 
 func (s *Store) export(ctx context.Context, cfg aws.Config, command Command) ([]byte, error) {

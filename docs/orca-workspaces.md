@@ -211,7 +211,13 @@ reuses them until 5 minutes before they expire, or for `export-credentials`
 until an hour before, the margin `cc-remote orca keep` renews at. Any other
 form, including an `aws` call inside an `sh -c` script, runs as written.
 `cc-remote key -- <command>` prints what one key command prints, so a script or
-another tool's config can read a secret the same way.
+another tool's config can read a secret the same way. It also answers
+`aws eks get-token --cluster-name <name>`, with optional `--region` and
+`--output json`, by presigning the token locally and printing the
+`ExecCredential` the AWS CLI prints, so a kubeconfig user whose exec runs
+`cc-remote key -- aws eks get-token ...` never starts the AWS CLI. The token
+expires after 14 minutes, as the CLI's does, and the profile's credentials are
+renewed once fewer than 15 minutes of them remain.
 
 Every key travels only over SSH stdin into a
 one-use pipe that the worker's terminal reads and removes.
