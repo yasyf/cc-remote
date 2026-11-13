@@ -64,16 +64,16 @@ func (b localDiskBox) volume() string {
 	return filepath.Join(b.disk, ".cc-remote.img")
 }
 
-func (b localDiskBox) move(t *testing.T) {
+func (b localDiskBox) move(t *testing.T, skip ...string) {
 	t.Helper()
 	script := strings.Replace(moveToLocalDisk, "boot=/opt/cc-remote/local-disk.sh\n", "boot="+b.boot+"\n", 1)
 	script = strings.Replace(script, "store=/var/lib/cc-remote\n", "store="+b.store+"\n", 1)
 	script = strings.Replace(script, "lock=/run/cc-remote-local-disk.lock\n", "lock="+b.lock+"\n", 1)
 	err := Scripts{}.MoveToLocalDisk(context.Background(), func(_ context.Context, argv []string, _ io.Reader) error {
-		if want := []string{"sudo", "--preserve-env=PATH", "bash", "-s", b.disk, strconv.Itoa(testReserve)}; !slices.Equal(argv, want) {
+		if want := slices.Concat([]string{"sudo", "--preserve-env=PATH", "bash", "-s", b.disk, strconv.Itoa(testReserve)}, skip); !slices.Equal(argv, want) {
 			t.Errorf("ran %q, want %q", argv, want)
 		}
-		cmd := exec.Command("bash", "-s", b.disk, strconv.Itoa(testReserve))
+		cmd := exec.Command(argv[2], argv[3:]...)
 		cmd.Stdin, cmd.Env = strings.NewReader(script), b.env
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
@@ -81,7 +81,7 @@ func (b localDiskBox) move(t *testing.T) {
 			t.Fatalf("the move failed: %v: %s", err, out.String())
 		}
 		return nil
-	}, b.disk, testReserve)
+	}, b.disk, testReserve, skip)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +139,33 @@ func TestTheMoveMountsTheVolumeCopiesTheHomeBindsItAndLinksTheStore(t *testing.T
 	services := lines(t, box.services)
 	if len(services) != 1 || !strings.HasPrefix(services[0], "services create "+LocalDiskService+" --cmd sudo --args -n,sh,-c,"+box.boot+" && exec sleep infinity") {
 		t.Errorf("services %q do not run the boot script", services)
+	}
+}
+
+func TestTheCopyLeavesOutTheSkippedPathsOfTheHome(t *testing.T) {
+	box := newLocalDiskBox(t)
+	for _, file := range []string{".local/share/claude/versions/2.1.0", ".local/bin/muse-bin-1.4.14", ".local/bin/muse", ".local/bin/gh", ".grok/bin/grok"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(box.home, file)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(box.home, file), []byte(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	box.move(t, ".local/share/claude", ".local/bin/muse-bin-*", ".grok", ".local/bin/absent")
+	copied := filepath.Join(box.disk, ".cc-remote", "home")
+	for _, gone := range []string{".local/share/claude", ".local/bin/muse-bin-1.4.14", ".grok"} {
+		if _, err := os.Lstat(filepath.Join(copied, gone)); !os.IsNotExist(err) {
+			t.Errorf("the local copy of the home still holds %s: %v", gone, err)
+		}
+	}
+	for _, kept := range []string{".bashrc", ".local/bin/muse", ".local/bin/gh", ".local/share"} {
+		if _, err := os.Lstat(filepath.Join(copied, kept)); err != nil {
+			t.Errorf("the local copy of the home lost %s: %v", kept, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(box.home, ".local/share/claude/versions/2.1.0")); err != nil {
+		t.Errorf("the copy removed a skipped path from the home it copied: %v", err)
 	}
 }
 

@@ -90,6 +90,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A Sprite's home volume leaves out the image's unused agent CLIs and mise's
+  installs.** The copy of the home onto the 12 GiB volume carried every agent
+  CLI the Sprite image installs, 2.5 GiB. Lanes run the payload's Claude Code
+  and Codex, and none runs Cursor's agent, Copilot, Antigravity, Muse, Grok or
+  Pi. The copy now leaves those out and keeps Gemini's CLI. On a Sprite the
+  tool install also links `~/.local/share/mise` to `/var/tmp/cc-remote/mise` on
+  the root filesystem, where a bare `mise install` in a repository pinning 43
+  tools wrote 3.9 GiB. A machine whose home already has a mise data directory
+  keeps it.
 - **`cc-remote orca keep` renews each worker with the keys of the config that
   launched it.** One keep runs per state directory, and it read
   `orca.keys.github_app` and `orca.keys.aws` once, from the config of the launch

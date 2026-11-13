@@ -67,6 +67,7 @@ const (
 type Traits struct {
 	LocalDisk        string
 	LocalDiskReserve int64
+	LocalDiskSkip    []string
 	TailnetMode      TailnetMode
 	Supervisor       Supervisor
 	Platform         string

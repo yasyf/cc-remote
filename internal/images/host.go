@@ -76,6 +76,7 @@ tar -cf "$dir.tar.admitted" -C "$dir" .
 const moveToLocalDisk = `set -euo pipefail
 disk="$1"
 reserve="$2"
+shift 2
 home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
 boot=` + localDiskBoot + `
 store=/var/lib/cc-remote
@@ -104,6 +105,7 @@ install -d -m 0755 "$root/store"
 if [ ! -d "$root/home" ]; then
   rm -rf "$root/home.partial"
   cp -a "$home" "$root/home.partial"
+  (cd "$root/home.partial" && rm -rf -- $*)
   mv "$root/home.partial" "$root/home"
 fi
 mountpoint -q "$home" || mount --bind "$root/home" "$home"
@@ -442,9 +444,10 @@ func (s Scripts) InstallPackagesOnline(ctx context.Context, exec Exec, digest st
 	return nil
 }
 
-func (s Scripts) MoveToLocalDisk(ctx context.Context, exec Exec, disk string, reserve int64) error {
+func (s Scripts) MoveToLocalDisk(ctx context.Context, exec Exec, disk string, reserve int64, skip []string) error {
 	// sudo's secure_path drops /.sprite/bin, where the script finds sprite-env.
-	if err := exec(ctx, []string{"sudo", "--preserve-env=PATH", "bash", "-s", disk, strconv.FormatInt(reserve, 10)}, strings.NewReader(moveToLocalDisk)); err != nil {
+	argv := slices.Concat([]string{"sudo", "--preserve-env=PATH", "bash", "-s", disk, strconv.FormatInt(reserve, 10)}, skip)
+	if err := exec(ctx, argv, strings.NewReader(moveToLocalDisk)); err != nil {
 		return fmt.Errorf("move to the local disk %s: %w", disk, err)
 	}
 	return nil
