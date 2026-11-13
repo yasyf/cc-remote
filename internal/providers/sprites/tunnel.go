@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/yasyf/cc-remote/internal/providers"
 )
@@ -100,11 +99,20 @@ func (p *Provider) clientConfig(id string) (*ssh.ClientConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading the ssh key of sprite %s: %w", id, err)
 	}
-	pinned, err := knownhosts.New(keys.knownHosts(id))
+	known, err := os.ReadFile(keys.knownHosts(id))
+	if err != nil {
+		return nil, err
+	}
+	_, _, pinned, _, _, err := ssh.ParseKnownHosts(known)
 	if err != nil {
 		return nil, fmt.Errorf("reading the pinned host key of sprite %s: %w", id, err)
 	}
-	return &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: pinned}, nil
+	return &ssh.ClientConfig{
+		User:              user,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback:   ssh.FixedHostKey(pinned),
+		HostKeyAlgorithms: []string{pinned.Type()},
+	}, nil
 }
 
 func pipe(remote io.ReadWriteCloser) net.Conn {
