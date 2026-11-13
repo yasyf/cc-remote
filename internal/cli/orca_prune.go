@@ -123,7 +123,12 @@ func forget(ctx context.Context, dir state.Dir, client orca.Client, task *orcaTa
 			return err
 		}
 	}
-	if task.Forward != nil {
+	switch {
+	case task.proxied():
+		if err := task.release(ctx); err != nil {
+			return err
+		}
+	case task.Forward != nil:
 		if err := task.Forward.close(ctx); err != nil {
 			return err
 		}

@@ -5,6 +5,7 @@ go 1.26.5
 toolchain go1.26.11
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.10.2
 	go.yaml.in/yaml/v3 v3.0.4
 	google.golang.org/grpc v1.83.1
@@ -15,7 +16,6 @@ require (
 require (
 	connectrpc.com/connect v1.20.0 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jpillora/chisel v1.11.5 // indirect
 	github.com/jpillora/sizestr v1.0.0 // indirect

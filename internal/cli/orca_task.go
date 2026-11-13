@@ -23,6 +23,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/providers/sprites"
 	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
@@ -71,6 +72,7 @@ type orcaTask struct {
 	BeforeWorker  string         `json:"beforeWorker,omitempty"`
 
 	provider     providers.Provider
+	dir          state.Dir
 	claimed      bool
 	booted       *orcaBoot
 	author       author
@@ -174,8 +176,10 @@ func (t orcaTunnel) command(script string, stdin io.Reader) providers.Command {
 	return providers.Command{Name: "ssh", Args: append(t.args(), "sh", "-c", remote.Quote(script)), Stdin: stdin}
 }
 
-func (g orcaGateway) up() bool {
-	unlock, free, err := state.TryLock(g.Lock)
+func (g orcaGateway) up() bool { return locked(g.Lock) }
+
+func locked(path string) bool {
+	unlock, free, err := state.TryLock(path)
 	if err != nil {
 		return false
 	}
@@ -229,29 +233,37 @@ var forwardCommand = func(workspace, config string) (*exec.Cmd, error) {
 	return exec.Command(helper, "orca", "forward", workspace, "--config", config), nil
 }
 
+func (t *orcaTask) proxied() bool { return t.Provider == sprites.Name }
+
 func (t *orcaTask) up(ctx context.Context) bool {
-	if t.Gateway != nil {
+	switch {
+	case t.Gateway != nil:
 		return t.Gateway.up()
+	case t.proxied():
+		return locked(t.dir.OrcaProxyLock(t.Workspace))
 	}
 	return t.Forward.up(ctx)
 }
 
 func (t *orcaTask) ensure(ctx context.Context, config string) error {
-	if t.Gateway != nil {
+	switch {
+	case t.Gateway != nil:
 		return t.Gateway.ensure(ctx, t.Workspace, config, t.Port)
+	case t.proxied():
+		return t.hold(ctx, config)
 	}
 	return t.Forward.ensure(ctx, t.Port)
 }
 
 func (t *orcaTask) shell(ctx context.Context, script string, stdin io.Reader) (providers.Result, error) {
-	if t.Gateway != nil {
+	if t.Gateway != nil || t.proxied() {
 		return t.provider.Exec(ctx, t.Machine, []string{"sh", "-c", script}, stdin)
 	}
 	return providers.OSRunner{}.Run(ctx, t.Forward.command(script, stdin))
 }
 
 func (t *orcaTask) run(ctx context.Context, script string, stdin io.Reader) ([]byte, error) {
-	if t.Gateway == nil {
+	if t.Gateway == nil && !t.proxied() {
 		return providers.Output(ctx, providers.OSRunner{}, t.Forward.command(script, stdin))
 	}
 	result, err := t.provider.Exec(ctx, t.Machine, []string{"sh", "-c", script}, stdin)
@@ -687,7 +699,8 @@ func newOrcaReconnectCmd(runner orca.Runner) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "reconnect <name>",
 		Short: "Restore a task's SSH forward to the Orca runtime its machine runs",
-		Long: `reconnect reopens the recorded SSH forward when it is down, reads the ready line of the Orca runtime
+		Long: `reconnect reopens the recorded SSH forward when it is down, or has orca keep hold a Sprite task's
+port, reads the ready line of the Orca runtime
 the machine's launcher runs, waiting up to two minutes for a cold-booted machine to print it, and
 confirms the paired environment answers from that runtime, then keeps the task so orca keep reopens
 its forward if it exits again. A runtime other than the saved one, as a cold boot starts, is adopted
@@ -833,10 +846,12 @@ func (d orcaDriver) taskOn(result *workspace.Result, agent orca.Agent, provider 
 		Environment:   result.Name,
 		Agent:         agent,
 		provider:      provider,
+		dir:           d.state,
 	}
 	switch {
 	case result.Compute != nil:
 		task.Gateway = &orcaGateway{Instance: result.Machine, ContainerPort: result.Compute.ContainerPort, Lock: d.state.OrcaGatewayLock(result.Name, result.Machine), Log: d.state.OrcaForwardLog(result.Name)}
+	case task.proxied():
 	default:
 		control, err := state.NewOrcaControl()
 		if err != nil {
@@ -1416,7 +1431,7 @@ func readPrompt(cmd *cobra.Command, path string) (string, error) {
 
 func openTask(cfg *config.Config, name string) (*orcaTask, error) {
 	task, err := loadTask(cfg.State(), name)
-	if err != nil || task.Gateway == nil {
+	if err != nil || task.Gateway == nil && !task.proxied() {
 		return task, err
 	}
 	if task.provider, err = openProvider(cfg, task.Provider); err != nil {
@@ -1445,5 +1460,6 @@ func loadTask(dir state.Dir, name string) (*orcaTask, error) {
 	if task.SchemaVersion != orcaTaskSchema {
 		return nil, fmt.Errorf("%s holds task schema %d, not %d", dir.Orca(name), task.SchemaVersion, orcaTaskSchema)
 	}
+	task.dir = dir
 	return task, nil
 }

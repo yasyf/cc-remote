@@ -26,6 +26,7 @@ import (
 	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/providers/providertest"
+	"github.com/yasyf/cc-remote/internal/providers/sprites"
 	"github.com/yasyf/cc-remote/internal/remote"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/tailnet"
@@ -406,7 +407,7 @@ func TestOrcaTaskRoundTripsWithoutSecrets(t *testing.T) {
 		t.Errorf("loadTask of nothing = %v", err)
 	}
 	driver := orcaDriver{state: dir}
-	result := &workspace.Result{Name: "task-a", Provider: "sprites", Profile: "lean", Machine: "task-a", ProjectRoot: "/home/agent/app", SSH: &workspace.SSH{Config: "/state/ssh/task-a.ssh"}}
+	result := &workspace.Result{Name: "task-a", Provider: "namespace", Profile: "lean", Machine: "task-a", ProjectRoot: "/home/agent/app", SSH: &workspace.SSH{Config: "/state/ssh/task-a.ssh"}}
 	task, err := driver.task(result, orca.Agent{Kind: orca.AgentClaude, Model: "m", Effort: "e"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -422,6 +423,13 @@ func TestOrcaTaskRoundTripsWithoutSecrets(t *testing.T) {
 	info, err := os.Stat(dir.Orca("task-a"))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Errorf("task file mode = %v, %v", info, err)
+	}
+	sprite, err := driver.task(&workspace.Result{Name: "task-b", Provider: sprites.Name, Profile: "lean", Machine: "task-b", ProjectRoot: "/home/sprite/app", SSH: &workspace.SSH{Config: "/state/ssh/task-b.ssh"}}, orca.Agent{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded, err := loadTask(dir, "task-b"); err != nil || sprite.Forward != nil || sprite.Gateway != nil || loaded.Forward != nil || !loaded.proxied() || loaded.dir != dir {
+		t.Errorf("a Sprite task = %+v, loaded %+v, %v; want no SSH forward and the keeper's proxy", sprite, loaded, err)
 	}
 }
 

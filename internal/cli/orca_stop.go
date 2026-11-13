@@ -99,6 +99,10 @@ func disconnect(ctx context.Context, dir state.Dir, client orca.Client, name str
 		return nil
 	case err != nil:
 		return err
+	case task.proxied():
+		if err := task.release(ctx); err != nil {
+			return err
+		}
 	case task.Forward != nil:
 		if err := task.Forward.close(ctx); err != nil {
 			return err
