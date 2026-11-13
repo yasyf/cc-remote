@@ -179,6 +179,12 @@ func (p *proxies) sync(ctx context.Context) {
 			p.skipped[name] = true
 			continue
 		}
+		checking, cancel := context.WithTimeout(ctx, answerWithin)
+		recorded := task.Forward != nil && task.Forward.up(checking)
+		cancel()
+		if recorded {
+			continue
+		}
 		if err := p.hold(ctx, task); err != nil {
 			p.fail(name, err)
 			continue
@@ -189,11 +195,6 @@ func (p *proxies) sync(ctx context.Context) {
 }
 
 func (p *proxies) hold(ctx context.Context, task *orcaTask) error {
-	if task.Forward != nil {
-		if err := retire(ctx, *task.Forward); err != nil {
-			return fmt.Errorf("close the SSH forward the task recorded: %w", err)
-		}
-	}
 	provider, err := p.open(task)
 	if err != nil {
 		return err

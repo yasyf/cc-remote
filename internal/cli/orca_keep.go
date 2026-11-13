@@ -84,9 +84,10 @@ A kept Sprite task has no SSH forward: keep itself listens on the task's recorde
 bridges each connection to the same port on the Sprite over the Sprites API's port proxy, one process
 for every kept Sprite task. Every second it holds a newly kept Sprite task's port and closes a released
 one's port and connections, so orca stop and destroy close a lane's forward at once. A Sprite task
-recorded with an SSH forward has that forward's master closed and its port held the same way, so
-Orca's saved environment keeps the port it names. A newer keep taking over drops these connections
-for the moment between the two processes, and Orca connects again.`,
+recorded with an SSH forward keeps that forward while its master answers, since a prepare of an
+earlier release runs its commands through it, and once the master exits keep holds the same port
+the same way, so Orca's saved environment keeps the port it names. A newer keep taking over drops
+these connections for the moment between the two processes, and Orca connects again.`,
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
