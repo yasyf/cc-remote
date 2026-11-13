@@ -3,6 +3,7 @@ package registry_test
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -66,8 +67,8 @@ func TestNewSprites(t *testing.T) {
 			if got != want {
 				t.Errorf("config = %+v, want %+v", got, want)
 			}
-			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 2, GoMemoryLimit: 2 << 30, MemoryMax: 8 << 30, MemoryHigh: 15 << 29, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29}
-			if traits := provider.Traits(); traits != wantTraits {
+			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 2, GoMemoryLimit: 2 << 30, MemoryMax: 8 << 30, MemoryHigh: 15 << 29, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29, LocalDiskSkip: []string{".local/share/claude", ".codex/packages/standalone", ".local/share/cursor-agent", ".local/bin/agent", ".local/bin/cursor-agent", ".local/bin/copilot", ".local/bin/agy", ".local/bin/muse", ".local/bin/muse-bin-*", ".grok", ".local/bin/grok", ".pi", ".local/bin/pi"}}
+			if traits := provider.Traits(); !reflect.DeepEqual(traits, wantTraits) {
 				t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)
 			}
 		})
@@ -89,7 +90,7 @@ func TestNewNamespace(t *testing.T) {
 		Supervisor:  providers.SupervisorSetsid,
 		Platform:    "linux/amd64",
 	}
-	if traits := provider.Traits(); traits != wantTraits {
+	if traits := provider.Traits(); !reflect.DeepEqual(traits, wantTraits) {
 		t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)
 	}
 }

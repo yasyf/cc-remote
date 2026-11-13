@@ -44,6 +44,22 @@ const (
 	goMemoryLimit       = 2 << 30
 )
 
+var unusedImageAgents = []string{
+	".local/share/claude",
+	".codex/packages/standalone",
+	".local/share/cursor-agent",
+	".local/bin/agent",
+	".local/bin/cursor-agent",
+	".local/bin/copilot",
+	".local/bin/agy",
+	".local/bin/muse",
+	".local/bin/muse-bin-*",
+	".grok",
+	".local/bin/grok",
+	".pi",
+	".local/bin/pi",
+}
+
 var (
 	pauseWithin  = 2 * time.Minute
 	pauseEvery   = 5 * time.Second
@@ -124,6 +140,7 @@ func (p *Provider) Traits() providers.Traits {
 		MemoryHigh:       containerMemoryHigh,
 		LocalDisk:        localDisk,
 		LocalDiskReserve: localDiskReserve,
+		LocalDiskSkip:    unusedImageAgents,
 	}
 }
 

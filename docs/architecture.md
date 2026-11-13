@@ -116,7 +116,13 @@ file returns its space to the disk. Every file written under `/tmp` lands in the
 volume, and a full volume fails that write with `ENOSPC` while the root
 filesystem keeps working. Create then copies the home into the volume, binds the
 copy over the home, and links `/var/lib/cc-remote`, which holds the payload and
-packages archives, to the volume. Every install, checkout, cache and database
+packages archives, to the volume. The copy leaves out each path the provider
+names as its `LocalDiskSkip` trait. On Sprites that is every agent CLI the
+Sprite image installs in the home except Gemini's. The payload's Claude Code
+and Codex replace the image's own installs, and no lane runs Cursor's agent,
+Copilot, Antigravity, Muse, Grok or Pi. They took 2.5 GiB of a
+12 GiB volume. Gemini's CLI stays, since `orca.keys.gemini` hands workers a key
+for it. Every install, checkout, cache and database
 then lands there at its usual path, with no tool configured for it.
 The `cc-remote-local-disk` service mounts the volume and binds the copy again after every boot, and a resume or reuse does both itself before it reads the tools, since a suspend stops that service. When the volume is neither mounted nor on the disk, it fails rather than bind the home onto the bare disk. A bind
 keeps the home's path canonical, which `capt-hookd` and the payload's manifest
@@ -145,10 +151,14 @@ Sprites, which the Orca runtime exports as `GOFLAGS=-p=2` and `GOMEMLIMIT` to
 every lane, so a Go build or test runs two jobs at a time and each Go process
 collects its garbage before it passes 2 GiB.
 
-Go's module cache, build cache and temporary build directory are the one
-exception to the volume on a Sprite. The tool install points them at
-`/var/tmp/cc-remote/go-mod`, `go-build` and `go-tmp` with `go env -w`, since
-`/var/tmp` is on the root filesystem. The volume holds the home, `/tmp`, and
+Go's module cache, build cache and temporary build directory, and mise's data
+directory, are the exceptions to the volume on a Sprite. The tool install points
+Go's at `/var/tmp/cc-remote/go-mod`, `go-build` and `go-tmp` with `go env -w`,
+and links `~/.local/share/mise` to `/var/tmp/cc-remote/mise`, since `/var/tmp`
+is on the root filesystem. A machine whose home already has a mise data
+directory keeps it. A bare `mise install` in a repository pinning 43 tools
+wrote 3.9 GiB there; the volume took 328 MiB, mise's npm cache in
+`~/.cache/aube`. The volume holds the home, `/tmp`, and
 every log and state file the Orca runtime writes, so a full volume stops the
 runtime. On a pool Sprite the volume is 12 GiB and the module cache alone had
 grown to 2.6 GiB, while the root filesystem had 90 GiB free. Elsewhere Go keeps

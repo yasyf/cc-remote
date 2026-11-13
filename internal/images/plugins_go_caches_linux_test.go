@@ -66,7 +66,7 @@ func TestPluginsMoveGoCachesOutOfTheHomeOnASprite(t *testing.T) {
 	if err := archive.Close(); err != nil {
 		t.Fatal(err)
 	}
-	run := exec.Command("bash", "-c", "set -euo pipefail\ngo_cache_dir="+quote(cache)+"\n"+script[start:end]+"\ngo_caches\ngo mod download example.com/cached@v1.0.0\ngo env GOMODCACHE GOCACHE GOTMPDIR\n")
+	run := exec.Command("bash", "-c", "set -euo pipefail\nroot_cache_dir="+quote(cache)+"\n"+script[start:end]+"\ngo_caches\ngo mod download example.com/cached@v1.0.0\ngo env GOMODCACHE GOCACHE GOTMPDIR\n")
 	run.Dir = root
 	run.Env = []string{
 		"HOME=" + home,

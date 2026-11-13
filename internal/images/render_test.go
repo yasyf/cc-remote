@@ -777,12 +777,19 @@ go_caches() {
     return
   fi
   if command -v sprite-env > /dev/null; then
-    mkdir -p "$go_cache_dir/go-mod" "$go_cache_dir/go-build" "$go_cache_dir/go-tmp"
-    go env -w GOMODCACHE="$go_cache_dir/go-mod" GOCACHE="$go_cache_dir/go-build" GOTMPDIR="$go_cache_dir/go-tmp"
+    mkdir -p "$root_cache_dir/go-mod" "$root_cache_dir/go-build" "$root_cache_dir/go-tmp"
+    go env -w GOMODCACHE="$root_cache_dir/go-mod" GOCACHE="$root_cache_dir/go-build" GOTMPDIR="$root_cache_dir/go-tmp"
     return
   fi
   home_go_cache GOMODCACHE "$HOME/.cache/go-mod"
   home_go_cache GOCACHE "$HOME/.cache/go-build"
+}
+
+mise_data() {
+  if command -v sprite-env > /dev/null && [ ! -d "$HOME/.local/share/mise" ]; then
+    mkdir -p "$root_cache_dir/mise" "$HOME/.local/share"
+    ln -sfnT "$root_cache_dir/mise" "$HOME/.local/share/mise"
+  fi
 }`
 	before := os.DirFS("testdata/ddfe484")
 	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
@@ -814,16 +821,16 @@ go_caches() {
 					"      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n", "      deb) deb_artifacts+=(\"$download\") ;;\n",
 					"download=\"$tmp_dir/codex-runtime.tar.xz\" plugin\n", "download=\"$tmp_dir/codex-runtime.tar.xz\" staging=\"$tmp_dir/codex-runtime\" plugin\n",
 					"    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    tar -xJf \"$download\" -C \"$(dirname \"$codex_runtime_root\")\"\n    rm -f \"$download\"\n", "    mkdir \"$staging\"\n    tar -xJf \"$download\" -C \"$staging\"\n    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    mv \"$staging/$(basename \"$codex_runtime_root\")\" \"$codex_runtime_root\"\n    rm -rf \"$staging\" \"$download\"\n",
-					"system_bin_dir=/usr/local/bin\n", "system_bin_dir=/usr/local/bin\ngo_cache_dir=/var/tmp/cc-remote\n",
+					"system_bin_dir=/usr/local/bin\n", "system_bin_dir=/usr/local/bin\nroot_cache_dir=/var/tmp/cc-remote\n",
 					"\nclaude_env() {\n", "\n"+goCaches+"\n\nclaude_env() {\n",
-					"  mkdir -p \"$bin_dir\"\n", "  mkdir -p \"$bin_dir\"\n  go_caches\n",
+					"  mkdir -p \"$bin_dir\"\n", "  mkdir -p \"$bin_dir\"\n  go_caches\n  mise_data\n",
 				).Replace(string(want)))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction, the staged Codex runtime and the Go caches for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction, the staged Codex runtime, the Go caches and the mise data for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})

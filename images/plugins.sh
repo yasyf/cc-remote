@@ -11,7 +11,7 @@ marketplace_dir="$share_dir/marketplaces"
 bin_dir="$HOME/.local/bin"
 system_tool_dir=/opt/cc-remote/tools
 system_bin_dir=/usr/local/bin
-go_cache_dir=/var/tmp/cc-remote
+root_cache_dir=/var/tmp/cc-remote
 {{- with .Closure}}
 closure_root=/opt/cc-remote/closure
 {{- end}}
@@ -556,12 +556,19 @@ go_caches() {
     return
   fi
   if command -v sprite-env > /dev/null; then
-    mkdir -p "$go_cache_dir/go-mod" "$go_cache_dir/go-build" "$go_cache_dir/go-tmp"
-    go env -w GOMODCACHE="$go_cache_dir/go-mod" GOCACHE="$go_cache_dir/go-build" GOTMPDIR="$go_cache_dir/go-tmp"
+    mkdir -p "$root_cache_dir/go-mod" "$root_cache_dir/go-build" "$root_cache_dir/go-tmp"
+    go env -w GOMODCACHE="$root_cache_dir/go-mod" GOCACHE="$root_cache_dir/go-build" GOTMPDIR="$root_cache_dir/go-tmp"
     return
   fi
   home_go_cache GOMODCACHE "$HOME/.cache/go-mod"
   home_go_cache GOCACHE "$HOME/.cache/go-build"
+}
+
+mise_data() {
+  if command -v sprite-env > /dev/null && [ ! -d "$HOME/.local/share/mise" ]; then
+    mkdir -p "$root_cache_dir/mise" "$HOME/.local/share"
+    ln -sfnT "$root_cache_dir/mise" "$HOME/.local/share/mise"
+  fi
 }
 
 claude_env() {
@@ -716,6 +723,7 @@ run_install() {
   IFS= read -r github_token
   mkdir -p "$bin_dir"
   go_caches
+  mise_data
 {{- range .Tools}}
   queue_artifact {{install . "tool_dir" "bin_dir"}}
 {{- end}}
