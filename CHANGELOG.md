@@ -98,6 +98,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A restarted Sprite's Orca runtime waits for the payload instead of failing
+  on it.** The `cc-remote-orca` service starts beside `cc-remote-payload`,
+  whose `--needs` orders only the start, so after a restart or a wake the
+  launcher ran `xvfb-run` and the runtime before the payload holding them was
+  mounted: `serve.log` filled with `xvfb-run: not found` and `exited 127`
+  until the mount landed 17 to 49 seconds later, and the doubling backoff
+  between those tries kept the runtime down for up to 30 seconds after it.
+  Before its first start the launcher now runs
+  `/opt/cc-remote/payload-mount.sh` under `sudo -n` when the machine has one,
+  which waits on the mount's lock and returns at once when this boot's mount
+  is done. A failed mount writes its reason to `serve.log`, and the launcher
+  goes on to start the runtime as before.
 - **A Claude worker's codex is signed in.** A Claude worker received the
   `openai` key only as `OPENAI_API_KEY`, which codex never reads, so on a fresh
   machine `codex login status` printed `Not logged in` and every `codex exec`

@@ -319,7 +319,11 @@ identities remain unchanged. `resume --connection server` adopts the runtime
 the same way.
 
 The machine itself restarts a runtime that exits. Its launcher,
-`$HOME/.cc-remote/orca/serve.sh`, runs the runtime in a loop and waits before
+`$HOME/.cc-remote/orca/serve.sh`, first runs `/opt/cc-remote/payload-mount.sh`
+under `sudo -n` when the machine has a payload, so after a restart or a wake it
+waits for the payload that holds the runtime and `xvfb-run` to mount rather
+than failing on them; a failed mount writes its reason to `serve.log`. It then
+runs the runtime in a loop and waits before
 each restart: 1 second at first, twice as long after each exit up to 30
 seconds, and 1 second again after a run of a minute or more. The agents in the
 worker's terminals keep running across the restart. Only the launcher holds

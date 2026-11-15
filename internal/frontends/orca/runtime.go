@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/yasyf/cc-remote/internal/config"
+	"github.com/yasyf/cc-remote/internal/images"
 	"github.com/yasyf/cc-remote/internal/remote"
 )
 
@@ -130,6 +131,7 @@ func (r Runtime) Launcher() string {
 	}
 	return strings.Join(append(lines,
 		`cd "`+runtimeDir+`"`,
+		images.MountPayloadScript+" 2>> serve.log || :",
 		"exec 9> serve.lock",
 		"flock -n 9 || exit 0",
 		"say() {",

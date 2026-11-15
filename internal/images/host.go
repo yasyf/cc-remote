@@ -141,10 +141,9 @@ const rebindLocalDisk = `if [ -x ` + localDiskBoot + ` ]; then
 fi
 `
 
-const mountPayloadForBoot = `if [ -x ` + payloadBoot + ` ]; then
+const MountPayloadScript = `if [ -x ` + payloadBoot + ` ]; then
   sudo -n ` + payloadBoot + `
-fi
-`
+fi`
 
 const stagePlugins = `set -eu
 mkdir -p "$HOME/.cc-remote"
@@ -480,7 +479,7 @@ func (s Scripts) RebindLocalDisk(ctx context.Context, exec Exec) error {
 }
 
 func (s Scripts) MountPayloadForBoot(ctx context.Context, exec Exec) error {
-	if err := exec(ctx, []string{"sh", "-c", mountPayloadForBoot}, nil); err != nil {
+	if err := exec(ctx, []string{"sh", "-c", MountPayloadScript}, nil); err != nil {
 		return fmt.Errorf("mount the payload for this boot: %w", err)
 	}
 	return nil
