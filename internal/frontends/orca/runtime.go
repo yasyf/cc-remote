@@ -257,14 +257,14 @@ const geminiVariable = "GEMINI_API_KEY"
 const (
 	memoryDir         = "/dev/shm/cc-remote"
 	githubAppVariable = "CCX_GITHUB_APP_TOKEN_FILE"
-	githubAppFile     = memoryDir + "/github-app.json"
+	GitHubAppFile     = memoryDir + "/github-app.json"
 	awsVariable       = "AWS_CONFIG_FILE"
 	awsFile           = memoryDir + "/aws.json"
 	awsConfigFile     = memoryDir + "/aws-config"
 )
 
 var (
-	GitHubAppScript = memoryScript(githubAppFile)
+	GitHubAppScript = memoryScript(GitHubAppFile)
 	AWSScript       = memoryScript(awsFile)
 )
 
@@ -475,7 +475,7 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$gemini" || export ` + geminiVariable + `="$gemini"; }`,
 		`{ test -z "$login" || gh config set -h github.com user "$login"; }`,
 		`{ test -z "$environment" || export $environment; }`,
-		`{ test -z "$app" || { printf '%s' "$app" | (` + GitHubAppScript + `) && export ` + githubAppVariable + `=` + githubAppFile + `; }; }`,
+		`{ test -z "$app" || export ` + githubAppVariable + `="$app"; }`,
 		`{ test -z "$aws" || { printf '%s' "$aws" | (` + AWSScript + `) && printf '[default]\ncredential_process = cat ` + awsFile + `\n' > ` + awsConfigFile + ` && export ` + awsVariable + `=` + awsConfigFile + `; }; }`,
 		"unset key judge typesafe github trunk gemini name email login environment app aws",
 		"export " + strings.Join(a.exports(), " "),

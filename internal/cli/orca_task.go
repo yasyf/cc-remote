@@ -1268,7 +1268,6 @@ func (s secrets) clear() {
 	clear(s.gemini)
 	clear(s.githubLogin)
 	clear(s.env)
-	clear(s.githubApp)
 	clear(s.aws)
 }
 
@@ -1320,11 +1319,8 @@ func captureKeys(ctx context.Context, dir state.Dir, keys map[string][]string, a
 			return secrets{}, fmt.Errorf("env %w", err)
 		}
 	}
-	if command, ok := keys[config.KeyGitHubApp]; ok {
-		if captured.githubApp, err = captureKey(ctx, dir, command); err != nil {
-			captured.clear()
-			return secrets{}, fmt.Errorf("github_app %w", err)
-		}
+	if _, ok := keys[config.KeyGitHubApp]; ok {
+		captured.githubApp = []byte(orca.GitHubAppFile)
 	}
 	if command, ok := keys[config.KeyAWS]; ok {
 		if captured.aws, _, err = captureAWS(ctx, dir, command); err != nil {
