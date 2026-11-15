@@ -1675,7 +1675,7 @@ func TestWarmRefusesWhatThePoolCannotKeep(t *testing.T) {
 		calls++
 		return nil, errors.New("no runtime operation is expected")
 	})
-	for _, cmd := range []*cobra.Command{newOrcaPrepareCmd(runner), newOrcaPoolFillCmd(), newOrcaPoolStatusCmd()} {
+	for _, cmd := range []*cobra.Command{newOrcaPrepareCmd(runner), newOrcaPoolFillCmd(runner), newOrcaPoolStatusCmd()} {
 		args := []string{"--config", example, "--provider", "sprites", "--profile", "full"}
 		if cmd.Name() == "prepare" {
 			args = append([]string{"lane-a", "--warm", "--model", "claude-opus-5-5", "--effort", "xhigh", "--brief-file", brief}, args...)

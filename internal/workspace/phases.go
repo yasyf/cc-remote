@@ -3,6 +3,8 @@ package workspace
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"slices"
@@ -24,6 +26,37 @@ const (
 	lanePublish   = "publish"
 	laneSSH       = "ssh"
 )
+
+var phaseWithin = map[string]time.Duration{
+	"machine.create":         10 * time.Minute,
+	"image.adopt":            2 * time.Minute,
+	"payload.boot":           payloadMountWithin,
+	"memory.limit":           2 * time.Minute,
+	"local.disk":             5 * time.Minute,
+	"prerequisites":          15 * time.Minute,
+	"packages":               15 * time.Minute,
+	"loader":                 5 * time.Minute,
+	"tools.provision":        10 * time.Minute,
+	"plugins.stage":          5 * time.Minute,
+	"tools.install":          10 * time.Minute,
+	"payload.url":            5 * time.Minute,
+	"payload.fetch":          20 * time.Minute,
+	"payload.stage":          20 * time.Minute,
+	"packages.url":           5 * time.Minute,
+	"packages.fetch":         20 * time.Minute,
+	"packages.stage":         20 * time.Minute,
+	"bootstrap-helper.url":   5 * time.Minute,
+	"bootstrap-helper.fetch": 5 * time.Minute,
+	"bootstrap-helper.stage": 5 * time.Minute,
+	"payload.mount":          5 * time.Minute,
+	"payload.prefetch":       10 * time.Minute,
+	"tools.publish":          5 * time.Minute,
+	"checkout":               15 * time.Minute,
+	"prepare":                30 * time.Minute,
+	"configure":              15 * time.Minute,
+	"tailnet.enroll":         10 * time.Minute,
+	"ssh.target":             5 * time.Minute,
+}
 
 type span struct {
 	lane  string
@@ -65,10 +98,19 @@ func countExec(ctx context.Context) {
 	}
 }
 
-func (s *Session) timed(ctx context.Context, lane, phase, machine string, run func() error) error {
+func (s *Session) timed(ctx context.Context, lane, phase, machine string, run func(context.Context) error) error {
 	op := current(ctx)
+	within, ok := phaseWithin[phase]
+	if !ok {
+		panic("phase " + phase + " has no deadline")
+	}
+	bounded, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
 	start := s.Now()
-	err := run()
+	err := run(bounded)
+	if err != nil && ctx.Err() == nil && errors.Is(bounded.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("%s on %s did not finish within %s: %w", phase, machine, within, err)
+	}
 	end := s.Now()
 	recorded := span{lane: lane, phase: phase, start: start.Sub(op.started), end: end.Sub(op.started), ok: err == nil}
 	s.Log.Info("phase", "phase", phase, "lane", lane, "machine", machine, "start", seconds(recorded.start), "end", seconds(recorded.end), "seconds", seconds(recorded.end-recorded.start), "ok", recorded.ok)

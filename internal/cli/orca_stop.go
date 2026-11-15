@@ -120,7 +120,7 @@ func (p *orcaPool) workspaceOf(lane string) (string, error) {
 		if member.Name == lane {
 			return "", fmt.Errorf("%s names a warm pool workspace, not a lane; a workspace is stopped only through the lane that claimed it", lane)
 		}
-		if member.Lane != lane || member.State == memberStopped {
+		if member.Lane != lane || member.State == memberStopped || member.State == memberReleased {
 			continue
 		}
 		started, err := p.startedWorker(member)

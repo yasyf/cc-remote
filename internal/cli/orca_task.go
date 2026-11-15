@@ -30,14 +30,19 @@ import (
 )
 
 const (
-	orcaTaskSchema = 1
-	keyTimeout     = 30 * time.Second
-	keyPipeTimeout = 2 * time.Minute
-	keyDropTimeout = 5 * time.Second
-	submitWait     = 15 * time.Second
-	gatewayStart   = 30 * time.Second
-	gatewayPoll    = 100 * time.Millisecond
+	orcaTaskSchema     = 1
+	keyTimeout         = 30 * time.Second
+	keyPipeTimeout     = 2 * time.Minute
+	keyDropTimeout     = 5 * time.Second
+	submitWait         = 15 * time.Second
+	gatewayStart       = 30 * time.Second
+	gatewayPoll        = 100 * time.Millisecond
+	launchWithin       = 30 * time.Minute
+	machineStepWithin  = 2 * time.Minute
+	runtimeStartWithin = 5 * time.Minute
 )
+
+var parentEvery = 5 * time.Second
 
 var ErrNotSubmitted = errors.New("the prompt was accepted, but no turn_started was observed")
 
@@ -322,7 +327,47 @@ func (l *orcaLaunch) run(cmd *cobra.Command, runner orca.Runner, name string, fi
 	if err != nil {
 		return err
 	}
-	return start(cmd.Context(), cmd.OutOrStdout(), session, runner, runtime, name, finish)
+	ctx, cancel := launchContext(cmd.Context(), os.Getppid)
+	defer cancel()
+	err = start(ctx, cmd.OutOrStdout(), session, runner, runtime, name, finish)
+	if cause := context.Cause(ctx); err != nil && (errors.Is(cause, errOrphaned) || errors.Is(cause, errLaunchDeadline)) {
+		return errors.Join(cause, err)
+	}
+	return err
+}
+
+var (
+	errOrphaned       = errors.New("the process that started this launch exited, so the launch stopped")
+	errLaunchDeadline = fmt.Errorf("the launch did not finish within %s", launchWithin)
+)
+
+func launchContext(ctx context.Context, parent func() int) (context.Context, context.CancelFunc) {
+	ctx, timeout := context.WithTimeoutCause(ctx, launchWithin, errLaunchDeadline)
+	ctx, orphan := context.WithCancelCause(ctx)
+	started := parent()
+	if started != 1 {
+		go watchParent(ctx, parent, started, orphan)
+	}
+	return ctx, func() {
+		orphan(nil)
+		timeout()
+	}
+}
+
+func watchParent(ctx context.Context, parent func() int, started int, orphan context.CancelCauseFunc) {
+	ticker := time.NewTicker(parentEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if parent() != started {
+				orphan(errOrphaned)
+				return
+			}
+		}
+	}
 }
 
 func (l *orcaLaunch) source(cfg *config.Config) workspace.Source {
@@ -510,8 +555,9 @@ func newOrcaTaskCmds(runner orca.Runner) []*cobra.Command {
 		newOrcaReadCmd(runner),
 		newOrcaCollectCmd(runner),
 		newOrcaForwardCmd(),
-		newOrcaPoolCmd(),
+		newOrcaPoolCmd(runner),
 		newOrcaStopCmd(runner),
+		newOrcaReleaseCmd(runner),
 		newOrcaPruneCmd(runner),
 		newOrcaKeepCmd(runner),
 	}
@@ -1048,6 +1094,8 @@ func (d orcaDriver) boot(ctx context.Context, session *workspace.Session, retain
 }
 
 func (d orcaDriver) startOn(ctx context.Context, session *workspace.Session, machine string, runtime orca.Runtime, port int) (orca.Ready, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, runtimeStartWithin)
+	defer cancel()
 	result, err := session.Provider.Exec(ctx, machine, []string{"sh", "-c", runtime.EnsureScript()}, nil)
 	if err != nil {
 		return orca.Ready{}, "", err
@@ -1064,6 +1112,8 @@ func (d orcaDriver) startOn(ctx context.Context, session *workspace.Session, mac
 }
 
 func (d orcaDriver) resumed(ctx context.Context, session *workspace.Session, task *orcaTask) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, machineStepWithin)
+	defer cancel()
 	result, err := session.Provider.Exec(ctx, task.Machine, []string{"sh", "-c", orca.ProbeScript}, nil)
 	if err != nil {
 		return "", err
@@ -1220,6 +1270,8 @@ func reclaim(ctx context.Context, session *workspace.Session, result *workspace.
 
 func machineExec(session *workspace.Session, machine, step string) func(context.Context, []string) ([]byte, error) {
 	return func(ctx context.Context, argv []string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, machineStepWithin)
+		defer cancel()
 		result, err := session.Provider.Exec(ctx, machine, argv, nil)
 		if err != nil {
 			return nil, err

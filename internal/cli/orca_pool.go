@@ -51,6 +51,7 @@ const (
 	memberFailed       memberState = "failed"
 	memberAbandoned    memberState = "abandoned"
 	memberRefused      memberState = "refused"
+	memberReleased     memberState = "released"
 )
 
 type orcaMember struct {
@@ -133,13 +134,14 @@ type orcaReplenish struct {
 }
 
 type orcaFill struct {
-	Key       string   `json:"key"`
-	Target    int      `json:"target"`
-	Ready     []string `json:"ready"`
-	Created   []string `json:"created,omitempty"`
-	Abandoned []string `json:"abandoned,omitempty"`
-	Refused   []string `json:"refused,omitempty"`
-	Retired   []string `json:"retired,omitempty"`
+	Key       string      `json:"key"`
+	Target    int         `json:"target"`
+	Ready     []string    `json:"ready"`
+	Created   []string    `json:"created,omitempty"`
+	Abandoned []string    `json:"abandoned,omitempty"`
+	Refused   []string    `json:"refused,omitempty"`
+	Retired   []string    `json:"retired,omitempty"`
+	Reaped    *orcaReaped `json:"reaped,omitempty"`
 }
 
 type orcaPoolStatus struct {
@@ -333,7 +335,7 @@ func (p *orcaPool) admit(lane string) error {
 		if err != nil {
 			return err
 		}
-		if started && member.State != memberStopped {
+		if started && member.State != memberStopped && member.State != memberReleased {
 			return fmt.Errorf("lane %s already claimed warm workspace %s, now %s; a lane gets one first worker until cc-remote orca stop %s stops it", lane, member.Name, member.State, lane)
 		}
 	}
@@ -884,16 +886,16 @@ func failureOf(err error) *orcaFailure {
 	return failure
 }
 
-func newOrcaPoolCmd() *cobra.Command {
+func newOrcaPoolCmd(runner orca.Runner) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pool",
 		Short: "Keep unused agent-free Sprite workspaces ready for orca prepare --warm",
 	}
-	cmd.AddCommand(newOrcaPoolFillCmd(), newOrcaPoolStatusCmd())
+	cmd.AddCommand(newOrcaPoolFillCmd(runner), newOrcaPoolStatusCmd())
 	return cmd
 }
 
-func newOrcaPoolFillCmd() *cobra.Command {
+func newOrcaPoolFillCmd(runner orca.Runner) *cobra.Command {
 	var flags selection
 	cmd := &cobra.Command{
 		Use:   "fill",
@@ -904,7 +906,10 @@ key: tools, plugins, and a shallow checkout of config.ref, with no Orca runtime,
 run side by side: each counts the ready workspaces and the ones other fills are still creating, reserves the
 shortfall, and creates those workspaces at once, so a claim that leaves the pool one short makes one create. A
 failed create is recorded as failed, logged, and left for the next claim's fill to replace, and its error is
-shown only as the step that failed, its class, exit, HTTP status, length, and SHA-256. The fill stops at a 20 minute deadline.
+shown only as the step that failed, its class, exit, HTTP status, length, and SHA-256. After its creates the fill
+reaps: it destroys up to 10 workspaces orca release recorded released, and removes the pool, workspace, and task
+records whose machine the provider no longer has, with lock files left for names with no record, listing them under
+reaped. The fill stops at a 20 minute deadline.
 prepare --warm starts this command detached once it has claimed, appending its output to the pool's fill log.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -918,7 +923,11 @@ prepare --warm starts this command detached once it has claimed, appending its o
 			session.Stderr = io.Discard
 			ctx, cancel := context.WithTimeout(cmd.Context(), fillTimeout)
 			defer cancel()
-			fill, err := openPool(session).fill(ctx)
+			pool := openPool(session)
+			fill, err := pool.fill(ctx)
+			if err == nil {
+				fill.Reaped, err = pool.reap(ctx, orca.NewClient(runner))
+			}
 			if err != nil {
 				err = withheld(err)
 			}
