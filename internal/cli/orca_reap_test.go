@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"testing"
@@ -138,5 +139,41 @@ func TestReleaseDestroysEveryWorkspaceTheLaneClaimed(t *testing.T) {
 	}
 	if _, err := releaseLane(t.Context(), w.session, environments.client(), "pool-other"); err == nil {
 		t.Error("release of a pool workspace's own name succeeded, want it refused")
+	}
+}
+
+type listMisses struct {
+	providers.Provider
+	missing string
+}
+
+func (l listMisses) List(ctx context.Context, labels map[string]string) ([]providers.Machine, error) {
+	machines, err := l.Provider.List(ctx, labels)
+	return slices.DeleteFunc(machines, func(machine providers.Machine) bool { return machine.ID == l.missing }), err
+}
+
+func TestReapKeepsAWorkspaceTheListMissedButTheProviderStillHas(t *testing.T) {
+	w := newWarmPool(t)
+	w.spare(openPool(w.session), "pool-hidden")
+	w.settleMember(openPool(w.session), "pool-hidden", "lane-a", memberPrepared)
+	w.pairedTask("pool-hidden", "fake", "env-hidden", false)
+	pool := openPool(w.over(listMisses{Provider: w.provider, missing: "pool-hidden"}))
+	environments := newSavedEnvironments(t, orca.Environment{ID: "env-hidden", Name: "pool-hidden"})
+
+	reaped, err := pool.reap(t.Context(), environments.client())
+	if err != nil || len(reaped.Forgotten) != 0 || len(reaped.Destroyed) != 0 {
+		t.Fatalf("reap = %+v, %v, want nothing reaped", reaped, err)
+	}
+	if _, err := w.provider.Get(t.Context(), "pool-hidden"); err != nil {
+		t.Errorf("machine = %v, want kept", err)
+	}
+	dir := w.session.Config.State()
+	for _, path := range []string{dir.Pool("pool-hidden"), dir.Workspace("pool-hidden"), dir.Orca("pool-hidden"), dir.OrcaKept("pool-hidden")} {
+		if !recorded(path) {
+			t.Errorf("%s was removed, want it kept", path)
+		}
+	}
+	if len(environments.removed) != 0 {
+		t.Errorf("removed environments %q, want none", environments.removed)
 	}
 }

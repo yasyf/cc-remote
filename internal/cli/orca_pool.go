@@ -906,9 +906,9 @@ key: tools, plugins, and a shallow checkout of config.ref, with no Orca runtime,
 run side by side: each counts the ready workspaces and the ones other fills are still creating, reserves the
 shortfall, and creates those workspaces at once, so a claim that leaves the pool one short makes one create. A
 failed create is recorded as failed, logged, and left for the next claim's fill to replace, and its error is
-shown only as the step that failed, its class, exit, HTTP status, length, and SHA-256. After its creates the fill
+shown only as the step that failed, its class, exit, HTTP status, length, and SHA-256. Once every create succeeded the fill
 reaps: it destroys up to 10 workspaces orca release recorded released, and removes the pool, workspace, and task
-records whose machine the provider no longer has, with lock files left for names with no record, listing them under
+records whose machine a lookup confirms gone, with lock files left for names with no record, listing them under
 reaped. The fill stops at a 20 minute deadline.
 prepare --warm starts this command detached once it has claimed, appending its output to the pool's fill log.`,
 		Args: cobra.NoArgs,

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/cc-remote/internal/frontends/orca"
+	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/state"
 	"github.com/yasyf/cc-remote/internal/workspace"
 )
@@ -149,10 +151,13 @@ func (p *orcaPool) reap(ctx context.Context, client orca.Client) (*orcaReaped, e
 		if member.Provider != p.session.Kind || member.State == memberProvisioning {
 			continue
 		}
-		live := alive[p.machineOf(member.Name)]
+		if ctx.Err() != nil {
+			return reaped, nil
+		}
+		machine := p.machineOf(member.Name)
 		switch {
-		case !live:
-			p.reapOne(ctx, client, member.Name, saved, false, &reaped.Forgotten)
+		case !alive[machine]:
+			p.reapGone(ctx, client, member.Name, machine, saved, &reaped.Forgotten)
 		case member.State == memberReleased && len(reaped.Destroyed) < reapDestroys:
 			p.reapOne(ctx, client, member.Name, saved, true, &reaped.Destroyed)
 		}
@@ -162,6 +167,9 @@ func (p *orcaPool) reap(ctx context.Context, client orca.Client) (*orcaReaped, e
 		return nil, err
 	}
 	for _, name := range names {
+		if ctx.Err() != nil {
+			return reaped, nil
+		}
 		if pooled[name] {
 			continue
 		}
@@ -173,7 +181,7 @@ func (p *orcaPool) reap(ctx context.Context, client orca.Client) (*orcaReaped, e
 		if record.Provider != p.session.Kind || record.Machine == "" || record.Unverified || alive[record.Machine] {
 			continue
 		}
-		p.reapOne(ctx, client, name, saved, false, &reaped.Forgotten)
+		p.reapGone(ctx, client, name, record.Machine, saved, &reaped.Forgotten)
 	}
 	if err := p.reapTasks(ctx, client, saved, reaped); err != nil {
 		return reaped, err
@@ -187,6 +195,16 @@ func (p *orcaPool) machineOf(name string) string {
 		return record.Machine
 	}
 	return name
+}
+
+func (p *orcaPool) reapGone(ctx context.Context, client orca.Client, name, machine string, saved map[string]bool, into *[]string) {
+	_, err := p.session.Provider.Get(ctx, machine)
+	switch {
+	case errors.Is(err, providers.ErrNotFound):
+		p.reapOne(ctx, client, name, saved, false, into)
+	case err != nil:
+		p.session.Log.Warn("the reaper could not confirm a missing machine is gone, so its records stay", "workspace", name, "machine", machine, "failure", failureOf(err).describe())
+	}
 }
 
 func (p *orcaPool) reapOne(ctx context.Context, client orca.Client, name string, saved map[string]bool, destroy bool, into *[]string) {
@@ -209,7 +227,7 @@ func (p *orcaPool) end(ctx context.Context, client orca.Client, name string, sav
 		return errLaunchHolds
 	}
 	defer unlock()
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failedStopWithin)
+	ctx, cancel := context.WithTimeout(ctx, failedStopWithin)
 	defer cancel()
 	if err := p.unpair(ctx, client, name, saved, destroy); err != nil {
 		return err
@@ -256,6 +274,9 @@ func (p *orcaPool) reapTasks(ctx context.Context, client orca.Client, saved map[
 		return err
 	}
 	for _, name := range names {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if p.dir.Orca(name) == p.dir.OrcaKeeperSuccessor() || recorded(p.dir.Workspace(name)) || recorded(p.dir.Pool(name)) {
 			continue
 		}
@@ -267,7 +288,7 @@ func (p *orcaPool) reapTasks(ctx context.Context, client orca.Client, saved map[
 		if task.Provider != p.session.Kind {
 			continue
 		}
-		p.reapOne(ctx, client, name, saved, false, &reaped.Forgotten)
+		p.reapGone(ctx, client, name, cmp.Or(task.Machine, name), saved, &reaped.Forgotten)
 	}
 	return nil
 }

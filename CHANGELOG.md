@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its workspace, task, and pool records, and does the same for the workspace
   `prepare` created under the lane's name. A launcher calls it once a lane is
   done for good; `orca stop` stays the call for a lane that may continue.
-- **`orca pool fill` reaps.** After its creates it destroys up to 10 `released`
+- **`orca pool fill` reaps.** Once its creates have all succeeded it destroys up to 10 `released`
   workspaces still running, and removes the pool, workspace, and task records
-  whose machine the provider no longer has, plus lock files left for names
+  whose machine the provider confirms is gone, plus lock files left for names
   with no record. Only a `released` machine is destroyed, and one a launch
   holds waits for a later fill.
 - **`orca prepare --existing --resume <session-id>` resumes a Claude worker's
