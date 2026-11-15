@@ -94,37 +94,90 @@ func storageGoneFor(machines ...string) storageCheck {
 	}
 }
 
-func TestKeepReopensAKeptForwardThatExitedButNotAStoppedOrUnkeptOne(t *testing.T) {
+func tick(t *testing.T, k *keeper, task *keptTask) bool {
+	t.Helper()
+	kept, err := k.pass(t.Context(), task)
+	if err != nil {
+		t.Fatalf("a tick of %s = %v", task.name, err)
+	}
+	return kept
+}
+
+func keepPass(t *testing.T, k *keeper, tasks ...*keptTask) {
+	t.Helper()
+	names, err := keptNames(k.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := keptKeys(k.dir, names, k.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.renew(t.Context(), keys)
+	for _, task := range tasks {
+		tick(t, k, task)
+	}
+}
+
+func holding(t *testing.T, dir state.Dir, log *slog.Logger, renewals ...*renewal) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	held := make(chan error, 1)
+	go func() {
+		_, err := holdForwards(ctx, dir, log, noPrune, storageReachable, noOpen, renewals, "")
+		held <- err
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-held; !errors.Is(err, context.Canceled) {
+			t.Errorf("keep = %v, want it holding until canceled", err)
+		}
+	})
+}
+
+func eventually(t *testing.T, within time.Duration, what string, done func() bool) time.Duration {
+	t.Helper()
+	started := time.Now()
+	for !done() {
+		if time.Since(started) > within {
+			t.Fatalf("%s did not happen within %s", what, within)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return time.Since(started)
+}
+
+func ticking(t *testing.T, every time.Duration) {
+	t.Helper()
+	original := keepEvery
+	keepEvery = every
+	t.Cleanup(func() { keepEvery = original })
+}
+
+func TestKeepReopensAKeptForwardThatExitedAndEndsTheTickOfAStoppedOne(t *testing.T) {
 	w := newWarmPool(t)
 	opened := stubForwards(t, nil, nil)
 	starts := standInKeeper(t)
 	dir := w.session.Config.State()
 	quiet := slog.New(slog.DiscardHandler)
-	driver := orcaDriver{state: dir, log: quiet}
-	for _, name := range []string{"lane-a", "lane-b", "lane-c"} {
-		w.laneWorkspace(name)
-		task := w.liveTask(name)
-		if name == "lane-c" {
-			continue
-		}
-		if err := driver.keep(task, w.session.Config.Path); err != nil {
-			t.Fatal(err)
-		}
-	}
+	w.keptLanes("lane-a", "lane-b")
 	if _, err := stopLane(t.Context(), w.session, newSavedEnvironments(t).client(), "lane-b"); err != nil {
 		t.Fatalf("stop lane-b = %v", err)
 	}
+	k := newKeeper(dir, quiet, storageReachable, noOpen, nil)
+	a, b := newKeptTask("lane-a"), newKeptTask("lane-b")
 
-	gone := map[string]time.Time{}
-	kept, err := reopenForwards(t.Context(), dir, quiet, storageReachable, newProxies(dir, quiet, noOpen), gone)
-	if err != nil || kept != 1 {
-		t.Fatalf("a keeper pass = %d kept, %v; want lane-a alone kept", kept, err)
+	if !tick(t, k, a) {
+		t.Fatal("a tick of lane-a ended it; want it kept")
+	}
+	if tick(t, k, b) {
+		t.Error("a tick of the stopped lane-b kept it; want its ticks to end")
 	}
 	if got := opened(); !slices.Equal(got, []string{"lane-a"}) {
-		t.Errorf("forwards opened = %q, want only lane-a's, not the stopped lane-b's or the never-kept lane-c's", got)
+		t.Errorf("forwards opened = %q, want only lane-a's, not the stopped lane-b's", got)
 	}
-	if _, err := reopenForwards(t.Context(), dir, quiet, storageReachable, newProxies(dir, quiet, noOpen), gone); err != nil || len(opened()) != 1 {
-		t.Errorf("a pass over a forward that is up = %v, opened %q; want nothing reopened", err, opened())
+	if !tick(t, k, a) || len(opened()) != 1 {
+		t.Errorf("a tick over a forward that is up opened %q; want nothing reopened", opened())
 	}
 	if starts.Load() != 2 {
 		t.Errorf("keeper starts = %d, want one per kept task", starts.Load())
@@ -194,41 +247,75 @@ func writeKeys(t *testing.T, path string, keys map[string]string) {
 	}
 }
 
-func renewPass(t *testing.T, r *renewal, dir state.Dir) {
-	t.Helper()
-	quiet := slog.New(slog.DiscardHandler)
-	keys, err := keptKeys(dir, quiet)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.renew(t.Context(), dir, quiet, noOpen, keys); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestKeepGivesEachReopenItsOwnDeadlineSoAHungForwardHoldsUpNoOther(t *testing.T) {
+func TestKeepTicksEachKeptTaskOnItsOwnSoAHungReopenHoldsUpNoOtherForward(t *testing.T) {
+	ticking(t, 100*time.Millisecond)
 	within := reopenWithin
-	reopenWithin = 200 * time.Millisecond
+	reopenWithin = 3 * time.Second
 	t.Cleanup(func() { reopenWithin = within })
 	w := newWarmPool(t)
 	opened := stubForwards(t, []string{"lane-hung"}, nil)
 	standInKeeper(t)
 	w.keptLanes("lane-hung", "lane-next")
-	var logged bytes.Buffer
+	logPath := filepath.Join(t.TempDir(), "keeper.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	logged := func() string {
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
 
-	started := time.Now()
-	kept, err := reopenForwards(t.Context(), w.session.Config.State(), slog.New(slog.NewTextHandler(&logged, nil)), storageReachable, newProxies(w.session.Config.State(), slog.New(slog.DiscardHandler), noOpen), map[string]time.Time{})
-	if err != nil || kept != 2 {
-		t.Fatalf("a pass = %d kept, %v; want both still kept", kept, err)
+	holding(t, w.session.Config.State(), slog.New(slog.NewTextHandler(logFile, nil)))
+	if took := eventually(t, 30*time.Second, "lane-next's reopen", func() bool { return slices.Contains(opened(), "lane-next") }); took >= reopenWithin {
+		t.Errorf("lane-next's forward opened after %s, behind lane-hung's reopen and its %s deadline; want it on its own tick", took, reopenWithin)
 	}
-	if took := time.Since(started); took > 10*time.Second {
-		t.Errorf("the pass took %s; want the hung reopen cut at %s", took, reopenWithin)
-	}
+	eventually(t, 30*time.Second, "a log line naming lane-hung's reopen and its deadline", func() bool {
+		return strings.Contains(logged(), "workspace=lane-hung") && strings.Contains(logged(), "did not finish within 3s")
+	})
 	if got := opened(); !slices.Equal(got, []string{"lane-next"}) {
-		t.Errorf("forwards opened = %q, want lane-next's, behind the hung lane-hung", got)
+		t.Errorf("forwards opened = %q, want lane-next's alone", got)
 	}
-	if !strings.Contains(logged.String(), "workspace=lane-hung") || !strings.Contains(logged.String(), "did not finish within 200ms") {
-		t.Errorf("the log %q does not name the hung reopen and its deadline", logged.String())
+}
+
+func TestKeepSendsANewlyKeptWorkerItsFirstGitHubAppTokenWhileAnotherWorkerHangs(t *testing.T) {
+	ticking(t, 100*time.Millisecond)
+	within := answerWithin
+	answerWithin = 5 * time.Second
+	t.Cleanup(func() { answerWithin = within })
+	w := newWarmPool(t)
+	standInKeeper(t)
+	bin, sent := t.TempDir(), t.TempDir()
+	ssh := "#!/bin/sh\nfor arg do\n  test \"$arg\" = sh && break\n  host=$arg\ndone\ncase \" $* \" in *' -O check '*) exit 0;; esac\ntest \"$host\" = lane-hung && exec sleep 600\ncat >> " + sent + "/\"$host\"\n"
+	mint := filepath.Join(bin, "mint")
+	for path, body := range map[string]string{filepath.Join(bin, "ssh"): ssh, mint: "#!/bin/sh\necho '{\"token\":\"first\"}'\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	keys := keysConfig(t, map[string]string{config.KeyGitHubApp: mint})
+	w.keptUnder(keys, "lane-a", "lane-hung")
+	received := func(name string) string {
+		raw, err := os.ReadFile(filepath.Join(sent, name))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	holding(t, w.session.Config.State(), slog.New(slog.DiscardHandler), newRenewal(config.KeyGitHubApp, captureAppToken, orca.GitHubAppScript))
+	eventually(t, 30*time.Second, "lane-a's first token", func() bool { return received("lane-a") != "" })
+	w.keptUnder(keys, "lane-new")
+	if took := eventually(t, 30*time.Second, "lane-new's first token", func() bool { return received("lane-new") != "" }); took >= answerWithin {
+		t.Errorf("lane-new got its first token %s after it was kept, behind lane-hung's send and its %s deadline; want it on its own tick", took, answerWithin)
+	}
+	if a, n, h := received("lane-a"), received("lane-new"), received("lane-hung"); a != `{"token":"first"}` || n != a || h != "" {
+		t.Errorf("lane-a got %q, lane-new %q and lane-hung %q; want the token once each on the two that answer", a, n, h)
 	}
 }
 
@@ -242,70 +329,37 @@ func TestKeepReleasesAForwardWhoseMachineKeepsReportingItsStorageGoneAndSaysSoOn
 	w.keptLanes("lane-dead", "lane-down", "lane-live")
 	dir := w.session.Config.State()
 	var logged bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logged, nil))
-	seen := map[string]time.Time{}
-	storage := storageGoneFor("lane-dead")
+	k := newKeeper(dir, slog.New(slog.NewTextHandler(&logged, nil)), storageGoneFor("lane-dead"), noOpen, nil)
+	dead, down, live := newKeptTask("lane-dead"), newKeptTask("lane-down"), newKeptTask("lane-live")
 
-	if kept, err := reopenForwards(t.Context(), dir, log, storage, newProxies(dir, log, noOpen), seen); err != nil || kept != 3 {
-		t.Fatalf("the first pass = %d kept, %v; want all three kept, since one look at a gone storage releases nothing", kept, err)
+	if !tick(t, k, dead) {
+		t.Fatal("the first tick of lane-dead ended it; want it kept, since one look at a gone storage releases nothing")
 	}
 	if strings.Contains(logged.String(), "lane-dead") {
 		t.Errorf("the first look at lane-dead's gone storage logged %q, want nothing until it is released", logged.String())
 	}
-	if kept, err := reopenForwards(t.Context(), dir, log, storage, newProxies(dir, log, noOpen), seen); err != nil || kept != 2 {
-		t.Fatalf("the second pass = %d kept, %v; want lane-dead released", kept, err)
+	if tick(t, k, dead) {
+		t.Fatal("the second tick of lane-dead kept it; want it released")
 	}
 	if _, err := os.Stat(dir.OrcaKept("lane-dead")); !os.IsNotExist(err) {
 		t.Errorf("lane-dead is still kept: %v", err)
 	}
-	for _, still := range []string{"lane-down", "lane-live"} {
-		if _, err := os.Stat(dir.OrcaKept(still)); err != nil {
-			t.Errorf("%s was released, want it kept: %v", still, err)
-		}
+	if tick(t, k, dead) {
+		t.Error("a tick of the released lane-dead kept it; want its ticks to end")
 	}
-	if kept, err := reopenForwards(t.Context(), dir, log, storage, newProxies(dir, log, noOpen), seen); err != nil || kept != 2 {
-		t.Fatalf("the third pass = %d kept, %v", kept, err)
+	for range 3 {
+		if !tick(t, k, down) || !tick(t, k, live) {
+			t.Fatal("a tick of lane-down or lane-live ended it; want both kept")
+		}
 	}
 	if n := strings.Count(logged.String(), "released a kept forward"); n != 1 || !strings.Contains(logged.String(), "workspace=lane-dead") {
 		t.Errorf("logged %d releases in %q, want lane-dead's once", n, logged.String())
 	}
 	if n := strings.Count(logged.String(), "did not reopen, and the next pass tries again\" workspace=lane-down"); n != 3 {
-		t.Errorf("lane-down, whose storage answers, logged %d failed reopens over three passes, want 3: %q", n, logged.String())
+		t.Errorf("lane-down, whose storage answers, logged %d failed reopens over three ticks, want 3: %q", n, logged.String())
 	}
 	if got := opened(); !slices.Equal(got, []string{"lane-live"}) {
 		t.Errorf("forwards opened = %q, want lane-live's alone", got)
-	}
-}
-
-func TestKeepForgetsAGoneStorageSightingOnceItsLaneIsNoLongerKept(t *testing.T) {
-	gone := storageGone
-	storageGone = 0
-	t.Cleanup(func() { storageGone = gone })
-	w := newWarmPool(t)
-	stubForwards(t, nil, []string{"lane-dead", "lane-other"})
-	standInKeeper(t)
-	w.keptLanes("lane-dead", "lane-other")
-	dir := w.session.Config.State()
-	quiet := slog.New(slog.DiscardHandler)
-	seen := map[string]time.Time{}
-	storage := storageGoneFor("lane-dead")
-	if _, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.Remove(dir.OrcaKept("lane-dead")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.Write(dir.OrcaKept("lane-dead"), nil); err != nil {
-		t.Fatal(err)
-	}
-	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil || kept != 2 {
-		t.Fatalf("the first pass after lane-dead was kept again = %d kept, %v; want its sighting from before counted as new", kept, err)
-	}
-	if kept, err := reopenForwards(t.Context(), dir, quiet, storage, newProxies(dir, quiet, noOpen), seen); err != nil || kept != 1 {
-		t.Errorf("the second pass after it was kept again = %d kept, %v; want it released", kept, err)
 	}
 }
 
@@ -331,13 +385,14 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 		}
 		return string(raw)
 	}
-	tokens := newRenewal(config.KeyGitHubApp, captureAppToken, orca.GitHubAppScript)
+	k := newKeeper(dir, slog.New(slog.DiscardHandler), storageReachable, noOpen, []*renewal{newRenewal(config.KeyGitHubApp, captureAppToken, orca.GitHubAppScript)})
+	a, b := newKeptTask("lane-a"), newKeptTask("lane-b")
 	pass := func(line string) {
 		t.Helper()
 		if err := os.WriteFile(minted, []byte(line), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		renewPass(t, tokens, dir)
+		keepPass(t, k, a, b)
 	}
 	if err := os.WriteFile(filepath.Join(down, "lane-b"), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -361,7 +416,7 @@ func TestKeepSendsEachKeptWorkerEveryGitHubAppTokenTheMacMintsOnceItsForwardIsUp
 	if err := os.WriteFile(mint, []byte("#!/bin/sh\nexit 3\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	renewPass(t, tokens, dir)
+	keepPass(t, k, a, b)
 	if b := received("lane-b"); b != `{"token":"first"}{"token":"second"}` {
 		t.Errorf("after a failed mint lane-b got %q; want nothing new sent", b)
 	}
@@ -432,11 +487,12 @@ func TestKeepSendsEachKeptWorkerANewAWSSessionOnceTheOneItHoldsHasUnderAnHourLef
 	dir := w.session.Config.State()
 	workers := stubAWSWorkers(t)
 	w.keptUnder(keysConfig(t, map[string]string{config.KeyAWS: workers.mints("mint", "")}), "lane-a", "lane-b")
-	sessions := newRenewal(config.KeyAWS, captureAWS, orca.AWSScript)
+	k := newKeeper(dir, slog.New(slog.DiscardHandler), storageReachable, noOpen, []*renewal{newRenewal(config.KeyAWS, captureAWS, orca.AWSScript)})
+	a, b := newKeptTask("lane-a"), newKeptTask("lane-b")
 	pass := func(session string) {
 		t.Helper()
 		workers.mints("mint", session)
-		renewPass(t, sessions, dir)
+		keepPass(t, k, a, b)
 	}
 
 	expiring, fresh, unused := awsSession("ASIA-expiring", 50*time.Minute), awsSession("ASIA-fresh", 4*time.Hour), awsSession("ASIA-unused", 4*time.Hour)
@@ -463,9 +519,10 @@ func TestKeepRenewsEachTaskWithTheKeysOfTheConfigThatKeptItReadAgainEachPass(t *
 	w.keptUnder(withAWS, "lane-a", "lane-b")
 	w.keptUnder(withoutAWS, "lane-c")
 	w.keptUnder("", "lane-old")
-	sessions := newRenewal(config.KeyAWS, captureAWS, orca.AWSScript)
+	k := newKeeper(dir, slog.New(slog.DiscardHandler), storageReachable, noOpen, []*renewal{newRenewal(config.KeyAWS, captureAWS, orca.AWSScript)})
+	lanes := []*keptTask{newKeptTask("lane-a"), newKeptTask("lane-b"), newKeptTask("lane-c"), newKeptTask("lane-old")}
 
-	renewPass(t, sessions, dir)
+	keepPass(t, k, lanes...)
 	if a, b, c := workers.received("lane-a"), workers.received("lane-b"), workers.received("lane-c"); a != awsLine(t, first) || b != a || c != "" {
 		t.Fatalf("lane-a got %q, lane-b %q and lane-c %q; want the two lanes kept under the config naming orca.keys.aws to get its session, and lane-c, whose config names none, nothing", a, b, c)
 	}
@@ -474,7 +531,7 @@ func TestKeepRenewsEachTaskWithTheKeysOfTheConfigThatKeptItReadAgainEachPass(t *
 	}
 
 	writeKeys(t, withoutAWS, map[string]string{config.KeyAWS: workers.mints("mint-second", second)})
-	renewPass(t, sessions, dir)
+	keepPass(t, k, lanes...)
 	if c := workers.received("lane-c"); c != awsLine(t, second) {
 		t.Errorf("once its config named orca.keys.aws, lane-c got %q; want that command's session on the same keep's next pass", c)
 	}
@@ -485,7 +542,7 @@ func TestKeepRenewsEachTaskWithTheKeysOfTheConfigThatKeptItReadAgainEachPass(t *
 	if err := os.Remove(withAWS); err != nil {
 		t.Fatal(err)
 	}
-	renewPass(t, sessions, dir)
+	keepPass(t, k, lanes...)
 	if old := workers.received("lane-old"); old != "" {
 		t.Errorf("lane-old, kept by a release that recorded no config, got %q; want nothing", old)
 	}

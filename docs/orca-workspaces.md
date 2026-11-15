@@ -167,18 +167,19 @@ An optional `orca.keys.github_app` command, also with no default, prints a
 GitHub App installation token as the one JSON line
 `[ccx, vcs, auth, token, --json, owner/name]` prints on a Mac that holds
 the app's key. A launch never runs it: `cc-remote orca keep` runs the command
-of each kept worker's config on each pass and writes any line it has not yet
-written to `/dev/shm/cc-remote/github-app.json` on that worker, in memory and
-readable only by the worker, so a mint that fails on the Mac costs a worker
-its app reads until a later pass, never its launch. The terminal of a worker
-whose config names the command exports `CCX_GITHUB_APP_TOKEN_FILE` naming that
-file, and ccx reads it again
-on each call: until keep's first write after the launch, usually within one
-30-second pass, the worker's ccx reads on `GH_TOKEN`, and from then on it reads
-GitHub on that installation through its cache. `GH_TOKEN` stays the token git
-and gh write with, and the app's private key never leaves the Mac. A token
-lasts an hour, and ccx mints a new one once the one it printed has under 55
-minutes left, which keep's next pass writes.
+of each kept worker's config on each 30-second pass, and each worker's own
+tick writes any line it has not yet written to
+`/dev/shm/cc-remote/github-app.json` on that worker, in memory and readable
+only by the worker, so a mint that fails on the Mac costs a worker its app
+reads until a later pass, never its launch. The terminal of a worker whose
+config names the command exports `CCX_GITHUB_APP_TOKEN_FILE` naming that
+file, and ccx reads it again on each call: until keep's first write after the
+launch, within a minute however many other kept machines answer nothing, the
+worker's ccx reads on `GH_TOKEN`, and from then on it reads GitHub on that
+installation through its cache. `GH_TOKEN` stays the token git and gh write
+with, and the app's private key never leaves the Mac. A token lasts an hour,
+and ccx mints a new one once the one it printed has under 55 minutes left,
+which each worker's next tick writes.
 
 An optional `orca.keys.aws` command, also with no default, prints an AWS
 session as the process credentials
@@ -343,12 +344,17 @@ An SSH forward can exit on its own while its worker keeps running, for example
 after 45 seconds without an answer from the Sprite. Once `create`, `prepare`, or
 `reconnect` has a worker answering over an SSH forward, it keeps the task and
 starts `cc-remote orca keep` in the background. One keep runs per state
-directory, so a Mac runs one however many lanes it holds. Every 30 seconds it
-reopens each kept forward that has exited, the way `reconnect` does, and it
-exits once no task is kept. Each reopen gets two minutes, since a cold Sprite
-took about 67 seconds from boot to its Orca runtime, so a machine that answers
-nothing costs a pass those two minutes and never holds up the forwards after
-it. When a reopen fails, keep asks the provider whether the machine's storage is
+directory, so a Mac runs one however many lanes it holds. Each kept task gets
+its own tick every 30 seconds, which reopens the task's forward once it has
+exited, the way `reconnect` does, and writes the task its keys, and keep exits
+once no task is kept. Each reopen gets two minutes and each key write one,
+since a cold Sprite took about 67 seconds from boot to its Orca runtime, so a
+machine that answers nothing costs its own task's tick that time and never
+holds up another task's forward or keys. The tasks kept when keep starts take
+their first ticks spread over its first 30 seconds, so a keep holding hundreds
+of tasks writes to a few machines at a time rather than to all of them at
+once, and a task kept later takes its first tick at keep's next 30-second
+pass. When a reopen fails, keep asks the provider whether the machine's storage is
 reachable. A machine that still reports its storage gone 10 minutes after its
 first failed reopen runs nothing again, so keep releases its task, logs that
 once, and stops reopening it; `reconnect` keeps it again. The 10 minutes pass

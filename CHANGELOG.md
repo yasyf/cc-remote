@@ -110,6 +110,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A new worker gets its first GitHub App token within a minute however many
+  kept machines answer nothing.** `cc-remote orca keep` walked every kept task
+  one after another on one 30-second loop, and each write to a machine that
+  answered nothing waited out its one-minute deadline before the next task's
+  turn, so eight such Sprites stretched each walk to about 18 minutes and a
+  fresh worker read GitHub on `GH_TOKEN` for 4 to 25 minutes before its first
+  token landed. Each kept task now gets its own 30-second tick, which checks
+  its forward, counts down its release and writes its `orca.keys.github_app`
+  and `orca.keys.aws` lines, while the shared pass still mints each command
+  once for every task that names it. A task kept after keep starts takes its
+  first tick at the next pass, and the tasks kept when keep starts spread
+  their first ticks over its first 30 seconds, so a keep holding hundreds of
+  tasks writes to a few machines at a time.
 - **A warm pool claim destroys a spare whose block device already failed.**
   A claim read only the pool's records and the provider's labels, so a spare
   whose kernel had logged `block nbd0: Send data failed (result -11)` was
