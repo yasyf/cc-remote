@@ -340,7 +340,9 @@ Inventory services registered with `sprite-env` depend on it. A cold-booted
 Sprite answers commands before its services finish, so `resume` and a warm-pool
 claim run the service's script themselves right after the wake, waiting up to
 three minutes for it, before any command reads the tools; the log names that
-wait as the `payload.boot` phase.
+wait as the `payload.boot` phase. `sprite-env` starts a dependent service
+without waiting for the payload service's script to finish, so the Orca
+runtime's launcher also runs the script before its first start.
 
 ## Script phases
 
