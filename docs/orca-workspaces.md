@@ -688,14 +688,15 @@ found the name already taken, which removes it.
 `provisioning`, `ready`, `claimed`, `prepared`, `failed`, `abandoned`, or
 `refused`, and `released` for one whose lane `orca release` ended.
 
-After its creates, each fill reaps. It lists every machine the provider has,
-then destroys up to 10 `released` workspaces whose machines still run, and
+Once its creates have all succeeded, a fill reaps. It lists every machine the
+provider has, then destroys up to 10 `released` workspaces whose machines still run, and
 removes the records of every pool workspace, workspace record, and task record
-on that provider whose machine is gone, removing a saved Orca environment one of
+on that provider whose machine is missing from the list and that a lookup
+confirms gone, removing a saved Orca environment one of
 them still pairs. It also deletes lock files left for names with no record.
 A workspace whose task lock a launch holds, and one still `provisioning`, are
 left for a later fill. The fill lists what it destroyed and forgot under
-`reaped`. A machine that still runs is destroyed only once `orca release` ended
+`reaped`, and stops at its own deadline. A machine that still runs is destroyed only once `orca release` ended
 its lane, so a `prepared` or `stopped` lane keeps its workspace.
 
 `cc-remote destroy <name>` removes the name's pool record with its workspace
