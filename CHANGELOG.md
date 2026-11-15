@@ -110,6 +110,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A warm pool claim destroys a spare whose block device already failed.**
+  A claim read only the pool's records and the provider's labels, so a spare
+  whose kernel had logged `block nbd0: Send data failed (result -11)` was
+  handed to a lane, which lost its disk mid-run. After the clean checkout
+  check, a claim now runs `dmesg -r` on the spare. A spare whose kernel logged
+  an error-level line naming an `nbd` device fails the claim, so the lane
+  destroys it and takes the next spare, as it does for any failed claim.
 - **Preparing a Sprite whose services already exist succeeds.** A create of a
   service the Sprite already runs answers HTTP 409 `service already exists:
   <name>`, and the prepare failed on it, so a warm pool spare that already ran

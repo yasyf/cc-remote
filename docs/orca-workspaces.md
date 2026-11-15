@@ -514,7 +514,11 @@ The claim is recorded with the lane and ref before anything touches the
 machine. The command then binds the home on the Sprite's local disk again, as
 its boot service does, since a spare that slept boots without that mount and
 its home holds no checkout until it is back. It then checks that the checkout
-is the configured repository's clean top level with no Orca runtime state,
+is the configured repository's clean top level with no Orca runtime state, and
+that `dmesg -r` shows no kernel line at error level or worse naming an `nbd`
+device, the network block device under the Sprite's disk. A line such as
+`block nbd0: Send data failed (result -11)` means that device has already
+stopped answering, and a worker there would lose its disk mid-run. It then
 wakes the Sprite, and
 requires its tools to be ready at the current stamp; it never reinstalls them.
 It fetches `--ref` with `--depth 1` and checks out the fetched commit, so a
