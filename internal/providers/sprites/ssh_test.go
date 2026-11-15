@@ -16,10 +16,14 @@ import (
 const (
 	fakeSpriteEnv = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DIR/sprite-env.log"
-case "$2" in
-  get) test -f "$FAKE_DIR/sshd-service" ;;
-  create) printf '%s\n' "$@" > "$FAKE_DIR/create.argv" && : > "$FAKE_DIR/sshd-service" ;;
-esac
+test "$2" = create || exit 64
+printf '%s\n' "$@" > "$FAKE_DIR/create.argv"
+if [ -f "$FAKE_DIR/sshd-service" ]; then
+  echo "service already exists: $3"
+  echo "curl: (22) The requested URL returned error: 409" >&2
+  exit 22
+fi
+: > "$FAKE_DIR/sshd-service"
 `
 	fakeKeyscan = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DIR/ssh-keyscan.log"
@@ -52,7 +56,7 @@ func TestAuthorizeScriptWaitsForSSHDToAnswer(t *testing.T) {
 		wantScans int
 		wantErr   bool
 	}{
-		{name: "an existing sshd service is checked but never recreated", existing: true, answers: true, wantScans: 1},
+		{name: "an existing sshd service answers its create with 409 and counts as created", existing: true, answers: true, wantScans: 1},
 		{name: "an existing sshd service that never answers", existing: true, wantErr: true},
 		{name: "a new sshd service answers", answers: true, wantScans: 1},
 		{name: "a new sshd service that never answers", wantErr: true},
@@ -103,12 +107,10 @@ func TestAuthorizeScriptWaitsForSSHDToAnswer(t *testing.T) {
 			if len(scans) == 0 || (tt.wantScans != 0 && len(scans) != tt.wantScans) || slices.ContainsFunc(scans, func(scan string) bool { return scan != wantScan }) {
 				t.Errorf("ssh-keyscan ran %d times with %q, want %d times (0 = any) with %q", len(scans), scans, tt.wantScans, wantScan)
 			}
-			created := loggedLines(t, filepath.Join(fakes, "create.argv"))
-			if tt.existing {
-				if created != nil {
-					t.Errorf("an existing sshd service was created again: %q", created)
-				}
-			} else if !slices.Equal(created, wantCreate) {
+			if calls := loggedLines(t, filepath.Join(fakes, "sprite-env.log")); !slices.Equal(calls, []string{strings.Join(wantCreate, " ")}) {
+				t.Errorf("sprite-env saw %q, want only the create", calls)
+			}
+			if created := loggedLines(t, filepath.Join(fakes, "create.argv")); !slices.Equal(created, wantCreate) {
 				t.Errorf("create = %q, want %q", created, wantCreate)
 			}
 			if tt.wantErr {

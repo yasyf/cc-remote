@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/yasyf/cc-remote/internal/remote"
 )
 
 type Exec func(ctx context.Context, argv []string, stdin io.Reader) error
@@ -73,7 +75,8 @@ apt-get install -y -qq --no-install-recommends "${debs[@]}" < /dev/null > /dev/n
 tar -cf "$dir.tar.admitted" -C "$dir" .
 `
 
-const moveToLocalDisk = `set -euo pipefail
+var moveToLocalDisk = `set -euo pipefail
+` + remote.CreateServiceFunc("sprite-env") + `
 disk="$1"
 reserve="$2"
 shift 2
@@ -112,10 +115,11 @@ mountpoint -q "$home" || mount --bind "$root/home" "$home"
 SH
 chmod 0755 "$boot"
 "$boot"
-sprite-env services create ` + LocalDiskService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
+create_sprite_service ` + LocalDiskService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
 `
 
-const limitMemory = `set -euo pipefail
+var limitMemory = `set -euo pipefail
+` + remote.CreateServiceFunc("sprite-env") + `
 limit="$1"
 high="$2"
 boot=` + memoryBoot + `
@@ -129,10 +133,8 @@ echo $limit > $cgroup/memory.max
 SH
 chmod 0755 "$boot"
 "$boot"
-if sprite-env services get ` + MemoryService + ` > /dev/null 2>&1; then
-  sprite-env services delete ` + MemoryService + ` > /dev/null
-fi
-sprite-env services create ` + MemoryService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
+create_sprite_service ` + MemoryService + ` --cmd sudo --args "-n,sh,-c,$boot && exec sleep infinity" --duration 1ms --no-stream
+sprite-env services restart ` + MemoryService + ` > /dev/null
 `
 
 const rebindLocalDisk = `if [ -x ` + localDiskBoot + ` ]; then

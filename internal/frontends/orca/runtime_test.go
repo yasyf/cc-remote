@@ -380,10 +380,10 @@ func TestRuntimeEnsureScript(t *testing.T) {
 		absent     []string
 	}{
 		{"sprite-env", true, []string{
-			`if ! /.sprite/bin/sprite-env services get cc-remote-orca > /dev/null 2>&1; then`,
-			`/.sprite/bin/sprite-env services create cc-remote-orca --cmd "$HOME/.cc-remote/orca/serve.sh" --needs cc-remote-payload --duration 1ms --no-stream >&2`,
-			`/.sprite/bin/sprite-env services create cc-remote-orca --cmd "$HOME/.cc-remote/orca/serve.sh" --duration 1ms --no-stream >&2`,
-		}, []string{"nohup setsid"}},
+			`/.sprite/bin/sprite-env services create "$@" > "$buffers/out" 2> "$buffers/err" || status=$?`,
+			`create_sprite_service cc-remote-orca --cmd "$HOME/.cc-remote/orca/serve.sh" --needs cc-remote-payload --duration 1ms --no-stream >&2`,
+			`create_sprite_service cc-remote-orca --cmd "$HOME/.cc-remote/orca/serve.sh" --duration 1ms --no-stream >&2`,
+		}, []string{"nohup setsid", "services get cc-remote-orca"}},
 		{"setsid", false, []string{
 			`nohup setsid "$HOME/.cc-remote/orca/serve.sh" > /dev/null 2>&1 < /dev/null &`,
 		}, []string{"sprite-env"}},
@@ -407,6 +407,65 @@ func TestRuntimeEnsureScript(t *testing.T) {
 			}
 			if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
 				t.Errorf("sh -n: %v: %s", err, out)
+			}
+		})
+	}
+}
+
+func TestRuntimeEnsureScriptCountsAnExistingServiceAsCreated(t *testing.T) {
+	tests := []struct {
+		name    string
+		restart bool
+		answer  string
+		wantErr bool
+	}{
+		{name: "a warm claim's existing runtime answers its create with 409", answer: "service already exists: cc-remote-orca"},
+		{name: "a continued lane restarts the runtime its create found", restart: true, answer: "service already exists: cc-remote-orca"},
+		{name: "a 409 with another body fails", answer: "service is being deleted: cc-remote-orca", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home, fakes := t.TempDir(), t.TempDir()
+			serveJSON := filepath.Join(home, ".cc-remote", "orca", "serve.json")
+			files := map[string]string{
+				filepath.Join(home, "tools", "AppRun"): "#!/bin/sh\n",
+				serveJSON:                              readyLine("ws://stale:7001") + "\n",
+				filepath.Join(fakes, "sprite-env"): "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + filepath.Join(fakes, "calls") + "\ncase \"$2\" in\n" +
+					"  get) echo \"service not found: $3\"; echo 'curl: (22) The requested URL returned error: 404' >&2; exit 22 ;;\n" +
+					"  create) echo '" + tt.answer + "'; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22 ;;\n" +
+					"  restart) echo '" + readyLine("ws://fresh:7001") + "' > " + serveJSON + " ;;\n" +
+					"esac\n",
+			}
+			for path, body := range files {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runtime := orca.Runtime{Entry: "tools/AppRun", Port: 7001, Supervised: true, Restart: tt.restart}
+			cmd := exec.Command("sh", "-c", strings.ReplaceAll(runtime.EnsureScript(), "/.sprite/bin/sprite-env", filepath.Join(fakes, "sprite-env")))
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			want := []string{"services get cc-remote-payload", "services create cc-remote-orca --cmd " + home + "/.cc-remote/orca/serve.sh --duration 1ms --no-stream"}
+			ready := "ws://stale:7001"
+			if tt.restart {
+				want, ready = append(want, "services restart cc-remote-orca"), "ws://fresh:7001"
+			}
+			if calls := strings.Split(strings.TrimSuffix(readFile(t, filepath.Join(fakes, "calls")), "\n"), "\n"); !slices.Equal(calls, want) {
+				t.Errorf("sprite-env saw %q, want %q", calls, want)
+			}
+			if tt.wantErr {
+				if err == nil || !strings.Contains(stderr.String(), "curl: (22) The requested URL returned error: 409") {
+					t.Errorf("ensure = %v, stderr %q; want the refused create's failure", err, stderr.String())
+				}
+				return
+			}
+			if err != nil || string(out) != readyLine(ready)+"\n" {
+				t.Errorf("ensure = %v, printed %q, stderr %q; want the ready line advertising %s", err, out, stderr.String(), ready)
 			}
 		})
 	}

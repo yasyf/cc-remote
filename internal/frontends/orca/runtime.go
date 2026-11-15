@@ -168,19 +168,19 @@ func (r Runtime) start() string {
 	if !r.Supervised {
 		return `nohup setsid "` + launcher + `" > /dev/null 2>&1 < /dev/null &`
 	}
-	create := spriteEnv + ` services create ` + RuntimeService + ` --cmd "` + launcher + `"`
+	create := `create_sprite_service ` + RuntimeService + ` --cmd "` + launcher + `"`
 	lines := []string{
-		"if ! " + spriteEnv + " services get " + RuntimeService + " > /dev/null 2>&1; then",
-		"  if " + spriteEnv + " services get cc-remote-payload > /dev/null 2>&1; then",
-		"    " + create + " --needs cc-remote-payload --duration 1ms --no-stream >&2",
-		"  else",
-		"    " + create + " --duration 1ms --no-stream >&2",
-		"  fi",
+		remote.CreateServiceFunc(spriteEnv),
+		"if " + spriteEnv + " services get cc-remote-payload > /dev/null 2>&1; then",
+		"  " + create + " --needs cc-remote-payload --duration 1ms --no-stream >&2",
+		"else",
+		"  " + create + " --duration 1ms --no-stream >&2",
+		"fi",
 	}
 	if r.Restart {
-		lines = append(lines, "else", `  rm -f "`+readyFile+`"`, "  "+spriteEnv+" services restart "+RuntimeService+" >&2")
+		lines = append(lines, `rm -f "`+readyFile+`"`, spriteEnv+" services restart "+RuntimeService+" >&2")
 	}
-	return strings.Join(append(lines, "fi"), "\n")
+	return strings.Join(lines, "\n")
 }
 
 func (r Runtime) EnsureScript() string {

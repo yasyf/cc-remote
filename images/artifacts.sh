@@ -95,6 +95,8 @@ verify_bin() {
   fi
 }
 
+{{createSpriteService}}
+
 artifact_pids=()
 artifact_status=0
 

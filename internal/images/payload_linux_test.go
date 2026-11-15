@@ -33,10 +33,14 @@ touch "$6/.mounted"
 `
 	fakeSpriteEnv = `#!/bin/sh
 printf '%s\n' "$*" >> "$TEST_ROOT/sprite-env.log"
-case "$2" in
-  get) test -f "$TEST_ROOT/service" ;;
-  create) printf '%s\n' "$@" > "$TEST_ROOT/create.argv" && : > "$TEST_ROOT/service" ;;
-esac
+test "$2" = create || exit 64
+printf '%s\n' "$@" > "$TEST_ROOT/create.argv"
+if [ -f "$TEST_ROOT/service" ]; then
+  echo "service already exists: $3"
+  echo "curl: (22) The requested URL returned error: 409" >&2
+  exit 22
+fi
+: > "$TEST_ROOT/service"
 `
 )
 
@@ -502,15 +506,8 @@ func TestProvisionPayloadRegistersTheRemountService(t *testing.T) {
 				t.Fatalf("payload failed: %v\n%s", err, out)
 			}
 			calls := logLines(t, filepath.Join(root, "sprite-env.log"))
-			created := logLines(t, filepath.Join(root, "create.argv"))
-			if existing {
-				if !slices.Equal(calls, []string{"services get cc-remote-payload"}) || created != nil {
-					t.Errorf("sprite-env saw %q and created %q, want one existence check and no create", calls, created)
-				}
-				return
-			}
-			if len(calls) != 2 || calls[0] != "services get cc-remote-payload" || !slices.Equal(created, wantCreate) {
-				t.Errorf("sprite-env saw %q and created %q, want the existence check then %q", calls, created, wantCreate)
+			if created := logLines(t, filepath.Join(root, "create.argv")); !slices.Equal(calls, []string{strings.Join(wantCreate, " ")}) || !slices.Equal(created, wantCreate) {
+				t.Errorf("sprite-env saw %q and created %q, want only %q, an existing service's 409 counted as created", calls, created, wantCreate)
 			}
 		})
 	}

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/yasyf/cc-remote/internal/remote"
 )
 
 func TestQuote(t *testing.T) {
@@ -751,7 +753,7 @@ create_service() {
   shift
   out="$(mktemp "$tmp_dir/service.XXXXXX")"
   err="$(mktemp "$tmp_dir/service.XXXXXX")"
-  if sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
+  if create_sprite_service "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
     cat "$out"
     cat "$err" >&2
     rm -f "$out" "$err"
@@ -816,7 +818,9 @@ mise_data() {
 					"prerequisites=(ca-certificates curl git jq python3 unzip xz-utils)", "prerequisites=(ca-certificates curl git jq openssl python3 unzip xz-utils)",
 					"for bin in curl git jq python3 unzip xz; do", "for bin in curl git jq openssl python3 unzip xz; do",
 					"\nstart_services() {\n", "\n"+serviceCreate+"\n\nstart_services() {\n",
-					`queue_artifact sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "${needs[@]}" --duration 1ms --no-stream`, `queue_artifact create_service "$name" "${needs[@]}"`,
+					"      if ! sprite-env services get \"cc-remote-$name\" > /dev/null 2>&1; then\n        queue_artifact sprite-env services create \"cc-remote-$name\" --cmd \"$state_dir/supervise.py\" --args \"$name\" \"${needs[@]}\" --duration 1ms --no-stream\n      fi\n", "      queue_artifact create_service \"$name\" \"${needs[@]}\"\n",
+					"  if ! sprite-env services get cc-remote-payload > /dev/null 2>&1; then\n    queue_artifact sprite-env services create cc-remote-payload --cmd sudo --args \"-n,sh,-c,/opt/cc-remote/payload-mount.sh && exec sleep infinity\" --duration 1ms --no-stream\n  fi", "  queue_artifact create_sprite_service cc-remote-payload --cmd sudo --args \"-n,sh,-c,/opt/cc-remote/payload-mount.sh && exec sleep infinity\" --duration 1ms --no-stream",
+					"\nartifact_pids=()\n", "\n"+remote.CreateServiceFunc("sprite-env")+"\n\nartifact_pids=()\n",
 					"    fetch \"$url\" \"$download\" \"$algorithm\" \"$digest\"\n    rm -rf \"$dir\"\n", "    if [ \"$format\" = deb ]; then\n      download=\"$tmp_dir/$name-$version.deb\"\n    fi\n    fetch \"$url\" \"$download\" \"$algorithm\" \"$digest\"\n    rm -rf \"$dir\"\n",
 					"      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n", "      deb) deb_artifacts+=(\"$download\") ;;\n",
 					"download=\"$tmp_dir/codex-runtime.tar.xz\" plugin\n", "download=\"$tmp_dir/codex-runtime.tar.xz\" staging=\"$tmp_dir/codex-runtime\" plugin\n",
@@ -833,7 +837,7 @@ mise_data() {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the single Debian transaction, the staged Codex runtime, the Go caches, the mise data and the user-scope plugin reads for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the creates that count an existing service as created, the single Debian transaction, the staged Codex runtime, the Go caches, the mise data and the user-scope plugin reads for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})
