@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`cc-remote orca release <lane>` destroys what an ended lane ran on.** It
+  records each warm pool workspace the lane claimed as `released`, then closes
+  its forward, removes its Orca environment, destroys its machine, and removes
+  its workspace, task, and pool records, and does the same for the workspace
+  `prepare` created under the lane's name. A launcher calls it once a lane is
+  done for good; `orca stop` stays the call for a lane that may continue.
+- **`orca pool fill` reaps.** After its creates it destroys up to 10 `released`
+  workspaces still running, and removes the pool, workspace, and task records
+  whose machine the provider no longer has, plus lock files left for names
+  with no record. Only a `released` machine is destroyed, and one a launch
+  holds waits for a later fill.
 - **`orca prepare --existing --resume <session-id>` resumes a Claude worker's
   own session.** A worker whose Sprite restarted under it was restarted fresh
   on its checkout and lost its conversation. With `--resume`, the continued
@@ -110,6 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **A stuck `sprite exec` no longer holds a launch forever.** Each create
+  phase, the home-volume bind, the wake, the Codex hook probe and trust grant,
+  the bootstrap helper steps, the checkout checks, the Orca runtime start, and
+  the brief and report transfers now run under a deadline sized to that step,
+  so a payload upload whose connection stalls fails its phase. A whole
+  `orca create` or `orca prepare` stops after 30 minutes, and one whose
+  launcher exited stops within 5 seconds instead of lingering as an orphan
+  that keeps Orca's database guard deferring every prune.
 - **A new worker gets its first GitHub App token within a minute however many
   kept machines answer nothing.** `cc-remote orca keep` walked every kept task
   one after another on one 30-second loop, and each write to a machine that

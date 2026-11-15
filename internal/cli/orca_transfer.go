@@ -28,6 +28,7 @@ import (
 
 const (
 	orcaReportSchema   = 1
+	transferWithin     = 5 * time.Minute
 	taskRoot           = remote.StateDir + "/orca/tasks"
 	briefName          = "brief.md"
 	statusLimit        = 64 << 10
@@ -104,6 +105,8 @@ func artifactOf(name string, data []byte) orcaArtifact {
 }
 
 func (t *orcaTask) fetch(ctx context.Context, step, script string, stdin io.Reader) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, transferWithin)
+	defer cancel()
 	result, err := t.shell(ctx, script, stdin)
 	return answered(step, t.Workspace, transferRefusals, result, err)
 }
@@ -147,6 +150,8 @@ func checkCheckout(ctx context.Context, session *workspace.Session, step, name, 
 		`top=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) && test "$top" = "$(cd "$root" && pwd -P)" || exit ` + fmt.Sprint(exitNotCheckout),
 		`test "$(git -C "$root" config --get remote.origin.url)" = ` + remote.Quote(session.Config.Repository) + ` || exit ` + fmt.Sprint(exitOtherOrigin),
 	}, checks)...)
+	ctx, cancel := context.WithTimeout(ctx, machineStepWithin)
+	defer cancel()
 	ran, err := session.Provider.Exec(ctx, machine, []string{"sh", "-c", script}, nil)
 	_, err = answered(step, name, checkoutRefusals, ran, err)
 	return err

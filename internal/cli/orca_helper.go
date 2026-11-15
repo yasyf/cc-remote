@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	helperReady   = "ready"
-	helperArchive = "archive"
-	helperAbsent  = "absent"
+	helperReady     = "ready"
+	helperArchive   = "archive"
+	helperAbsent    = "absent"
+	guestStepWithin = 5 * time.Minute
 )
 
 const helperProbeScript = `set -eu
@@ -159,6 +160,8 @@ func admissionOf(helper *config.BootstrapHelper) string {
 
 func guestExec(session *workspace.Session, machine, step string) func(context.Context, []string) ([]byte, error) {
 	return func(ctx context.Context, argv []string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, guestStepWithin)
+		defer cancel()
 		result, err := session.Provider.Exec(ctx, machine, argv, nil)
 		if err != nil {
 			return nil, err

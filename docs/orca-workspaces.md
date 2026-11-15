@@ -289,6 +289,16 @@ the error when the machine does not stop. A claim that failed before its worker
 started is not where the lane runs, and neither is a claim already stopped, so
 stop passes over both and reaches the workspace the lane moved on to.
 
+`cc-remote orca release lane-name` is the call for a lane that has ended for
+good. It records every warm pool workspace the lane claimed, stopped ones
+included, as `released`, then closes each one's forward, removes its Orca
+environment, destroys its machine, and removes its workspace, task, and pool
+records. The workspace `prepare` created under the lane's name goes the same
+way. The disk goes too, uncommitted work included, so a lane that may continue
+with `prepare --existing` is stopped instead. A released workspace whose
+destroy fails, or that a running launch still holds, is destroyed by the next
+`orca pool fill`. Like `stop`, it refuses a warm pool workspace's own name.
+
 A lane with no task record has no forward to close, so stop suspends its
 workspace alone. A lane is already stopped when no workspace is recorded for it
 or the provider no longer has its machine: stop removes the workspace, SSH,
@@ -430,6 +440,15 @@ task record carries the script's stdout as `beforeWorker`.
 Neither command initializes WordNet. The brief of a task that needs it in place
 tells the worker to
 [provision it first](tool-inventory.md#provision-wordnet-for-a-task-that-needs-it).
+
+Every step a launch runs on the machine has a deadline of its own, sized well
+above the longest one seen: 20 minutes for a payload or packages download or
+upload, 5 for binding the home volume, 2 for each Codex hook probe and trust
+grant, 5 for starting the Orca runtime, and so on for each create phase, so a
+`sprite exec` that stops answering fails its step instead of holding the launch.
+A whole `orca create` or `orca prepare` stops after 30 minutes, and one whose
+launcher exits stops within 5 seconds of it, so an orphaned launch never holds
+its workspace or keeps Orca's database guard waiting.
 
 ### Prepare a worker on a recorded workspace
 
@@ -667,14 +686,24 @@ found the name already taken, which removes it.
 
 `status` prints the key, the target, and every pool record with its state:
 `provisioning`, `ready`, `claimed`, `prepared`, `failed`, `abandoned`, or
-`refused`.
+`refused`, and `released` for one whose lane `orca release` ended.
+
+After its creates, each fill reaps. It lists every machine the provider has,
+then destroys up to 10 `released` workspaces whose machines still run, and
+removes the records of every pool workspace, workspace record, and task record
+on that provider whose machine is gone, removing a saved Orca environment one of
+them still pairs. It also deletes lock files left for names with no record.
+A workspace whose task lock a launch holds, and one still `provisioning`, are
+left for a later fill. The fill lists what it destroyed and forgot under
+`reaped`. A machine that still runs is destroyed only once `orca release` ended
+its lane, so a `prepared` or `stopped` lane keeps its workspace.
 
 `cc-remote destroy <name>` removes the name's pool record with its workspace
 record. When the name has a task record, destroy first closes its SSH forward
 and removes its Orca environment, as `orca stop` does. When a name has a pool record but no workspace record, destroy removes
 the pool record, logs that it touched no machine, and exits zero, so a record
-whose machine is long gone can be cleared by name. `status` and `fill` never
-remove a record on their own.
+whose machine is long gone can be cleared by name. `status` never removes a
+record.
 
 `orca create`, `orca prepare`, and `create` or `resume` with
 `--connection server` each hold the workspace's task lock,

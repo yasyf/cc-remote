@@ -38,6 +38,8 @@ const (
 	urlCommandTimeout   = 60 * time.Second
 	urlCommandWaitDelay = 2 * time.Second
 	payloadMountWithin  = 3 * time.Minute
+	bindHomeWithin      = 2 * time.Minute
+	wakeWithin          = 5 * time.Minute
 	signedURLReuse      = 3 * time.Minute
 	signedURLFloor      = 10 * time.Minute
 )
@@ -434,7 +436,7 @@ func (s *Session) create(ctx context.Context, name string, source Source, labels
 	s.Log.Info("creating", "workspace", name, "provider", s.Kind, "profile", s.Profile)
 	sourcing := s.startSources(ctx, name)
 	var machine providers.Machine
-	created := s.timed(ctx, laneMain, "machine.create", name, func() error {
+	created := s.timed(ctx, laneMain, "machine.create", name, func(ctx context.Context) error {
 		var err error
 		machine, err = s.Provider.Create(ctx, s.spec(name, labels, s.allocated(record)))
 		return err
@@ -663,7 +665,7 @@ func (s *Session) adopt(ctx context.Context, machine string) error {
 		return nil
 	}
 	var baked []byte
-	if err := s.timed(ctx, laneTools, "image.adopt", machine, func() error {
+	if err := s.timed(ctx, laneTools, "image.adopt", machine, func(ctx context.Context) error {
 		var err error
 		baked, err = images.ReadBaked(ctx, s.capture(machine))
 		return err
@@ -678,8 +680,10 @@ func (s *Session) adopt(ctx context.Context, machine string) error {
 }
 
 func (s *Session) wake(ctx context.Context, machine string) error {
-	if err := s.Provider.Wake(ctx, machine); err != nil {
-		return err
+	waking, cancel := context.WithTimeout(ctx, wakeWithin)
+	defer cancel()
+	if err := s.Provider.Wake(waking, machine); err != nil {
+		return fmt.Errorf("wake %s within %s: %w", machine, wakeWithin, err)
 	}
 	if err := s.BindHome(ctx, machine); err != nil {
 		return err
@@ -694,16 +698,8 @@ func (s *Session) mountPayloadForBoot(ctx context.Context, machine string) error
 	if s.payload == nil {
 		return nil
 	}
-	return s.timed(ctx, laneMount, "payload.boot", machine, func() error {
-		ctx, cancel := context.WithTimeout(ctx, payloadMountWithin)
-		defer cancel()
-		if err := s.Scripts.MountPayloadForBoot(ctx, s.exec(machine)); err != nil {
-			if ctx.Err() != nil {
-				return fmt.Errorf("the payload holding the tools was not mounted within %s of the wake: %w", payloadMountWithin, err)
-			}
-			return err
-		}
-		return nil
+	return s.timed(ctx, laneMount, "payload.boot", machine, func(ctx context.Context) error {
+		return s.Scripts.MountPayloadForBoot(ctx, s.exec(machine))
 	})
 }
 
@@ -711,7 +707,12 @@ func (s *Session) BindHome(ctx context.Context, machine string) error {
 	if s.Provider.Traits().LocalDisk == "" {
 		return nil
 	}
-	return s.Scripts.RebindLocalDisk(ctx, s.exec(machine))
+	ctx, cancel := context.WithTimeout(ctx, bindHomeWithin)
+	defer cancel()
+	if err := s.Scripts.RebindLocalDisk(ctx, s.exec(machine)); err != nil {
+		return fmt.Errorf("bind the home volume on %s within %s: %w", machine, bindHomeWithin, err)
+	}
+	return nil
 }
 
 func (s *Session) limitMemory(ctx context.Context, machine string) error {
@@ -719,7 +720,7 @@ func (s *Session) limitMemory(ctx context.Context, machine string) error {
 	if traits.MemoryMax == 0 {
 		return nil
 	}
-	return s.timed(ctx, laneMain, "memory.limit", machine, func() error {
+	return s.timed(ctx, laneMain, "memory.limit", machine, func(ctx context.Context) error {
 		return s.Scripts.LimitMemory(ctx, s.exec(machine), traits.MemoryMax, traits.MemoryHigh)
 	})
 }
@@ -729,7 +730,7 @@ func (s *Session) moveToLocalDisk(ctx context.Context, machine string) error {
 	if traits.LocalDisk == "" {
 		return nil
 	}
-	return s.timed(ctx, laneMain, "local.disk", machine, func() error {
+	return s.timed(ctx, laneMain, "local.disk", machine, func(ctx context.Context) error {
 		return s.Scripts.MoveToLocalDisk(ctx, s.exec(machine), traits.LocalDisk, traits.LocalDiskReserve, traits.LocalDiskSkip)
 	})
 }
@@ -738,7 +739,7 @@ func (s *Session) installPrerequisites(ctx context.Context, machine string) erro
 	if !s.inPlace() {
 		return nil
 	}
-	return s.timed(ctx, laneMain, "prerequisites", machine, func() error {
+	return s.timed(ctx, laneMain, "prerequisites", machine, func(ctx context.Context) error {
 		return s.Scripts.Provision(ctx, s.exec(machine), images.PhasePrerequisites)
 	})
 }
@@ -757,7 +758,7 @@ func (s *Session) installPackages(ctx context.Context, machine string, stage tra
 	case s.payload != nil:
 		mode = []string{images.PackagesResident}
 	}
-	if err := s.timed(ctx, lanePackages, "packages", machine, func() error {
+	if err := s.timed(ctx, lanePackages, "packages", machine, func(ctx context.Context) error {
 		err := s.Scripts.Provision(ctx, s.exec(machine), images.PhasePackages, mode...)
 		if err == nil || !s.closure {
 			return err
@@ -789,7 +790,7 @@ func (s *Session) registerClosure(ctx context.Context, machine string) error {
 	if !s.inPlace() || s.payload == nil || !s.closure {
 		return nil
 	}
-	if err := s.timed(ctx, laneLoader, "loader", machine, func() error {
+	if err := s.timed(ctx, laneLoader, "loader", machine, func(ctx context.Context) error {
 		return s.Scripts.Provision(ctx, s.exec(machine), images.PhaseLoader)
 	}); err != nil {
 		return err
@@ -805,14 +806,14 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 		payload = s.payload.SHA256
 	}
 	if s.inPlace() {
-		if err := s.timed(ctx, laneTools, "tools.provision", machine, func() error {
+		if err := s.timed(ctx, laneTools, "tools.provision", machine, func(ctx context.Context) error {
 			return s.Scripts.Provision(ctx, run, images.PhaseTools)
 		}); err != nil {
 			return err
 		}
 		s.Log.Info("provisioned", "machine", machine)
 	}
-	if err := s.timed(ctx, laneTools, "plugins.stage", machine, func() error {
+	if err := s.timed(ctx, laneTools, "plugins.stage", machine, func(ctx context.Context) error {
 		return s.Scripts.StagePlugins(ctx, run, payload)
 	}); err != nil {
 		return err
@@ -827,7 +828,7 @@ func (s *Session) installPlugins(ctx context.Context, machine string) error {
 			return err
 		}
 	}
-	if err := s.timed(ctx, laneTools, "tools.install", machine, func() error {
+	if err := s.timed(ctx, laneTools, "tools.install", machine, func(ctx context.Context) error {
 		return s.Scripts.Install(ctx, run, token, payload)
 	}); err != nil {
 		return err
@@ -906,7 +907,7 @@ func (s *Session) source(ctx context.Context, machine string, from artifactSourc
 		}, nil
 	}
 	var url images.PayloadURL
-	if err := s.timed(ctx, laneMain, from.artifact.Label+".url", machine, func() error {
+	if err := s.timed(ctx, laneMain, from.artifact.Label+".url", machine, func(ctx context.Context) error {
 		var err error
 		url, err = s.sourceURL(ctx, from)
 		return err
@@ -914,7 +915,7 @@ func (s *Session) source(ctx context.Context, machine string, from artifactSourc
 		return nil, err
 	}
 	return func(ctx context.Context, machine string, run images.Exec) error {
-		if err := s.timed(ctx, from.lane, from.artifact.Label+".fetch", machine, func() error {
+		if err := s.timed(ctx, from.lane, from.artifact.Label+".fetch", machine, func(ctx context.Context) error {
 			return s.Scripts.Fetch(ctx, run, from.artifact, url, from.source.SHA256, from.source.Size)
 		}); err != nil {
 			return err
@@ -1013,7 +1014,7 @@ func (s *Session) mountPayload(ctx context.Context, machine string, stage transf
 	if s.closure {
 		args = append(args, s.payload.Packages.SHA256)
 	}
-	if err := s.timed(ctx, laneMount, "payload.mount", machine, func() error {
+	if err := s.timed(ctx, laneMount, "payload.mount", machine, func(ctx context.Context) error {
 		return s.Scripts.Provision(ctx, run, images.PhasePayload, args...)
 	}); err != nil {
 		return err
@@ -1026,7 +1027,7 @@ func (s *Session) prefetchPayload(ctx context.Context, machine string) error {
 	if s.payload == nil {
 		return nil
 	}
-	if err := s.timed(ctx, lanePrefetch, "payload.prefetch", machine, func() error {
+	if err := s.timed(ctx, lanePrefetch, "payload.prefetch", machine, func(ctx context.Context) error {
 		return s.Scripts.Prefetch(ctx, s.exec(machine), images.PayloadArtifact, s.payload.SHA256)
 	}); err != nil {
 		return err
@@ -1056,13 +1057,13 @@ func (s *Session) stream(ctx context.Context, machine string, run images.Exec, f
 	if owner := info.Sys().(*syscall.Stat_t).Uid; int(owner) != os.Getuid() {
 		return fmt.Errorf("open %s: %s is owned by uid %d, not by this user (uid %d)", name, file.Name(), owner, os.Getuid())
 	}
-	return s.timed(ctx, from.lane, from.artifact.Label+".stage", machine, func() error {
+	return s.timed(ctx, from.lane, from.artifact.Label+".stage", machine, func(ctx context.Context) error {
 		return s.Scripts.Stage(ctx, run, from.artifact, file, from.source.SHA256)
 	})
 }
 
 func (s *Session) publish(ctx context.Context, machine string) error {
-	if err := s.timed(ctx, lanePublish, "tools.publish", machine, func() error {
+	if err := s.timed(ctx, lanePublish, "tools.publish", machine, func(ctx context.Context) error {
 		return s.Scripts.Publish(ctx, s.exec(machine), s.Stamp)
 	}); err != nil {
 		return err
@@ -1112,7 +1113,7 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 	if err != nil {
 		return err
 	}
-	if err := s.timed(ctx, laneCheckout, "checkout", machine, func() error {
+	if err := s.timed(ctx, laneCheckout, "checkout", machine, func(ctx context.Context) error {
 		_, err := s.run(ctx, machine, CheckoutScript(root, s.Config.Repository, record.Source, s.profile.Checkout), strings.NewReader(token+"\n"))
 		return err
 	}); err != nil {
@@ -1123,7 +1124,7 @@ func (s *Session) checkout(ctx context.Context, record *Record) error {
 }
 
 func (s *Session) prepare(ctx context.Context, record *Record, env map[string]string) error {
-	if err := s.timed(ctx, laneCheckout, "prepare", record.Machine, func() error {
+	if err := s.timed(ctx, laneCheckout, "prepare", record.Machine, func(ctx context.Context) error {
 		_, err := s.run(ctx, record.Machine, RefreshScript(s.ProjectRoot(), ExportEnv(env), s.profile.Prepare), nil)
 		return err
 	}); err != nil {
@@ -1134,7 +1135,7 @@ func (s *Session) prepare(ctx context.Context, record *Record, env map[string]st
 }
 
 func (s *Session) configure(ctx context.Context, record *Record, env map[string]string) error {
-	if err := s.timed(ctx, laneConfigure, "configure", record.Machine, func() error {
+	if err := s.timed(ctx, laneConfigure, "configure", record.Machine, func(ctx context.Context) error {
 		return s.Scripts.Configure(ctx, s.exec(record.Machine), env)
 	}); err != nil {
 		return err
@@ -1163,7 +1164,7 @@ func (s *Session) enroll(ctx context.Context, held *state.Held, record *Record) 
 	if s.Enroller == nil {
 		return nil
 	}
-	return s.timed(ctx, laneEnroll, "tailnet.enroll", record.Machine, func() error {
+	return s.timed(ctx, laneEnroll, "tailnet.enroll", record.Machine, func(ctx context.Context) error {
 		node, err := s.Enroller.Enroll(ctx, held, runner{s, record.Machine})
 		record.Tailnet = node
 		return err
@@ -1204,7 +1205,7 @@ func (s *Session) hookDrift(ctx context.Context, machine string) []images.HookDr
 
 func (s *Session) access(ctx context.Context, machine string) (providers.Access, error) {
 	var access providers.Access
-	err := s.timed(ctx, laneSSH, "ssh.target", machine, func() error {
+	err := s.timed(ctx, laneSSH, "ssh.target", machine, func(ctx context.Context) error {
 		var err error
 		access, err = s.Provider.Access(ctx, machine)
 		return err

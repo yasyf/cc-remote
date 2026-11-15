@@ -73,7 +73,7 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 			name:  "one phase that succeeds",
 			clock: at(0, 2, 3.5, 4),
 			run: func(ctx context.Context, s *Session) error {
-				return s.timed(ctx, laneCheckout, "checkout", "ws-1", func() error { return nil })
+				return s.timed(ctx, laneCheckout, "checkout", "ws-1", func(context.Context) error { return nil })
 			},
 			want: []map[string]any{
 				{"msg": "phase", "phase": "checkout", "lane": "checkout", "machine": "ws-1", "start": 2.0, "end": 3.5, "seconds": 1.5, "ok": true},
@@ -86,7 +86,7 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 			name:  "one phase that fails",
 			clock: at(0, 0.25, 1.2504, 2),
 			run: func(ctx context.Context, s *Session) error {
-				return s.timed(ctx, lanePackages, "packages", "ws-1", func() error { return boom })
+				return s.timed(ctx, lanePackages, "packages", "ws-1", func(context.Context) error { return boom })
 			},
 			err: boom,
 			want: []map[string]any{
@@ -100,8 +100,8 @@ func TestTimedPhasesLogTheirSpanAndTheSummaryListsThem(t *testing.T) {
 			name:  "overlapping phases on two lanes",
 			clock: at(0, 1, 2, 5, 7, 9),
 			run: func(ctx context.Context, s *Session) error {
-				return s.timed(ctx, laneMount, "payload.stage", "ws-1", func() error {
-					return s.timed(ctx, laneCheckout, "checkout", "ws-1", func() error { return nil })
+				return s.timed(ctx, laneMount, "payload.stage", "ws-1", func(ctx context.Context) error {
+					return s.timed(ctx, laneCheckout, "checkout", "ws-1", func(context.Context) error { return nil })
 				})
 			},
 			want: []map[string]any{
@@ -138,15 +138,15 @@ func TestTheSummaryListsPhasesInStartOrder(t *testing.T) {
 	var logged bytes.Buffer
 	s := &Session{Log: slog.New(slog.NewJSONHandler(&logged, nil)), Now: at(0, 3, 4, 1, 2, 5).now}
 	ctx := s.begin(context.Background())
-	for _, phase := range []string{"late", "early"} {
-		if err := s.timed(ctx, laneMain, phase, "ws-1", func() error { return nil }); err != nil {
+	for _, phase := range []string{"tools.publish", "machine.create"} {
+		if err := s.timed(ctx, laneMain, phase, "ws-1", func(context.Context) error { return nil }); err != nil {
 			t.Fatal(err)
 		}
 	}
 	s.summarize(ctx, "ws-1", nil)
 	got := records(t, &logged)
 	line := strings.Split(strings.TrimSpace(logged.String()), "\n")[len(got)-1]
-	if early, late := strings.Index(line, `"early":`), strings.Index(line, `"late":`); early < 0 || late < 0 || early > late {
+	if early, late := strings.Index(line, `"machine.create":`), strings.Index(line, `"tools.publish":`); early < 0 || late < 0 || early > late {
 		t.Errorf("summary %s does not list early before late", line)
 	}
 }
@@ -164,12 +164,12 @@ func TestOperationsOnOneSessionOwnTheirSpansAndExecCounts(t *testing.T) {
 	h.session.Now = clock.now
 	first := h.session.begin(context.Background())
 	second := h.session.begin(context.Background())
-	if err := h.session.timed(first, laneMain, "alpha", "ws-1", func() error {
+	if err := h.session.timed(first, laneMain, "memory.limit", "ws-1", func(context.Context) error {
 		return h.session.exec("ws-1")(first, []string{"true"}, nil)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.session.timed(second, lanePackages, "beta", "ws-2", func() error {
+	if err := h.session.timed(second, lanePackages, "packages", "ws-2", func(context.Context) error {
 		for range 2 {
 			if _, err := h.session.capture("ws-2")(second, []string{"true"}, nil); err != nil {
 				return err
@@ -185,13 +185,13 @@ func TestOperationsOnOneSessionOwnTheirSpansAndExecCounts(t *testing.T) {
 	h.session.summarize(first, "ws-1", nil)
 	h.session.summarize(second, "ws-2", nil)
 	want := []map[string]any{
-		{"msg": "phase", "phase": "alpha", "lane": "main", "machine": "ws-1", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
-		{"msg": "phase", "phase": "beta", "lane": "packages", "machine": "ws-2", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+		{"msg": "phase", "phase": "memory.limit", "lane": "main", "machine": "ws-1", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+		{"msg": "phase", "phase": "packages", "lane": "packages", "machine": "ws-2", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
 		{"msg": "create phases", "workspace": "ws-1", "seconds": 3.0, "execs": 1.0, "ok": true, "phases": map[string]any{
-			"alpha": map[string]any{"lane": "main", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+			"memory.limit": map[string]any{"lane": "main", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
 		}},
 		{"msg": "create phases", "workspace": "ws-2", "seconds": 3.0, "execs": 2.0, "ok": true, "phases": map[string]any{
-			"beta": map[string]any{"lane": "packages", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
+			"packages": map[string]any{"lane": "packages", "start": 1.0, "end": 2.0, "seconds": 1.0, "ok": true},
 		}},
 	}
 	if got := records(t, &logged); !reflect.DeepEqual(got, want) {
