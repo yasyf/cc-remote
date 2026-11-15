@@ -34,9 +34,9 @@ func newMemoryBox(t *testing.T) memoryBox {
 	}
 	box.reset(t)
 	spriteEnv := "#!/bin/sh\necho \"$@\" >> " + box.services + "\ncase \"$2\" in\n" +
-		"  get) [ -e " + box.created + " ] ;;\n" +
-		"  create) touch " + box.created + " ;;\n" +
-		"  delete) rm " + box.created + " ;;\n" +
+		"  create) if [ -e " + box.created + " ]; then echo \"service already exists: $3\"; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22; fi; touch " + box.created + " ;;\n" +
+		"  restart) [ -e " + box.created + " ] ;;\n" +
+		"  *) exit 64 ;;\n" +
 		"esac\n"
 	if err := os.WriteFile(filepath.Join(bin, "sprite-env"), []byte(spriteEnv), 0o755); err != nil {
 		t.Fatal(err)
@@ -95,8 +95,8 @@ func TestTheLimitCapsTheContainerAndArmsAServiceThatCapsItAgainAtBoot(t *testing
 		t.Errorf("after the limit memory.high = %s and memory.max = %s, want 4096 and 8192", high, limit)
 	}
 	services := lines(t, box.services)
-	if len(services) != 2 || services[0] != "services get "+MemoryService || !strings.HasPrefix(services[1], "services create "+MemoryService+" --cmd sudo --args -n,sh,-c,"+box.boot+" && exec sleep infinity") {
-		t.Errorf("services %q do not create the boot service once", services)
+	if len(services) != 2 || !strings.HasPrefix(services[0], "services create "+MemoryService+" --cmd sudo --args -n,sh,-c,"+box.boot+" && exec sleep infinity") || services[1] != "services restart "+MemoryService {
+		t.Errorf("services %q do not create the boot service once and start it", services)
 	}
 
 	box.reset(t)
@@ -119,7 +119,7 @@ func TestALimitOnAWokenMachineCapsItAgainAndLeavesItsBootServiceRunning(t *testi
 		t.Errorf("after the second limit memory.high = %s and memory.max = %s, want 4096 and 8192", high, limit)
 	}
 	services := lines(t, box.services)
-	if len(services) != 5 || services[3] != "services delete "+MemoryService || !strings.HasPrefix(services[4], "services create "+MemoryService) {
-		t.Errorf("the second limit ran %q, want the stopped boot service deleted and created running again", services[2:])
+	if len(services) != 4 || !strings.HasPrefix(services[2], "services create "+MemoryService) || services[3] != "services restart "+MemoryService {
+		t.Errorf("the second limit ran %q, want the existing boot service's 409 counted as created and the service started again", services[2:])
 	}
 }

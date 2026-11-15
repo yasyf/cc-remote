@@ -50,7 +50,7 @@ func newLocalDiskBox(t *testing.T) localDiskBox {
 		"mount":      "#!/bin/sh\necho \"$@\" >> " + box.mounts + "\ncase \"$*\" in\n  *--bind*) touch " + box.mounted + " ;;\n  *loop*) mv \"$3\" \"$3.covered\" ;;\nesac\n",
 		"mkfs.ext4":  "#!/bin/sh\necho \"$@\" >> " + box.mkfs + "\n",
 		"findmnt":    "#!/bin/sh\necho /dev/vdb\n[ ! -e " + box.volume() + ".covered ] || echo /dev/loop0\n",
-		"sprite-env": "#!/bin/sh\necho \"$@\" >> " + box.services + "\n",
+		"sprite-env": "#!/bin/sh\necho \"$@\" >> " + box.services + "\n[ ! -e " + box.services + ".exist ] || { echo \"service already exists: $3\"; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22; }\n",
 	} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
@@ -139,6 +139,17 @@ func TestTheMoveMountsTheVolumeCopiesTheHomeBindsItAndLinksTheStore(t *testing.T
 	services := lines(t, box.services)
 	if len(services) != 1 || !strings.HasPrefix(services[0], "services create "+LocalDiskService+" --cmd sudo --args -n,sh,-c,"+box.boot+" && exec sleep infinity") {
 		t.Errorf("services %q do not run the boot script", services)
+	}
+}
+
+func TestTheMoveCountsABootServiceThatAlreadyExistsAsCreated(t *testing.T) {
+	box := newLocalDiskBox(t)
+	if err := os.WriteFile(box.services+".exist", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	box.move(t)
+	if services := lines(t, box.services); len(services) != 1 || !strings.HasPrefix(services[0], "services create "+LocalDiskService+" ") {
+		t.Errorf("services %q, want the one create its 409 answered", services)
 	}
 }
 

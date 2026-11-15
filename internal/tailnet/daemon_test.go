@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yasyf/cc-remote/internal/remote"
 )
 
 const runningStatus = `{"BackendState":"Running","TUN":true,"Self":{"ID":"nNODE","HostName":"ws-1","DNSName":"ws-1.example.ts.net.","TailscaleIPs":["fd7a:115c:a1e0::1","100.64.0.9"]}}`
@@ -106,7 +108,7 @@ exit 0`)
 
 func TestKernelModeRunsTailscaledAsRootUnderSpriteEnv(t *testing.T) {
 	script := sprites.EnrollScript("ws-1")
-	if !strings.Contains(script, `sprite-env services create tailscaled --cmd "`+launcherPath+`" --duration 1ms --no-stream`) || strings.Contains(script, "setsid") {
+	if !strings.Contains(script, `create_sprite_service tailscaled --cmd "`+launcherPath+`" --duration 1ms --no-stream`) || strings.Contains(script, "services get") || strings.Contains(script, "setsid") {
 		t.Errorf("enrollment starts tailscaled outside sprite-env:\n%s", script)
 	}
 	if launcher := sprites.Launcher(); !strings.Contains(launcher, "exec sudo -n tailscaled --state=/var/lib/tailscale/tailscaled.state") || strings.Contains(launcher, "userspace") {
@@ -114,6 +116,34 @@ func TestKernelModeRunsTailscaledAsRootUnderSpriteEnv(t *testing.T) {
 	}
 	if !strings.Contains(script, "sudo -n tailscale --socket=/run/tailscale/tailscaled.sock up ") || strings.Contains(script, "accept-dns") {
 		t.Errorf("enrollment does not drive the root daemon:\n%s", script)
+	}
+}
+
+func TestSpriteEnvCountsAnExistingTailscaledServiceAsStarted(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		wantErr    bool
+	}{
+		{name: "a 409 saying tailscaled already exists", body: "service already exists: $3"},
+		{name: "a 409 with another body", body: "service is being deleted: $3", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bin, home := t.TempDir(), t.TempDir()
+			fakeBinary(t, bin, "sprite-env", `printf '%s\n' "$*" >> "`+bin+`/calls"
+echo "`+tt.body+`"
+echo "curl: (22) The requested URL returned error: 409" >&2
+exit 22`)
+			cmd := exec.Command("sh", "-c", remote.Script(sprites.start()))
+			cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("start = %v: %s, want an error %v", err, out, tt.wantErr)
+			}
+			calls, err := os.ReadFile(filepath.Join(bin, "calls"))
+			if want := "services create tailscaled --cmd " + home + "/.cc-remote/tailscaled.sh --duration 1ms --no-stream\n"; err != nil || string(calls) != want {
+				t.Errorf("sprite-env saw %q (%v), want only %q", calls, err, want)
+			}
+		})
 	}
 }
 

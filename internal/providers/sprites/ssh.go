@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/yasyf/cc-remote/internal/providers"
+	"github.com/yasyf/cc-remote/internal/remote"
 )
 
 type keys struct{ dir string }
@@ -154,7 +155,8 @@ func Proxy(ctx context.Context, argv []string) error {
 	return nil
 }
 
-const AuthorizeScript = `set -eu
+var AuthorizeScript = `set -eu
+` + remote.CreateServiceFunc("sprite-env") + `
 test -x /usr/sbin/sshd || { echo "cc-remote: this sprite has no /usr/sbin/sshd; provision openssh-server before asking for ssh" >&2; exit 1; }
 key="$(cat)"
 mkdir -p "$HOME/.ssh"
@@ -162,7 +164,7 @@ chmod 700 "$HOME/.ssh"
 touch "$HOME/.ssh/authorized_keys"
 grep -qxF "$key" "$HOME/.ssh/authorized_keys" || printf '%s\n' "$key" >> "$HOME/.ssh/authorized_keys"
 chmod 600 "$HOME/.ssh/authorized_keys"
-sprite-env services get sshd >/dev/null 2>&1 || sprite-env services create sshd --cmd sudo --args "sh,-c,mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e" --duration 1ms --no-stream >&2
+create_sprite_service sshd --cmd sudo --args "sh,-c,mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e" --duration 1ms --no-stream >&2
 python3 - <<'PY'
 import subprocess
 import sys

@@ -624,7 +624,7 @@ create_service() {
   shift
   out="$(mktemp "$tmp_dir/service.XXXXXX")"
   err="$(mktemp "$tmp_dir/service.XXXXXX")"
-  if sprite-env services create "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
+  if create_sprite_service "cc-remote-$name" --cmd "$state_dir/supervise.py" --args "$name" "$@" --duration 1ms --no-stream > "$out" 2> "$err"; then
     cat "$out"
     cat "$err" >&2
     rm -f "$out" "$err"
@@ -647,9 +647,7 @@ start_services() {
       needs=(--needs cc-remote-payload)
     fi
     for name in "$@"; do
-      if ! sprite-env services get "cc-remote-$name" > /dev/null 2>&1; then
-        queue_artifact create_service "$name" "${needs[@]}"
-      fi
+      queue_artifact create_service "$name" "${needs[@]}"
     done
     drain_artifacts
   else

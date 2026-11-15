@@ -110,6 +110,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **Preparing a Sprite whose services already exist succeeds.** A create of a
+  service the Sprite already runs answers HTTP 409 `service already exists:
+  <name>`, and the prepare failed on it, so a warm pool spare that already ran
+  its services never started its builder; the `sprite-env services get` in
+  front of most creates did not prevent it. The plugin
+  services, `cc-remote-payload`, `cc-remote-orca`, `sshd`, `tailscaled`,
+  `cc-remote-local-disk` and `cc-remote-memory` are now created without the
+  get, and a 409 whose body is exactly `service already exists: <name>` counts
+  as created; any other failure still fails. `cc-remote-memory` and a continued
+  Orca runtime are restarted after their create, as the get used to decide.
 - **A restarted Sprite's Orca runtime waits for the payload instead of failing
   on it.** The `cc-remote-orca` service starts beside `cc-remote-payload`,
   whose `--needs` orders only the start, so after a restart or a wake the

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	assets "github.com/yasyf/cc-remote/images"
+	"github.com/yasyf/cc-remote/internal/remote"
 )
 
 const (
@@ -424,6 +425,9 @@ func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, 
 		"json":    indentJSON,
 		"install": installCall,
 		"stage":   stageCall,
+		"createSpriteService": func() string {
+			return remote.CreateServiceFunc("sprite-env")
+		},
 		"debs": func(artifacts []Artifact) bool {
 			return slices.ContainsFunc(artifacts, func(a Artifact) bool { return a.Format == Deb })
 		},

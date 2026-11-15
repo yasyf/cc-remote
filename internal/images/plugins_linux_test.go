@@ -200,7 +200,14 @@ fi
 echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
 case "$2" in
   get) [ -f "${FAKE_LOG%/*}/services/$3" ] || exit 1; [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")" ;;
-  create) mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3" ;;
+  create)
+    if [ -f "${FAKE_LOG%/*}/services/$3" ]; then
+      echo "service already exists: $3"
+      echo "curl: (22) The requested URL returned error: 409" >&2
+      exit 22
+    fi
+    mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3"
+    ;;
 esac
 `
 
@@ -1029,7 +1036,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 		{name: "a listener with a full accept backlog is not ready", status: "running", sockets: "backlog", timeout: time.Second, wantErr: true},
 		{name: "a stopped service behind a listening socket is not ready", status: "stopped", sockets: "listening", timeout: time.Second, wantErr: true},
 		{name: "a stalled sprite-env status read is not ready", status: "running", stall: true, sockets: "listening", timeout: time.Second, wantErr: true},
-		{name: "an existing service is gated but never created", status: "running", existing: true, sockets: "listening", timeout: 30 * time.Second},
+		{name: "an existing service answers its create with 409 and is gated", status: "running", existing: true, sockets: "listening", timeout: 30 * time.Second},
 		{name: "the namespace branch is gated on sockets alone", namespace: true, sockets: "listening", timeout: 30 * time.Second},
 		{name: "the namespace branch fails closed without a socket", namespace: true, sockets: "none", timeout: time.Second, wantErr: true},
 		{name: "the namespace branch fails closed on a full accept backlog", namespace: true, sockets: "backlog", timeout: time.Second, wantErr: true},
@@ -1110,7 +1117,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 				}
 			}
 			wantCreates := 2
-			if tt.existing || tt.namespace {
+			if tt.namespace {
 				wantCreates = 0
 			}
 			if tt.wantErr {
@@ -1132,7 +1139,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 			if installs != 1 || creates != wantCreates || mutations != 0 {
 				t.Errorf("installs=%d creates=%d start/restart=%d, want 1 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
 			}
-			if tt.existing && countCall(calls, "sprite-env services get cc-remote-capt state=present") != 2 {
+			if tt.existing && countCall(calls, "sprite-env services get cc-remote-capt state=present") != 1 {
 				t.Errorf("the existing capt service was not gated through sprite-env:\n%s", strings.Join(calls, "\n"))
 			}
 			if tt.namespace {
@@ -1154,11 +1161,11 @@ func mustJSON(t *testing.T, v any) []byte {
 	return raw
 }
 
-func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
+func TestPluginsConfigureQueuesEveryServiceCreate(t *testing.T) {
 	for _, tt := range []struct{ fail, payload, plugins bool }{{false, false, false}, {true, false, false}, {false, true, false}, {false, false, true}} {
 		fail, payload, plugins := tt.fail, tt.payload, tt.plugins
 		t.Run(fmt.Sprintf("fail=%t payload=%t plugins=%t", fail, payload, plugins), func(t *testing.T) {
-			names := []string{"first", "second", "existing", "third", "fourth", "cookiesync"}
+			names := []string{"first", "second", "third", "fourth", "existing", "cookiesync"}
 			inventory := Inventory{
 				Version:    SchemaVersion,
 				Tools:      []Artifact{{Name: "cookiesync", Version: "0.30.0", URL: "https://example.com/cookiesync.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"cookiesync": "cookiesync"}}},
@@ -1213,7 +1220,7 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 					lock.Lock()
 					defer lock.Unlock()
 					for _, name := range names {
-						if name != "existing" && !finished["cc-remote-"+name] {
+						if !finished["cc-remote-"+name] {
 							t.Errorf("cookiesync install preceded service completion: %s", name)
 						}
 					}
@@ -1241,7 +1248,7 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 					created := finished[name]
 					lock.Unlock()
 					switch {
-					case created || name == "cc-remote-existing":
+					case created:
 						if _, err := fmt.Fprintln(w, `{"state":{"status":"running"}}`); err != nil {
 							t.Errorf("write the status of %s: %v", name, err)
 						}
@@ -1260,6 +1267,15 @@ func TestPluginsConfigureQueuesOnlyMissingServices(t *testing.T) {
 				}
 				lock.Lock()
 				creates = append(creates, name)
+				if name == "cc-remote-existing" {
+					finished[name] = true
+					lock.Unlock()
+					w.WriteHeader(http.StatusConflict)
+					if _, err := fmt.Fprintln(w, "service already exists: "+name); err != nil {
+						t.Errorf("write the conflict of %s: %v", name, err)
+					}
+					return
+				}
 				active++
 				peak = max(peak, active)
 				lock.Unlock()
@@ -1289,8 +1305,10 @@ request = {"program": os.path.basename(sys.argv[0]), "args": args, "input": sys.
 try:
     with urllib.request.urlopen(os.environ["TEST_SERVICE_API"], json.dumps(request).encode()) as response:
         sys.stdout.write(response.read().decode())
-except urllib.error.HTTPError:
-    sys.exit(7)
+except urllib.error.HTTPError as error:
+    sys.stdout.write(error.read().decode())
+    sys.stderr.write(f"curl: (22) The requested URL returned error: {error.code}\n")
+    sys.exit(22)
 `
 			for _, name := range []string{"sprite-env", "cookiesync"} {
 				if err := os.WriteFile(filepath.Join(host.fakes, name), []byte(fake), 0o700); err != nil {
@@ -1336,20 +1354,20 @@ except urllib.error.HTTPError:
 			for _, name := range names {
 				wantGets = append(wantGets, "cc-remote-"+name)
 			}
-			if !fail {
-				wantGets = slices.Concat(wantGets, wantGets[1:])
+			if fail {
+				wantGets = wantGets[:1]
 			}
 			if !slices.Equal(gets, wantGets) {
-				t.Errorf("get order = %v, want the existence checks then one readiness check per service: %v", gets, wantGets)
+				t.Errorf("get order = %v, want the payload check then one readiness check per service: %v", gets, wantGets)
 			}
 			wantCreates := []string{"cc-remote-first", "cc-remote-second", "cc-remote-third", "cc-remote-fourth"}
 			if !fail {
-				wantCreates = append(wantCreates, "cc-remote-cookiesync")
+				wantCreates = append(wantCreates, "cc-remote-existing", "cc-remote-cookiesync")
 			}
 			slices.Sort(creates)
 			slices.Sort(wantCreates)
 			if !slices.Equal(creates, wantCreates) {
-				t.Errorf("created services = %v, want %v; existing service must stay untouched", creates, wantCreates)
+				t.Errorf("created services = %v, want %v", creates, wantCreates)
 			}
 			if peak > 4 || active != 0 || installed == fail {
 				t.Errorf("after Configure: peak=%d active=%d cookiesync installed=%t, want peak<=4 active=0 installed=%t", peak, active, installed, !fail)
@@ -1524,6 +1542,24 @@ func TestPluginsConfigureReportsFailedServiceCreates(t *testing.T) {
 		}
 		if live, err := os.ReadFile(filepath.Join(h.fakes, "live-buffers")); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("the readiness check still saw create output buffers: %q %v", live, err)
+		}
+		released(t, h, 2)
+	})
+
+	t.Run("an existing service's 409 create counts as created and reports nothing", func(t *testing.T) {
+		h := newPluginsHost(t, inventory("solo"), nil, fakeState{}, nil)
+		listenReady(t, h.home, ".s/solo")
+		writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-solo"), nil, 0o600)
+		respond(t, h, "solo", serviceCreateResult{stdout: "service already exists: cc-remote-solo\n", stderr: "curl: (22) The requested URL returned error: 409\n", exit: 22})
+		stdout, stderr, err := configure(t, h)
+		if err != nil {
+			t.Fatalf("configure = %v\nstdout:\n%s\nstderr:\n%q", err, stdout, stderr)
+		}
+		if stdout != "unrelated configure output\n" || stderr != "" {
+			t.Errorf("stdout = %q, stderr = %q; want only the configure output", stdout, stderr)
+		}
+		if got := creates(h, "solo"); len(got) != 1 {
+			t.Errorf("creates = %q, want one", got)
 		}
 		released(t, h, 2)
 	})
