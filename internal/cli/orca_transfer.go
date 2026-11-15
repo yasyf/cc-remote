@@ -38,6 +38,7 @@ const (
 	exitPriorRuntime   = 7
 	exitNotClean       = 8
 	exitAgentRunning   = 9
+	exitBlockDevice    = 10
 )
 
 var (
@@ -54,6 +55,8 @@ var (
 		exitPriorRuntime: "the machine already holds cc-remote Orca runtime state, which a first worker neither adopts nor rewrites",
 		exitNotClean:     "the checkout has uncommitted or untracked changes, so it is not unused",
 	}
+	blockDeviceErrors = remote.Script(`log=$(dmesg -r)`, `! printf '%s\n' "$log" | grep -qE '^<[0-3]>.*nbd' || exit `+fmt.Sprint(exitBlockDevice))
+	blockDeviceFaults = map[int]string{exitBlockDevice: "its kernel logged an error on the network block device under its disk"}
 )
 
 type orcaArtifact struct {
@@ -126,7 +129,9 @@ func checkUnused(ctx context.Context, session *workspace.Session, record *worksp
 	if err := checkClean(ctx, session, "check the unused checkout", record.Name, record.Machine); err != nil {
 		return &unconfirmed{err: err}
 	}
-	return nil
+	ran, err := session.Provider.Exec(ctx, record.Machine, []string{"sh", "-c", blockDeviceErrors}, nil)
+	_, err = answered("check the kernel log", record.Name, blockDeviceFaults, ran, err)
+	return err
 }
 
 func checkClean(ctx context.Context, session *workspace.Session, step, name, machine string) error {

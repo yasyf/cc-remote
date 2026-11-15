@@ -530,6 +530,41 @@ func TestAFailedClaimIsDestroyedAndTheLaneTakesTheNextSpare(t *testing.T) {
 	}, "pool-b already has an Orca task")
 }
 
+func TestAClaimWhoseKernelLoggedABlockDeviceErrorIsDestroyedAndTheLaneTakesTheNextSpare(t *testing.T) {
+	w := newWarmPool(t, "pool-a", "pool-b")
+	w.oneExecAtATime()
+	*w.session.Config.Orca.Pool.Ready = 2
+	standInFill(t)
+	if fill, err := openPool(w.session).fill(t.Context()); err != nil || !slices.Equal(fill.Created, []string{"pool-a", "pool-b"}) {
+		t.Fatalf("fill = %+v, %v", fill, err)
+	}
+	handle := w.provider.Handle
+	w.provider.Handle = func(id string, cmd []string, stdin []byte) providers.Result {
+		if id == "pool-a" && cmd[len(cmd)-1] == blockDeviceErrors {
+			return providers.Result{ExitCode: exitBlockDevice}
+		}
+		return handle(id, cmd, stdin)
+	}
+	t.Setenv("REMOTE_HOME", w.local.Home("pool-b"))
+	native, _ := w.nativeAs("pool-b")
+	var out bytes.Buffer
+	if err := w.warm(t.Context(), w.session, native, &out, "lane-a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if allocation := w.allocation(out.Bytes()); allocation.Workspace != "pool-b" || allocation.Allocation != allocationWarm {
+		t.Errorf("allocation = %+v, want lane-a started on pool-b", allocation)
+	}
+	if member := w.member("pool-a"); member.State != memberStopped || member.Lane != "lane-a" || member.Failure == nil || member.Failure.Bytes == 0 {
+		t.Errorf("pool-a = %+v, want it stopped for lane-a with its failure's metadata", member)
+	}
+	if machine, err := w.provider.Get(t.Context(), "pool-a"); !errors.Is(err, providers.ErrNotFound) {
+		t.Errorf("pool-a's machine = %+v, %v; want it destroyed", machine, err)
+	}
+	w.free("pool-a")
+	w.free("pool-b")
+	w.free("lane-a")
+}
+
 func TestAFailedClaimWhereAnAgentRunsStaysRunning(t *testing.T) {
 	w := newWarmPool(t, "pool-a", "pool-b")
 	w.oneExecAtATime()
@@ -604,6 +639,37 @@ func TestTheAgentCheckRefusesOnlyARunningAgent(t *testing.T) {
 			switch {
 			case tt.want == 0 && err != nil:
 				t.Fatalf("check = %v, want no agent found", err)
+			case tt.want != 0 && (!errors.As(err, &exit) || exit.ExitCode() != tt.want):
+				t.Fatalf("check = %v, want exit %d", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestTheBlockDeviceCheckRefusesOnlyAnErrorOnAnNbdDevice(t *testing.T) {
+	tests := []struct {
+		name  string
+		dmesg string
+		want  int
+	}{
+		{"a healthy boot", `printf '<3>[    0.267400] PCI: Fatal: No config space access function found\n<6>[    7.142340] nbd0: detected capacity change from 0 to 209715200\n'`, 0},
+		{"a send the device stopped reading", `printf '<6>[    7.142340] nbd0: detected capacity change from 0 to 209715200\n<3>[ 4021.501223] block nbd0: Send data failed (result -11)\n'`, exitBlockDevice},
+		{"a device that closed its socket", `printf '<3>[ 4140.022871] block nbd0: Send disconnect failed -32\n'`, exitBlockDevice},
+		{"no kernel log", "exit 1", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "dmesg"), []byte("#!/bin/sh\n"+tt.dmesg+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			run := exec.Command("/bin/sh", "-c", blockDeviceErrors)
+			run.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+			err := run.Run()
+			var exit *exec.ExitError
+			switch {
+			case tt.want == 0 && err != nil:
+				t.Fatalf("check = %v, want no block device error found", err)
 			case tt.want != 0 && (!errors.As(err, &exit) || exit.ExitCode() != tt.want):
 				t.Fatalf("check = %v, want exit %d", err, tt.want)
 			}
