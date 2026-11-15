@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,12 +28,12 @@ import (
 )
 
 const (
-	keepEvery   = 30 * time.Second
 	pruneEvery  = 10 * time.Minute
 	renewBefore = time.Hour
 )
 
 var (
+	keepEvery    = 30 * time.Second
 	reopenWithin = 2 * time.Minute
 	answerWithin = time.Minute
 	storageGone  = 10 * time.Minute
@@ -59,24 +58,28 @@ func newOrcaKeepCmd(runner orca.Runner) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "keep",
 		Short: "Hold the forward of every kept Sprite task and reopen any other kept task's SSH forward that has exited, until no task is kept",
-		Long: `keep runs detached, started by orca create, prepare, and reconnect once a task's worker answers. Every
-30 seconds it checks the SSH forward of each kept task and reopens one that has exited, as reconnect
-does, without touching the runtime or the worker. Each reopen gets two minutes, since reopening the
-forward of a cold Sprite waits for it to boot, which took about 67 seconds to its Orca runtime, so a
-machine that answers nothing costs one pass two minutes, never the forwards after it. When a reopen
+		Long: `keep runs detached, started by orca create, prepare, and reconnect once a task's worker answers. Each
+kept task gets its own tick every 30 seconds, which checks the task's SSH forward and reopens it once
+it has exited, as reconnect does, without touching the runtime or the worker, then writes the task
+each key line it has not yet written. Each reopen gets two minutes and each write one, since reopening
+the forward of a cold Sprite waits for it to boot, which took about 67 seconds to its Orca runtime, so a
+machine that answers nothing slows only its own task's tick, never another task's forward or keys. The
+tasks kept when keep starts take their first ticks spread over its first 30 seconds, and a task kept
+later takes its first at the next 30-second pass, so a new worker gets its first key within a minute
+however many other machines answer nothing. When a reopen
 fails, keep asks the provider whether the machine's storage is reachable, and once a failing machine
 has reported its storage gone for 10 minutes, keep releases its task, logs that once, and reopens it
 no more; orca reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
 never reopens a stopped lane's forward. Every 10 minutes, starting with its first pass, it also runs
 orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
-reading and retrying. Each pass reads again the config that kept each task, the one its create,
-prepare or reconnect named, so a key added to that config reaches the task with no restart of keep.
-When a task's config names an orca.keys.github_app command, the pass runs it and writes a line it has
-not yet written to that task's machine into its GitHub App token file. A launch never runs that
-command, so this write hands a worker its first token as well as each renewal, and a failed mint on
-the Mac never fails a launch. When a task's config names an orca.keys.aws
-command, a pass runs it once the session it last printed has under an hour left and writes the new
-session into the worker's AWS credentials file the same way, so a worker's AWS reads outlive the
+reading and retrying. Each 30-second pass reads again the config that kept each task, the one its
+create, prepare or reconnect named, so a key added to that config reaches the task with no restart of
+keep. When a task's config names an orca.keys.github_app command, the pass runs it, and the task's next
+tick writes a line it has not yet written to that task's machine into its GitHub App token file. A
+launch never runs that command, so this write hands a worker its first token as well as each renewal,
+and a failed mint on the Mac never fails a launch. When a task's config names an orca.keys.aws
+command, a pass runs it once the session it last printed has under an hour left, and the task's tick
+writes the new session into the worker's AWS credentials file the same way, so a worker's AWS reads outlive the
 session its launch captured. Tasks whose configs name the same command share what it prints. One keep runs per state directory: a keep that finds another running
 records itself as that keep's successor and exits, the running keep execs a successor of a newer
 release at its next pass, so a pin change reaches the keep, and a keep exits once no task is kept.
@@ -211,16 +214,15 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, open taskProvider, renewals []*renewal, running string) (*successor, error) {
 	ticker := time.NewTicker(keepEvery)
 	defer ticker.Stop()
-	held := newProxies(dir, log, open)
-	holding, stop := context.WithCancel(ctx)
-	var proxying sync.WaitGroup
-	proxying.Go(func() { held.run(holding) })
+	k := newKeeper(dir, log, storage, open, renewals)
+	holding, stop := context.WithCancelCause(ctx)
+	k.running.Go(func() { k.held.run(holding) })
 	defer func() {
-		stop()
-		proxying.Wait()
+		stop(nil)
+		k.running.Wait()
 	}()
 	var pruned time.Time
-	gone := map[string]time.Time{}
+	spread := keepEvery
 	for {
 		next, err := readSuccessor(dir)
 		if err != nil {
@@ -235,25 +237,184 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 			}
 			pruned = time.Now()
 		}
-		kept, err := reopenForwards(ctx, dir, log, storage, held, gone)
-		if err != nil || kept == 0 {
+		names, err := keptNames(dir)
+		if err != nil || len(names) == 0 {
 			return nil, err
 		}
-		keys, err := keptKeys(dir, log)
+		keys, err := keptKeys(dir, names, log)
 		if err != nil {
 			return nil, err
 		}
-		for _, r := range renewals {
-			if err := r.renew(ctx, dir, log, open, keys); err != nil {
-				return nil, err
-			}
-		}
+		k.renew(holding, keys)
+		k.track(holding, stop, names, spread)
+		spread = 0
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-holding.Done():
+			return nil, context.Cause(holding)
 		case <-ticker.C:
 		}
 	}
+}
+
+type keeper struct {
+	dir      state.Dir
+	log      *slog.Logger
+	storage  storageCheck
+	open     taskProvider
+	held     *proxies
+	renewals []*renewal
+	tasks    map[string]*keptTask
+	running  sync.WaitGroup
+
+	mu    sync.Mutex
+	lines map[string]map[string][]byte
+}
+
+type keptTask struct {
+	name  string
+	done  chan struct{}
+	sent  map[string][]byte
+	since time.Time
+}
+
+func newKeeper(dir state.Dir, log *slog.Logger, storage storageCheck, open taskProvider, renewals []*renewal) *keeper {
+	return &keeper{dir: dir, log: log, storage: storage, open: open, held: newProxies(dir, log, open), renewals: renewals, tasks: map[string]*keptTask{}}
+}
+
+func newKeptTask(name string) *keptTask {
+	return &keptTask{name: name, done: make(chan struct{}), sent: map[string][]byte{}}
+}
+
+func (k *keeper) track(ctx context.Context, fail context.CancelCauseFunc, names []string, spread time.Duration) {
+	for name, task := range k.tasks {
+		select {
+		case <-task.done:
+			delete(k.tasks, name)
+		default:
+		}
+	}
+	fresh := slices.DeleteFunc(slices.Clone(names), func(name string) bool { return k.tasks[name] != nil })
+	for i, name := range fresh {
+		task := newKeptTask(name)
+		k.tasks[name] = task
+		first := spread * time.Duration(i) / time.Duration(len(fresh))
+		k.running.Go(func() { k.keep(ctx, fail, task, first) })
+	}
+}
+
+func (k *keeper) keep(ctx context.Context, fail context.CancelCauseFunc, task *keptTask, first time.Duration) {
+	defer close(task.done)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(first):
+	}
+	ticker := time.NewTicker(keepEvery)
+	defer ticker.Stop()
+	for {
+		kept, err := k.pass(ctx, task)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if !kept {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (k *keeper) pass(ctx context.Context, kept *keptTask) (bool, error) {
+	if _, err := os.Stat(k.dir.OrcaKept(kept.name)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	task, err := loadTask(k.dir, kept.name)
+	if err != nil {
+		return false, err
+	}
+	if released, err := k.reopen(ctx, kept, task); err != nil || released {
+		return false, err
+	}
+	lines := k.linesOf(kept.name)
+	for _, r := range k.renewals {
+		line := lines[r.key]
+		if line == nil || bytes.Equal(kept.sent[r.key], line) {
+			continue
+		}
+		if err := r.send(ctx, task, k.open, line); err != nil {
+			k.log.Warn("a kept task's renewed key did not reach it, and the next pass tries again", "key", r.key, "workspace", kept.name, "error", err)
+			continue
+		}
+		kept.sent[r.key] = line
+	}
+	return true, nil
+}
+
+func (k *keeper) reopen(ctx context.Context, kept *keptTask, task *orcaTask) (bool, error) {
+	reopened, failed := reopenForward(ctx, k.dir, k.held, task)
+	if failed == nil {
+		kept.since = time.Time{}
+		if reopened {
+			k.log.Info("reopened a kept forward", "workspace", kept.name)
+		}
+		return false, nil
+	}
+	if !storageLost(ctx, k.storage, task) {
+		kept.since = time.Time{}
+		k.log.Warn("a kept forward did not reopen, and the next pass tries again", "workspace", kept.name, "error", failed)
+		return false, nil
+	}
+	if kept.since.IsZero() {
+		kept.since = time.Now()
+		return false, nil
+	}
+	if time.Since(kept.since) < storageGone {
+		return false, nil
+	}
+	if err := state.Remove(k.dir.OrcaKept(kept.name)); err != nil {
+		return false, err
+	}
+	k.log.Warn("released a kept forward whose machine has reported its storage gone since the first failed reopen, so keep reopens it no more; orca reconnect keeps it again", "workspace", kept.name, "machine", task.Machine, "since", kept.since, "error", failed)
+	return true, nil
+}
+
+func (k *keeper) renew(ctx context.Context, keys map[string]map[string][]string) {
+	lines := map[string]map[string][]byte{}
+	for _, r := range k.renewals {
+		minted := map[string][]byte{}
+		for name, named := range keys {
+			command := named[r.key]
+			if len(command) == 0 {
+				continue
+			}
+			id := fmt.Sprintf("%q", command)
+			line, tried := minted[id]
+			if !tried {
+				line = r.mint(ctx, k.dir, k.log, id, command)
+				minted[id] = line
+			}
+			if lines[name] == nil {
+				lines[name] = map[string][]byte{}
+			}
+			lines[name][r.key] = line
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.lines = lines
+}
+
+func (k *keeper) linesOf(name string) map[string][]byte {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.lines[name]
 }
 
 type successor struct {
@@ -306,51 +467,6 @@ func releaseParts(v string) []int {
 	return parts
 }
 
-func reopenForwards(ctx context.Context, dir state.Dir, log *slog.Logger, storage storageCheck, held *proxies, gone map[string]time.Time) (int, error) {
-	names, err := keptNames(dir)
-	if err != nil {
-		return 0, err
-	}
-	kept := len(names)
-	still := map[string]time.Time{}
-	defer func() {
-		clear(gone)
-		maps.Copy(gone, still)
-	}()
-	for _, name := range names {
-		task, err := loadTask(dir, name)
-		if err != nil {
-			return 0, err
-		}
-		reopened, err := reopenForward(ctx, dir, held, task)
-		if err == nil {
-			if reopened {
-				log.Info("reopened a kept forward", "workspace", name)
-			}
-			continue
-		}
-		if !storageLost(ctx, storage, task) {
-			log.Warn("a kept forward did not reopen, and the next pass tries again", "workspace", name, "error", err)
-			continue
-		}
-		since, seen := gone[task.Machine]
-		if !seen {
-			still[task.Machine] = time.Now()
-			continue
-		}
-		if time.Since(since) < storageGone {
-			still[task.Machine] = since
-			continue
-		}
-		if err := state.Remove(dir.OrcaKept(name)); err != nil {
-			return 0, err
-		}
-		kept--
-		log.Warn("released a kept forward whose machine has reported its storage gone since the first failed reopen, so keep reopens it no more; orca reconnect keeps it again", "workspace", name, "machine", task.Machine, "since", since, "error", err)
-	}
-	return kept, nil
-}
-
 func reopenForward(ctx context.Context, dir state.Dir, held *proxies, task *orcaTask) (bool, error) {
 	if task.proxied() {
 		return false, held.failure(task.Workspace)
@@ -377,7 +493,6 @@ type renewal struct {
 	capture func(context.Context, state.Dir, []string) ([]byte, time.Time, error)
 	script  string
 	minted  map[string]minted
-	sent    map[string][]byte
 }
 
 type minted struct {
@@ -386,7 +501,7 @@ type minted struct {
 }
 
 func newRenewal(key string, capture func(context.Context, state.Dir, []string) ([]byte, time.Time, error), script string) *renewal {
-	return &renewal{key: key, capture: capture, script: script, minted: map[string]minted{}, sent: map[string][]byte{}}
+	return &renewal{key: key, capture: capture, script: script, minted: map[string]minted{}}
 }
 
 func captureAppToken(ctx context.Context, dir state.Dir, command []string) ([]byte, time.Time, error) {
@@ -394,11 +509,7 @@ func captureAppToken(ctx context.Context, dir state.Dir, command []string) ([]by
 	return line, time.Time{}, err
 }
 
-func keptKeys(dir state.Dir, log *slog.Logger) (map[string]map[string][]string, error) {
-	names, err := keptNames(dir)
-	if err != nil {
-		return nil, err
-	}
+func keptKeys(dir state.Dir, names []string, log *slog.Logger) (map[string]map[string][]string, error) {
 	configs := map[string]*config.Config{}
 	keys := map[string]map[string][]string{}
 	for _, name := range names {
@@ -423,35 +534,6 @@ func keptKeys(dir state.Dir, log *slog.Logger) (map[string]map[string][]string, 
 		}
 	}
 	return keys, nil
-}
-
-func (r *renewal) renew(ctx context.Context, dir state.Dir, log *slog.Logger, open taskProvider, keys map[string]map[string][]string) error {
-	lines := map[string][]byte{}
-	for _, name := range slices.Sorted(maps.Keys(keys)) {
-		command := keys[name][r.key]
-		if len(command) == 0 {
-			continue
-		}
-		id := fmt.Sprintf("%q", command)
-		line, tried := lines[id]
-		if !tried {
-			line = r.mint(ctx, dir, log, id, command)
-			lines[id] = line
-		}
-		if line == nil || bytes.Equal(r.sent[name], line) {
-			continue
-		}
-		task, err := loadTask(dir, name)
-		if err != nil {
-			return err
-		}
-		if err := r.send(ctx, task, open, line); err != nil {
-			log.Warn("a kept task's renewed key did not reach it, and the next pass tries again", "key", r.key, "workspace", name, "error", err)
-			continue
-		}
-		r.sent[name] = line
-	}
-	return nil
 }
 
 func (r *renewal) mint(ctx context.Context, dir state.Dir, log *slog.Logger, id string, command []string) []byte {
