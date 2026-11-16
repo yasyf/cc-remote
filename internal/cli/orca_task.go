@@ -1243,6 +1243,7 @@ func orcaRuntime(session *workspace.Session) (orca.Runtime, error) {
 		Supervised:    traits.Supervisor == providers.SupervisorSpriteEnv,
 		GoBuildJobs:   traits.GoBuildJobs,
 		GoMemoryLimit: traits.GoMemoryLimit,
+		GoCacheFloor:  traits.GoCacheFloor,
 	}, nil
 }
 

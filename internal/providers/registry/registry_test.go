@@ -67,7 +67,7 @@ func TestNewSprites(t *testing.T) {
 			if got != want {
 				t.Errorf("config = %+v, want %+v", got, want)
 			}
-			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 3, GoMemoryLimit: 3 << 29, MemoryMax: 8 << 30, MemoryHigh: 15 << 29, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29, LocalDiskSkip: []string{".local/share/claude", ".codex/packages/standalone", ".local/share/cursor-agent", ".local/bin/agent", ".local/bin/cursor-agent", ".local/bin/copilot", ".local/bin/agy", ".local/bin/muse", ".local/bin/muse-bin-*", ".grok", ".local/bin/grok", ".pi", ".local/bin/pi"}}
+			wantTraits := providers.Traits{TailnetMode: providers.TailnetKernel, Supervisor: providers.SupervisorSpriteEnv, GoBuildJobs: 3, GoMemoryLimit: 3 << 29, GoCacheFloor: 3 << 30, MemoryMax: 8 << 30, MemoryHigh: 15 << 29, LocalDisk: "/tmp", LocalDiskReserve: 13 << 29, LocalDiskSkip: []string{".local/share/claude", ".codex/packages/standalone", ".local/share/cursor-agent", ".local/bin/agent", ".local/bin/cursor-agent", ".local/bin/copilot", ".local/bin/agy", ".local/bin/muse", ".local/bin/muse-bin-*", ".grok", ".local/bin/grok", ".pi", ".local/bin/pi"}}
 			if traits := provider.Traits(); !reflect.DeepEqual(traits, wantTraits) {
 				t.Errorf("Traits() = %+v, want %+v", traits, wantTraits)
 			}

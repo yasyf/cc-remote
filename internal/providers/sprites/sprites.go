@@ -42,6 +42,7 @@ const (
 	containerMemoryHigh = containerMemoryMax - 512<<20
 	goBuildJobs         = 3
 	goMemoryLimit       = 3 << 29
+	goCacheFloor        = 3 << 30
 )
 
 var unusedImageAgents = []string{
@@ -136,6 +137,7 @@ func (p *Provider) Traits() providers.Traits {
 		Supervisor:       providers.SupervisorSpriteEnv,
 		GoBuildJobs:      goBuildJobs,
 		GoMemoryLimit:    goMemoryLimit,
+		GoCacheFloor:     goCacheFloor,
 		MemoryMax:        containerMemoryMax,
 		MemoryHigh:       containerMemoryHigh,
 		LocalDisk:        localDisk,

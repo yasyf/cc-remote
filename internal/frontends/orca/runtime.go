@@ -52,6 +52,7 @@ type Runtime struct {
 	Restart       bool
 	GoBuildJobs   int
 	GoMemoryLimit int64
+	GoCacheFloor  int64
 }
 
 type Ready struct {
@@ -129,17 +130,28 @@ func (r Runtime) Launcher() string {
 	if r.GoMemoryLimit > 0 {
 		lines = append(lines, "export GOMEMLIMIT="+strconv.FormatInt(r.GoMemoryLimit, 10))
 	}
-	return strings.Join(append(lines,
+	lines = append(lines,
 		`cd "`+runtimeDir+`"`,
 		images.MountPayloadScript+" 2>> serve.log || :",
 		"exec 9> serve.lock",
 		"flock -n 9 || exit 0",
+		"trim=",
+	)
+	if r.GoCacheFloor > 0 {
+		lines = append(lines,
+			"if command -v go > /dev/null; then",
+			`  ( while :; do test "$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')" -ge `+strconv.FormatInt(r.GoCacheFloor>>10, 10)+` || go clean -cache; sleep 60; done ) > /dev/null 2>&1 9>&- &`,
+			"  trim=$!",
+			"fi",
+		)
+	}
+	return strings.Join(append(lines,
 		"say() {",
 		`  printf '%s\n' "$1" >&2`,
 		`  printf '%s\n' "$1" >> serve.log || :`,
 		"}",
 		"child=",
-		`trap 'kill "$child" 2> /dev/null || :; wait "$child" 2> /dev/null || :; exit 143' HUP INT TERM`,
+		`trap 'kill "$child" $trim 2> /dev/null || :; wait "$child" 2> /dev/null || :; exit 143' HUP INT TERM`,
 		"delay=1",
 		"while :; do",
 		"  logged=0",

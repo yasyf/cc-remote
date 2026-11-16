@@ -166,7 +166,8 @@ grown to 2.6 GiB, while the root filesystem had 90 GiB free. The build cache and
 temporary build directory stay on the volume, at `~/.cache/go-build` and
 `~/.cache/go-tmp`: the root filesystem's writable layer is a network block
 device whose writes average about 200 ms, and heavy build writes there time it
-out and wedge the machine.  Elsewhere Go keeps
+out and wedge the machine. The Orca runtime's launcher checks the volume every
+minute and runs `go clean -cache` when less than 3 GiB is free.  Elsewhere Go keeps
 its caches in the home, and the install moves a cache that sits outside it to
 `$HOME/.cache/go-mod` or `$HOME/.cache/go-build`.
 
