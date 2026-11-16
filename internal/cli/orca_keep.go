@@ -74,7 +74,10 @@ var installedKeeper = func(ctx context.Context, dir state.Dir) (successor, bool)
 	return newest, newest.Version != ""
 }
 
-var execKeeper = func(next successor) error {
+var execKeeper = func(dir state.Dir, next successor) error {
+	if err := os.Chdir(string(dir)); err != nil {
+		return err
+	}
 	return syscall.Exec(next.Binary, []string{next.Binary, "orca", "keep", "--config", next.Config}, os.Environ())
 }
 
@@ -230,10 +233,7 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 		}
 		if next != nil {
 			log.Info("handing the keeper to a newer release", "version", next.Version, "binary", next.Binary)
-			if err := os.Chdir(string(dir)); err != nil {
-				return err
-			}
-			err := execKeeper(*next)
+			err := execKeeper(dir, *next)
 			log.Warn("the newer keeper did not start, so this one keeps holding", "version", next.Version, "binary", next.Binary, "error", err)
 			if err := os.Remove(dir.OrcaKeeperSuccessor()); err != nil {
 				return err

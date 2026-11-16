@@ -558,7 +558,7 @@ func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
 	w.keptLanes("lane-a")
 	var started []successor
 	original := execKeeper
-	execKeeper = func(next successor) error {
+	execKeeper = func(_ state.Dir, next successor) error {
 		started = append(started, next)
 		return errors.New("exec refused")
 	}
@@ -605,7 +605,7 @@ func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
 
 func TestTheInstalledKeeperIsTheNewestReleaseOnPathAskedFromTheStateDirectory(t *testing.T) {
 	dir := state.Dir(t.TempDir())
-	var path []string
+	path := make([]string, 0, 6)
 	for i, script := range []string{
 		"echo 0.27.57",
 		`[ "$PWD" = "` + string(dir) + `" ] && echo 0.27.68 || echo 0.27.1`,

@@ -293,9 +293,11 @@ checkout() {
 }
 
 localize_plugins() {
-  local market="$1" repo="$2" access="$3" dir="$marketplace_dir/$1" manifest id name url path ref unpacked
+  local market="$1" repo="$2" access="$3" dir="$marketplace_dir/$1" manifest localized id name url path ref unpacked
   shift 3
-  manifest="$(git -C "$dir" cat-file blob HEAD:.claude-plugin/marketplace.json)" || exit
+  [ -f "$dir/.claude-plugin/marketplace.json" ] || return 0
+  manifest="$(cat "$dir/.claude-plugin/marketplace.json")" || exit
+  localized="$manifest"
   for id in "$@"; do
     [ "${id#*@}" = "$market" ] || continue
     name="${id%@*}"
@@ -315,7 +317,9 @@ localize_plugins() {
     git -C "$dir" archive "FETCH_HEAD:$path" | tar -x -C "$unpacked"
     manifest="$(jq --arg name "$name" '.plugins |= map(if .name == $name then .source = "./.cc-remote-plugins/\($name)" else . end)' <<< "$manifest")"
   done
-  printf '%s\n' "$manifest" > "$dir/.claude-plugin/marketplace.json"
+  if [ "$manifest" != "$localized" ]; then
+    printf '%s\n' "$manifest" > "$dir/.claude-plugin/marketplace.json"
+  fi
 }
 
 recorded_source() {
