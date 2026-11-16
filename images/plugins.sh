@@ -20,6 +20,23 @@ trap 'status=$?; drain_artifacts || status=$?; rm -rf "$tmp_dir"; exit "$status"
 export PATH="$bin_dir:$PATH"
 
 {{template "artifacts.sh"}}
+{{- if wrapped .Tools}}
+
+install_wrapper() {
+  local staged
+  staged="$(mktemp "$1.XXXXXX")"
+  printf '%s' "$2" > "$staged"
+  chmod 0755 "$staged"
+  mv -fT "$staged" "$1"
+}
+
+verify_wrapper() {
+  if [ -L "$1" ] || [ ! -f "$1" ] || [ ! -x "$1" ]; then
+    echo "cc-remote: $1 is not an executable wrapper script" >&2
+    exit 1
+  fi
+}
+{{- end}}
 shq() {
   printf "'%s'" "${1//\'/\'\\\'\'}"
 }
@@ -756,6 +773,11 @@ run_install() {
   queue_artifact {{install . "tool_dir" "bin_dir"}}
 {{- end}}
   drain_artifacts
+{{- range .Tools}}
+{{- range wrappers . "bin_dir"}}
+  {{.}}
+{{- end}}
+{{- end}}
 {{- range .Links}}
   ln -sfn "$system_bin_dir/"{{q .}} "$bin_dir/"{{q .}}
 {{- end}}

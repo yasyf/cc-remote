@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -105,7 +106,10 @@ type Artifact struct {
 	Format  Format            `yaml:"format"`
 	Dest    string            `yaml:"dest"`
 	Bins    map[string]string `yaml:"bins"`
+	Wrap    map[string]string `yaml:"wrap"`
 	Verify  []string          `yaml:"verify"`
+
+	wrappers map[string]string
 }
 
 type Python struct {
@@ -185,7 +189,38 @@ func Load(file string) (Inventory, error) {
 	if err != nil {
 		return Inventory{}, fmt.Errorf("read inventory: %w", err)
 	}
-	return Parse(raw)
+	inventory, err := Parse(raw)
+	if err != nil {
+		return Inventory{}, err
+	}
+	if err := inventory.readWrappers(filepath.Dir(file)); err != nil {
+		return Inventory{}, fmt.Errorf("inventory: %w", err)
+	}
+	return inventory, nil
+}
+
+func (inv Inventory) readWrappers(dir string) error {
+	groups := make([][]Artifact, 0, 1+len(inv.Profiles))
+	groups = append(groups, inv.Tools)
+	for _, name := range slices.Sorted(maps.Keys(inv.Profiles)) {
+		groups = append(groups, inv.Profiles[name].Tools)
+	}
+	for _, tools := range groups {
+		for i := range tools {
+			a := &tools[i]
+			for _, bin := range slices.Sorted(maps.Keys(a.Wrap)) {
+				script, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(a.Wrap[bin])))
+				if err != nil {
+					return fmt.Errorf("%s wrapper for %s: %w", a.Name, bin, err)
+				}
+				if a.wrappers == nil {
+					a.wrappers = map[string]string{}
+				}
+				a.wrappers[bin] = string(script)
+			}
+		}
+	}
+	return nil
 }
 
 func Parse(raw []byte) (Inventory, error) {
@@ -468,6 +503,8 @@ func (a Artifact) validate(where string, system bool) error {
 		return fmt.Errorf("%s: dest applies only to tools", where)
 	case a.Dest != "" && !relative(a.Dest):
 		return fmt.Errorf("%s: dest %q is not a clean path relative to $HOME", where, a.Dest)
+	case len(a.Wrap) > 0 && system:
+		return fmt.Errorf("%s: wrap applies only to tools", where)
 	}
 	if err := httpsURL(a.URL); err != nil {
 		return fmt.Errorf("%s: %w", where, err)
@@ -497,14 +534,31 @@ func (a Artifact) validate(where string, system bool) error {
 	default:
 		return fmt.Errorf("%s: format %q is not one of binary, gzip, tar.gz, tar.xz, zip, deb", where, a.Format)
 	}
+	bins := a.bins()
+	for _, bin := range slices.Sorted(maps.Keys(a.Wrap)) {
+		if _, ok := bins[bin]; !ok {
+			return fmt.Errorf("%s: wrap %q is not one of the artifact's bins", where, bin)
+		}
+		if !relative(a.Wrap[bin]) {
+			return fmt.Errorf("%s: wrap %q script %q is not a clean path relative to the inventory", where, bin, a.Wrap[bin])
+		}
+	}
 	return nil
 }
 
 func (a Artifact) links() []string {
-	if len(a.Bins) == 0 && a.Format != Deb {
-		return []string{a.Name}
+	links := slices.Sorted(maps.Keys(a.bins()))
+	for _, bin := range slices.Sorted(maps.Keys(a.Wrap)) {
+		links = append(links, a.link(bin))
 	}
-	return slices.Sorted(maps.Keys(a.Bins))
+	return links
+}
+
+func (a Artifact) link(bin string) string {
+	if _, ok := a.Wrap[bin]; ok {
+		return bin + ".real"
+	}
+	return bin
 }
 
 func (a Artifact) bins() map[string]string {

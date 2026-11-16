@@ -1,7 +1,10 @@
 package images
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -246,6 +249,13 @@ func TestValidateRejects(t *testing.T) {
 		{"profile tool dir clash", func(i *Inventory) {
 			i.Profiles["stack"].Tools[0].Dest = ".local/share/cc-remote/tools/jq-1.8.2"
 		}, "profiles.stack.tools[kind]: installs into $HOME/.local/share/cc-remote/tools/jq-1.8.2, which overlaps $HOME/.local/share/cc-remote/tools/jq-1.8.2 owned by tools[jq]"},
+		{"system wrap", func(i *Inventory) { i.System[1].Wrap = map[string]string{"claude": "claude.sh"} }, "system[claude]: wrap applies only to tools"},
+		{"wrap of a missing bin", func(i *Inventory) { i.Tools[0].Wrap = map[string]string{"yq": "yq.sh"} }, `tools[jq]: wrap "yq" is not one of the artifact's bins`},
+		{"escaping wrap script", func(i *Inventory) { i.Tools[0].Wrap = map[string]string{"jq": "../jq.sh"} }, `tools[jq]: wrap "jq" script "../jq.sh" is not a clean path relative to the inventory`},
+		{"wrapped bin clashes with a real link", func(i *Inventory) {
+			i.Tools[0].Wrap = map[string]string{"jq": "jq.sh"}
+			i.Tools[1].Bins["jq.real"] = "jq"
+		}, `tools[cookiesync]: bin "jq.real" is already installed by tools[jq]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -311,5 +321,39 @@ func TestToolDir(t *testing.T) {
 	}
 	if _, err := inv.ToolDir("lean", "browser"); err == nil || !strings.Contains(err.Error(), "profiles.lean.tools") {
 		t.Errorf("a tool of another profile resolved: %v", err)
+	}
+}
+
+func TestLoadReadsWrappersBesideTheInventory(t *testing.T) {
+	inv, err := Load("testdata/wrap/inventory.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile("testdata/wrap/gh-shim.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inv.Tools[0].wrappers["gh"]; got != string(script) {
+		t.Errorf("tools[gh] wrapper = %q, want the script beside the inventory %q", got, script)
+	}
+	if got := inv.Profiles["stack"].Tools[0].wrappers["kind"]; got != string(script) {
+		t.Errorf("profiles.stack.tools[kind] wrapper = %q, want %q", got, script)
+	}
+	if links := inv.Tools[0].links(); !slices.Equal(links, []string{"gh", "gh.real"}) {
+		t.Errorf("links = %v, want the wrapper and the real binary", links)
+	}
+}
+
+func TestLoadRejectsAMissingWrapper(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := os.ReadFile("testdata/wrap/inventory.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "inventory.yaml"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filepath.Join(dir, "inventory.yaml")); err == nil || !strings.Contains(err.Error(), "gh wrapper for gh") {
+		t.Fatalf("Load = %v, want the missing gh wrapper named", err)
 	}
 }
