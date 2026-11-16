@@ -90,7 +90,13 @@ contents and does not run the tool or its `verify` arguments.
 
 A `ref` marketplace uses a 40-character commit that cc-remote fetches into its
 own checkout for directory registration; Python tools cannot install from a
-`branch` marketplace because it has no pinned checkout. A `branch` marketplace
+`branch` marketplace because it has no pinned checkout. A pinned plugin whose
+entry in a `ref` marketplace is a `git-subdir` source in that same repository is
+fetched at its own `ref` and unpacked into the checkout's `.cc-remote-plugins/`,
+and the checkout's manifest points the entry at that directory. Claude Code
+reuses one clone for every `git-subdir` plugin of a repository, so installing
+those plugins straight from the manifest gave each the commit of whichever
+installed first, in files and in the version it reported. A `branch` marketplace
 has no commit pin and is registered through Claude Code as `owner/repo#<branch>`
 because Claude Code clones sources with `git clone --branch` and cannot use a
 40-character commit as a GitHub ref. `claude-plugins-official` publishes no tags

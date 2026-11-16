@@ -292,6 +292,32 @@ checkout() {
   git -C "$dir" checkout -q FETCH_HEAD
 }
 
+localize_plugins() {
+  local market="$1" repo="$2" access="$3" dir="$marketplace_dir/$1" manifest id name url path ref unpacked
+  shift 3
+  manifest="$(git -C "$dir" cat-file blob HEAD:.claude-plugin/marketplace.json)" || exit
+  for id in "$@"; do
+    [ "${id#*@}" = "$market" ] || continue
+    name="${id%@*}"
+    IFS=$'\t' read -r url path ref < <(jq -r --arg name "$name" '.plugins[] | select(.name == $name and (.source | type) == "object" and .source.source == "git-subdir") | [.source.url, .source.path, .source.ref] | @tsv' <<< "$manifest") || continue
+    case "$url" in
+      "https://github.com/$repo" | "https://github.com/$repo.git") ;;
+      *) continue ;;
+    esac
+    if [ "$access" = private ]; then
+      with_github_token git -C "$dir" fetch -q --depth 1 "https://github.com/$repo.git" "$ref"
+    else
+      git -C "$dir" fetch -q --depth 1 "https://github.com/$repo.git" "$ref"
+    fi
+    unpacked="$dir/.cc-remote-plugins/$name"
+    rm -rf "$unpacked"
+    mkdir -p "$unpacked"
+    git -C "$dir" archive "FETCH_HEAD:$path" | tar -x -C "$unpacked"
+    manifest="$(jq --arg name "$name" '.plugins |= map(if .name == $name then .source = "./.cc-remote-plugins/\($name)" else . end)' <<< "$manifest")"
+  done
+  printf '%s\n' "$manifest" > "$dir/.claude-plugin/marketplace.json"
+}
+
 recorded_source() {
 {{- if .Closure}}
   marketplace_source "$known" "$1"
@@ -739,6 +765,7 @@ run_install() {
 {{- range .Claude.Marketplaces}}
 {{- if .Ref}}
   checkout {{q .Name}} {{q .GitHub}} {{q .Ref}} {{if .Private}}private{{else}}public{{end}}
+  localize_plugins {{q .Name}} {{q .GitHub}} {{if .Private}}private{{else}}public{{end}}{{range $.Claude.Plugins}} {{q .ID}}{{end}}
   pin_ref_marketplace {{q .Name}}
 {{- else}}
   pin_branch_marketplace {{q .Name}} {{q .GitHub}} {{q .Branch}}

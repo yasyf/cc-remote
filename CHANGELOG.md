@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Each pinned plugin from a `ref` marketplace installs at its own ref.** Claude
+  Code reuses one clone for every `git-subdir` plugin of a repository, so a
+  Sprite payload installed `orca@skills` 0.1.85 from long-running's tag commit
+  and reported `0.1.85-fd385d71b5c5`, and which commit it got changed from build
+  to build. cc-remote now fetches each such plugin at its own `ref`, unpacks it
+  into the marketplace checkout and points the manifest entry at that
+  directory.
+
 ### Changed
 - **The Orca keeper runs the newest installed cc-remote, not the pin of the
   repository that launched it.** A launch from a checkout pinned to 0.27.57 kept
