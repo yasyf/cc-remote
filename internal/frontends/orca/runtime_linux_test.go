@@ -69,24 +69,25 @@ func TestAgentCommandPointsCcxAtTheGitHubAppTokenFileKeepWrites(t *testing.T) {
 }
 
 func TestAgentCommandPointsAWSAtTheSessionItWroteToMemory(t *testing.T) {
-	const file, config = "/dev/shm/cc-remote/aws.json", "/dev/shm/cc-remote/aws-config"
+	const file, config, keys = "/dev/shm/cc-remote/aws.json", "/dev/shm/cc-remote/aws-config", "/dev/shm/cc-remote/aws-credentials"
 	if _, err := os.Stat(file); err == nil {
 		t.Skip("a worker on this machine reads " + file)
 	}
 	t.Cleanup(func() {
 		_ = os.Remove(file)
 		_ = os.Remove(config)
+		_ = os.Remove(keys)
 	})
 	worker := `#!/bin/sh
 process=$(sed -n 's/^credential_process = //p' "$AWS_CONFIG_FILE" 2>/dev/null)
-printf '%s|%s|%s|%s\n' "${AWS_CONFIG_FILE-unset}" "$(sh -c "$process" 2>/dev/null)" "$(stat -c %a ` + file + ` 2>/dev/null)" "${aws-unset}"
+printf '%s|%s|%s|%s|%s|%s\n' "${AWS_CONFIG_FILE-unset}" "$(sh -c "$process" 2>/dev/null)" "$(stat -c %a ` + file + ` 2>/dev/null)" "${aws-unset}" "${AWS_SHARED_CREDENTIALS_FILE-unset}" "$(tr '\n' , < "${AWS_SHARED_CREDENTIALS_FILE:-/nowhere}" 2>/dev/null)"
 `
 	session := `{"Version":1,"AccessKeyId":"ASIA-sentinel","SecretAccessKey":"secret","SessionToken":"token","Expiration":"2026-11-12T17:07:15Z"}`
 	tests := []struct {
 		name, kind, payload, want string
 	}{
-		{"codex without a session", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "unset|||unset"},
-		{"claude with a session", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n\n\n\n\n\n" + session + "\n", config + "|" + session + "|600|unset"},
+		{"codex without a session", orca.AgentCodex, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n", "unset|||unset|unset|"},
+		{"claude with a session", orca.AgentClaude, "sk-test-key\n\n\ngho-key\nAda O'Launcher\nada@example.test\n\n\n\n\n\n" + session + "\n", config + "|" + session + "|600|unset|" + keys + "|[default],aws_access_key_id = ASIA-sentinel,aws_secret_access_key = secret,aws_session_token = token,"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
