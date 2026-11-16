@@ -36,7 +36,7 @@ func CreateServiceFunc(spriteEnv string) string {
   umask 077
   buffers="$(mktemp -d)"
   trap 'rm -rf "$buffers"' EXIT
-  flag= cmd= args= needs=
+  flag='' cmd='' args='' needs=''
   for word in "$@"; do
     case "$flag" in
       --cmd) cmd=$word ;;
