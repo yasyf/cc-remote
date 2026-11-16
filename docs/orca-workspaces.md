@@ -446,7 +446,9 @@ above the longest one seen: 20 minutes for a payload or packages download or
 upload, 5 for binding the home volume, 2 for each Codex hook probe and trust
 grant, 5 for starting the Orca runtime, and so on for each create phase, so a
 `sprite exec` that stops answering fails its step instead of holding the launch.
-A whole `orca create` or `orca prepare` stops after 30 minutes, and one whose
+A `--before-worker-file` script gets 20 minutes and the worker's guest
+bootstrap 5. A whole `orca create` or `orca prepare` stops after 30 minutes,
+`orca collect` after 10 and `orca reconnect` after 5, and a launch whose
 launcher exits stops within 5 seconds of it, so an orphaned launch never holds
 its workspace or keeps Orca's database guard waiting.
 

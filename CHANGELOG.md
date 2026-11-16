@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.26.11 fixes it.
 
 ### Fixed
+- **The launch steps left to the 30-minute ceiling get their own deadlines.**
+  A `--before-worker-file` script gets 20 minutes, the worker's guest
+  bootstrap its 3-minute poll plus 2, and the key directory read 2. `orca
+  collect` stops after 10 minutes and `orca reconnect` after 5. In `jobs`, the
+  GitHub credential store gets a minute and the configured reset 10.
 - **A stuck `sprite exec` no longer holds a launch forever.** Each create
   phase, the home-volume bind, the wake, the Codex hook probe and trust grant,
   the bootstrap helper steps, the checkout checks, the Orca runtime start, and
