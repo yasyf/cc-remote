@@ -261,12 +261,16 @@ const (
 	awsVariable       = "AWS_CONFIG_FILE"
 	awsFile           = memoryDir + "/aws.json"
 	awsConfigFile     = memoryDir + "/aws-config"
+	awsKeysVariable   = "AWS_SHARED_CREDENTIALS_FILE"
+	awsKeysFile       = memoryDir + "/aws-credentials"
 )
 
 var (
 	GitHubAppScript = memoryScript(GitHubAppFile)
-	AWSScript       = memoryScript(awsFile)
+	AWSScript       = memoryScript(awsFile) + " && " + awsKeysScript
 )
+
+const awsKeysScript = `tmp=$(mktemp ` + awsKeysFile + `.XXXXXX) && { echo "[default]"; for pair in AccessKeyId:aws_access_key_id SecretAccessKey:aws_secret_access_key SessionToken:aws_session_token; do sed -n "s/.*\"${pair%%:*}\":\"\([^\"]*\)\".*/${pair#*:} = \1/p" ` + awsFile + `; done; } > "$tmp" && mv "$tmp" ` + awsKeysFile
 
 func memoryScript(file string) string {
 	return `umask 077 && mkdir -p ` + memoryDir + ` && tmp=$(mktemp ` + file + `.XXXXXX) && cat > "$tmp" && mv "$tmp" ` + file
@@ -277,7 +281,7 @@ var githubVariables = []string{"GH_TOKEN", "GITHUB_TOKEN"}
 var envAssignment = regexp.MustCompile(`^([A-Z_][A-Z0-9_]*)=[A-Za-z0-9+/=:._@-]+$`)
 
 func EnvLine(out []byte) ([]byte, error) {
-	owned := slices.Concat(CredentialEnv(), []string{trunkVariable, geminiVariable, githubAppVariable, awsVariable}, githubVariables)
+	owned := slices.Concat(CredentialEnv(), []string{trunkVariable, geminiVariable, githubAppVariable, awsVariable, awsKeysVariable}, githubVariables)
 	var assignments [][]byte
 	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte{'\n'}) {
 		match := envAssignment.FindSubmatch(line)
@@ -465,7 +469,7 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 	}
 	script := strings.Join([]string{
 		"{ { IFS= read -r key; IFS= read -r judge || judge=; IFS= read -r typesafe || typesafe=; IFS= read -r github || github=; IFS= read -r name; IFS= read -r email; IFS= read -r trunk || trunk=; IFS= read -r gemini || gemini=; IFS= read -r login || login=; IFS= read -r environment || environment=; IFS= read -r app || app=; IFS= read -r aws || aws=; } < " + remote.Quote(dir+"/key") + "; rm -rf " + remote.Quote(dir) + `; test -n "$key"; }`,
-		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable, githubAppVariable, awsVariable}, githubVariables), " "),
+		"unset " + strings.Join(slices.Concat(a.cleared(), []string{judge.variable()}, judge.cleared(), []string{typesafeVariable, trunkVariable, geminiVariable, githubAppVariable, awsVariable, awsKeysVariable}, githubVariables), " "),
 		"export " + a.variable() + `="$key"`,
 		`{ test -z "$judge" || { ` + judgeKey + `; }; }`,
 		`{ test -z "$typesafe" || export ` + typesafeVariable + `="$typesafe"; }`,
@@ -476,7 +480,7 @@ func (a Agent) Command(dir string, policy ShellPolicy) string {
 		`{ test -z "$login" || gh config set -h github.com user "$login"; }`,
 		`{ test -z "$environment" || export $environment; }`,
 		`{ test -z "$app" || export ` + githubAppVariable + `="$app"; }`,
-		`{ test -z "$aws" || { printf '%s' "$aws" | (` + AWSScript + `) && printf '[default]\ncredential_process = cat ` + awsFile + `\n' > ` + awsConfigFile + ` && export ` + awsVariable + `=` + awsConfigFile + `; }; }`,
+		`{ test -z "$aws" || { printf '%s' "$aws" | (` + AWSScript + `) && printf '[default]\ncredential_process = cat ` + awsFile + `\n' > ` + awsConfigFile + ` && export ` + awsVariable + `=` + awsConfigFile + ` ` + awsKeysVariable + `=` + awsKeysFile + `; }; }`,
 		"unset key judge typesafe github trunk gemini name email login environment app aws",
 		"export " + strings.Join(a.exports(), " "),
 		"exec " + remote.QuoteAll(a.Argv(policy)),

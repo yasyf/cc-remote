@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A worker's AWS session also lands in a shared credentials file.** Next to
+  `/dev/shm/cc-remote/aws.json`, the worker's terminal and each `orca keep`
+  renewal write `/dev/shm/cc-remote/aws-credentials`, holding the session as
+  static key lines, and the worker exports `AWS_SHARED_CREDENTIALS_FILE`
+  naming it. sccache 0.18's S3 backend refuses `credential_process` ("no
+  command executor configured"), so before this a lane's sccache could not
+  reach a shared cache bucket.
 - **`orca prepare --resume-transcript <session-id>.jsonl` resumes a Claude
   session on a fresh machine.** A drive lane whose Sprite was lost or
   destroyed was relaunched from scratch on a new one, losing its whole

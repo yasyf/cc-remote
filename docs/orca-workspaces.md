@@ -189,7 +189,11 @@ prints, with its `Expiration`. The worker's terminal writes the session to
 `/dev/shm/cc-remote/aws-config`, whose default profile reads that file through
 `credential_process = cat /dev/shm/cc-remote/aws.json`, and exports
 `AWS_CONFIG_FILE` naming it, so the AWS CLI and SDKs on the worker sign with the
-session and read the file again once the session they hold expires. Once the
+session and read the file again once the session they hold expires. It also
+writes the same keys as static `aws_access_key_id`, `aws_secret_access_key`
+and `aws_session_token` lines to `/dev/shm/cc-remote/aws-credentials` and
+exports `AWS_SHARED_CREDENTIALS_FILE` naming it, for a client that cannot run
+`credential_process`, such as sccache 0.18's S3 backend. Once the
 session it last printed has under an hour left, `cc-remote orca keep` runs the
 command of each kept worker's config again and writes the new session into that
 worker's file, so a worker's AWS access lasts as long as the worker while the
