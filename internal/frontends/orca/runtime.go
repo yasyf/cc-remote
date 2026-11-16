@@ -51,6 +51,7 @@ type Runtime struct {
 	Supervised      bool
 	Restart         bool
 	GoBuildJobs     int
+	CargoBuildJobs  int
 	GoMemoryLimit   int64
 	BuildCacheFloor int64
 }
@@ -126,6 +127,9 @@ func (r Runtime) Launcher() string {
 	}
 	if r.GoBuildJobs > 0 {
 		lines = append(lines, "export GOFLAGS=-p="+strconv.Itoa(r.GoBuildJobs))
+	}
+	if r.CargoBuildJobs > 0 {
+		lines = append(lines, "export CARGO_BUILD_JOBS="+strconv.Itoa(r.CargoBuildJobs))
 	}
 	if r.GoMemoryLimit > 0 {
 		lines = append(lines, "export GOMEMLIMIT="+strconv.FormatInt(r.GoMemoryLimit, 10))

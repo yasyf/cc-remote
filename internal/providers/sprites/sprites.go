@@ -41,6 +41,7 @@ const (
 	containerMemoryMax  = 8 << 30
 	containerMemoryHigh = containerMemoryMax - 512<<20
 	goBuildJobs         = 3
+	cargoBuildJobs      = 2
 	goMemoryLimit       = 3 << 29
 	buildCacheFloor     = 3 << 30
 )
@@ -136,6 +137,7 @@ func (p *Provider) Traits() providers.Traits {
 		TailnetMode:      providers.TailnetKernel,
 		Supervisor:       providers.SupervisorSpriteEnv,
 		GoBuildJobs:      goBuildJobs,
+		CargoBuildJobs:   cargoBuildJobs,
 		GoMemoryLimit:    goMemoryLimit,
 		BuildCacheFloor:  buildCacheFloor,
 		MemoryMax:        containerMemoryMax,

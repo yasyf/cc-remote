@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token, now passes `--stdin`.
 
 ### Fixed
+- **A Sprite lane's cargo builds run two jobs at a time.** The Orca runtime
+  exports `CARGO_BUILD_JOBS=2` on Sprites, from a new `CargoBuildJobs` trait
+  beside `GoBuildJobs`. Cargo ran as many jobs as the Sprite had CPUs, and a
+  build of bundled DuckDB ran each `cc1plus` at 0.4 to 1.4 GB, so three Sprites
+  sat at the 7.5 GiB `memory.high` throttle until ssh stopped answering. A
+  runtime already running keeps its environment until it restarts.
 - **Prepare on a kept Sprite replaces a service whose definition changed, and
   starts one that stopped.** Creating a service that already exists answers
   "Service already running with that command" even when its command, arguments

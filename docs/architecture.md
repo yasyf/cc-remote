@@ -146,12 +146,15 @@ stay. A workload past the throttle level is slowed inside the container while
 the daemon keeps its memory. The throttle level is what keeps the machine up: on
 a scratch Sprite a 10 GiB allocation crawled at 7.5 GiB for five minutes and the
 machine kept running, and the same allocation under the cap alone restarted it.
-The provider also names `GoBuildJobs` and `GoMemoryLimit`, 3 and 1.5 GiB on
-Sprites, which the Orca runtime exports as `GOFLAGS=-p=3` and `GOMEMLIMIT` to
-every lane, so a Go build or test runs three jobs at a time and each Go process
-collects its garbage before it passes 1.5 GiB. A cold `go build ./...` of this
-repository took 28.3 s at `-p=2` and 23.9 s at `-p=3` on a pool Sprite, with
-no `memory.high` events.
+The provider also names `GoBuildJobs`, `CargoBuildJobs` and `GoMemoryLimit`, 3,
+2 and 1.5 GiB on Sprites, which the Orca runtime exports as `GOFLAGS=-p=3`,
+`CARGO_BUILD_JOBS=2` and `GOMEMLIMIT` to every lane, so a Go build or test runs
+three jobs at a time, a cargo build two, the C and C++ its build scripts compile
+included, and each Go process collects its garbage before it passes 1.5 GiB. A
+cold `go build ./...` of this repository took 28.3 s at `-p=2` and 23.9 s at
+`-p=3` on a pool Sprite, with no `memory.high` events. A cargo build of bundled
+DuckDB ran each `cc1plus` at 0.4 to 1.4 GB, and as many at once as the Sprite had
+CPUs held three Sprites at the 7.5 GiB throttle until ssh stopped answering.
 
 Go's module cache and mise's data directory are the exceptions to the
 volume on a Sprite. The tool install points `GOMODCACHE` at
