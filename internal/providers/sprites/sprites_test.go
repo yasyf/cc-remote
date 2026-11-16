@@ -782,3 +782,52 @@ func TestDecodeKeyringReadsTheGoKeyringEncoding(t *testing.T) {
 		})
 	}
 }
+
+func TestProxyCommandStartsAStoppedSSHDAndReplaysWhatSSHSent(t *testing.T) {
+	dir := t.TempDir()
+	cli := filepath.Join(dir, "sprite")
+	started := filepath.Join(dir, "started")
+	script := "#!/bin/sh\ncase \"$1\" in\nexec) printf '%s\\n' \"$*\" > " + started + " ;;\nproxy) test -e " + started + " || { echo 'Error: failed to establish proxy connection: websocket: close 1011 (internal server error): failed to connect to localhost:22' >&2; exit 1; }; echo SSH-2.0-fake; exec cat ;;\nesac\n"
+	if err := os.WriteFile(cli, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssh := exec.Command(helper, "proxy", "--", cli, "proxy", "-o", "acme", "-s", "alpha", "-W", ":22")
+	var stderr strings.Builder
+	ssh.Stderr = &stderr
+	stdin, err := ssh.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := ssh.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ssh.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(stdin, "SSH-2.0-client\n"); err != nil {
+		t.Fatal(err)
+	}
+	want := "SSH-2.0-fake\nSSH-2.0-client\n"
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(stdout, got); err != nil || string(got) != want {
+		t.Errorf("proxy relayed %q, %v; want %q", got, err, want)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, stdout)
+	if err := ssh.Wait(); err != nil {
+		t.Fatalf("proxy: %v: %s", err, stderr.String())
+	}
+	if got, err := os.ReadFile(started); err != nil || string(got) != "exec -o acme -s alpha --no-port-forward -- sprite-env services start sshd --duration 1ms\n" {
+		t.Errorf("sshd start ran %q, %v", got, err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("a proxy that recovered still printed %q", stderr.String())
+	}
+}

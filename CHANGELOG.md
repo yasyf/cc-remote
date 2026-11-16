@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **ssh to a suspended Sprite starts its sshd again.** Suspending a Sprite stops
+  every service, sshd included, so the machine can pause. The next ssh woke it,
+  but `sprite proxy` answered `failed to connect to localhost:22`, and ssh
+  reported only `Connection closed by UNKNOWN port 65535`, the port it names for
+  any ProxyCommand connection. `cc-remote proxy` now holds what ssh sent until
+  the Sprite answers. On that error it runs `sprite-env services start sshd`
+  through `sprite exec`, retries up to three times a second apart, and replays
+  ssh's bytes to the new connection.
+
 ### Changed
 - **Go's build cache moves back to a Sprite's home volume, and builds run three
   jobs.** A Sprite's root filesystem writes to a network block device that

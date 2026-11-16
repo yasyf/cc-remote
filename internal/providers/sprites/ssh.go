@@ -5,14 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/yasyf/cc-remote/internal/providers"
 	"github.com/yasyf/cc-remote/internal/remote"
@@ -136,21 +137,127 @@ func Proxy(ctx context.Context, argv []string) error {
 	defer stop()
 	ctx, closed := context.WithCancel(ctx)
 	defer closed()
+	input := make(chan []byte)
+	go func() {
+		defer closed()
+		for {
+			chunk := make([]byte, 32<<10)
+			n, err := os.Stdin.Read(chunk)
+			if n > 0 {
+				select {
+				case input <- chunk[:n]:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	var early [][]byte
+	for attempt := 1; ; attempt++ {
+		answered, stderr, err := proxyOnce(ctx, argv, input, &early)
+		if ctx.Err() != nil {
+			_, _ = os.Stderr.Write(stderr)
+			return nil
+		}
+		if !answered && attempt < sshdStartTries && bytes.Contains(stderr, []byte(sshdDown)) {
+			if attempt == 1 {
+				stderr = append(stderr, startSSHD(ctx, argv)...)
+			}
+			if !bytes.Contains(stderr, []byte(sshdStartFailed)) {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(sshdStartPause):
+				}
+				continue
+			}
+		}
+		_, _ = os.Stderr.Write(stderr)
+		return err
+	}
+}
+
+const (
+	sshdDown        = "failed to connect to localhost:22"
+	sshdStartFailed = "cc-remote: could not start sshd"
+	sshdStartTries  = 4
+	sshdStartPause  = time.Second
+)
+
+func proxyOnce(ctx context.Context, argv []string, input <-chan []byte, early *[][]byte) (bool, []byte, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return false, nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return false, nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return false, nil, err
 	}
+	var answered atomic.Bool
+	copied := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(stdin, os.Stdin)
-		closed()
+		defer close(copied)
+		chunk := make([]byte, 32<<10)
+		for {
+			n, err := stdout.Read(chunk)
+			if n > 0 {
+				answered.Store(true)
+				if _, err := os.Stdout.Write(chunk[:n]); err != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
 	}()
-	if err := cmd.Wait(); ctx.Err() == nil {
-		return err
+	pumped := make(chan struct{})
+	go func() {
+		defer close(pumped)
+		for _, chunk := range *early {
+			if _, err := stdin.Write(chunk); err != nil {
+				return
+			}
+		}
+		for {
+			select {
+			case <-copied:
+				return
+			case chunk := <-input:
+				if !answered.Load() {
+					*early = append(*early, chunk)
+				}
+				if _, err := stdin.Write(chunk); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	<-copied
+	err = cmd.Wait()
+	<-pumped
+	return answered.Load(), stderr.Bytes(), err
+}
+
+func startSSHD(ctx context.Context, argv []string) []byte {
+	cmd := exec.CommandContext(ctx, argv[0], "exec")
+	for i := 1; i+1 < len(argv); i++ {
+		if argv[i] == "-o" || argv[i] == "-s" {
+			cmd.Args = append(cmd.Args, argv[i], argv[i+1])
+		}
+	}
+	cmd.Args = append(cmd.Args, "--no-port-forward", "--", "sprite-env", "services", "start", "sshd", "--duration", "1ms")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Appendf(nil, "%s: %v: %s\n", sshdStartFailed, err, bytes.TrimSpace(out))
 	}
 	return nil
 }
