@@ -65,6 +65,11 @@ func TestInstallCall(t *testing.T) {
 			`install_artifact 'orca' '1.4.215' 'https://example.com/orca.deb' sha512 '` + digest + digest + `' deb "$tool_dir/"'orca-1.4.215' "$bin_dir" 'orca' '/opt/Orca/orca-ide'`,
 		},
 		{
+			"wrapped archive",
+			Artifact{Name: "gh", Version: "2.102.0", URL: "https://example.com/gh.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"gh": "bin/gh"}, Wrap: map[string]string{"gh": "gh-shim.sh"}},
+			`install_artifact 'gh' '2.102.0' 'https://example.com/gh.tar.gz' sha256 '` + digest + `' tar.gz "$tool_dir/"'gh-2.102.0' "$bin_dir" 'gh.real' 'bin/gh'`,
+		},
+		{
 			"deb dependency without bins",
 			Artifact{Name: "git-man", Version: "2.56.0", URL: "https://example.com/git-man.deb", SHA256: digest, Format: Deb},
 			`install_artifact 'git-man' '2.56.0' 'https://example.com/git-man.deb' sha256 '` + digest + `' deb "$tool_dir/"'git-man-2.56.0' "$bin_dir"`,
@@ -106,6 +111,16 @@ func TestProbedCalls(t *testing.T) {
 				`probe "$system_bin_dir/"'uv' '--version'`,
 				`verify_link "$system_bin_dir/"'uvx' "$system_tool_dir/"'uv-0.1.0/uv/uvx'`,
 				`probe "$system_bin_dir/"'uvx' '--version'`,
+			},
+		},
+		{
+			name:     "wrapped tarball",
+			artifact: Artifact{Name: "gh", Version: "2.102.0", URL: "https://example.com/gh.tar.gz", SHA256: digest, Format: TarGz, Bins: map[string]string{"gh": "bin/gh"}, Wrap: map[string]string{"gh": "gh-shim.sh"}, Verify: []string{"--version"}},
+			want: []string{
+				`verify_pin "$system_tool_dir/"'gh-2.102.0' '` + digest + `'`,
+				`verify_link "$system_bin_dir/"'gh.real' "$system_tool_dir/"'gh-2.102.0/bin/gh'`,
+				`probe "$system_bin_dir/"'gh.real' '--version'`,
+				`verify_wrapper "$system_bin_dir/"'gh'`,
 			},
 		},
 		{
@@ -929,5 +944,41 @@ func TestFirstPackageRunRemovesSSHHostKeysBeforeItsLayerCommits(t *testing.T) {
 		if strings.Contains(later, "provision.sh packages") || strings.Contains(later, "provision.sh tools") {
 			t.Errorf("a later RUN installs packages after the host-key removal: %s", later)
 		}
+	}
+}
+
+func TestRenderInstallsWrappersOverTheirRealLinks(t *testing.T) {
+	inventory, err := Load("testdata/wrap/inventory.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripts, err := Render(inventory, "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins := string(scripts.Plugins)
+	for _, want := range []string{
+		"\ninstall_wrapper() {\n",
+		"\nverify_wrapper() {\n",
+		`"$bin_dir" 'gh.real' 'gh_2.102.0_linux_amd64/bin/gh'`,
+		"  drain_artifacts\n  install_wrapper \"$bin_dir/\"'gh' '#!/bin/sh\nexec \"$0.real\" \"$@\"\n'\n",
+		"  verify_link \"$bin_dir/\"'gh.real' \"$tool_dir/\"'gh-2.102.0/gh_2.102.0_linux_amd64/bin/gh' '--version'\n  verify_wrapper \"$bin_dir/\"'gh'\n",
+	} {
+		if !strings.Contains(plugins, want) {
+			t.Errorf("plugins.sh lacks %q", want)
+		}
+	}
+	if strings.Contains(plugins, `"$bin_dir" 'gh' `) {
+		t.Error("plugins.sh links the bare gh binary over its wrapper")
+	}
+	if strings.Contains(plugins, "'kind'") {
+		t.Error("the agents profile installs the stack profile's wrapper")
+	}
+	bare, err := Render(validInventory(), "agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bare.Plugins, []byte("wrapper")) {
+		t.Error("an inventory without wraps renders the wrapper functions")
 	}
 }

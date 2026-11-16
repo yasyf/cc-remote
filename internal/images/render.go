@@ -432,6 +432,8 @@ func parseFrom(fsys fs.FS, inv Inventory, files ...string) (*template.Template, 
 			return slices.ContainsFunc(artifacts, func(a Artifact) bool { return a.Format == Deb })
 		},
 		"verify":     verifyCalls,
+		"wrappers":   wrapperCalls,
+		"wrapped":    wrapped,
 		"probed":     probedCalls,
 		"expand":     expand,
 		"executable": serviceExecutable,
@@ -524,7 +526,7 @@ func installCall(a Artifact, toolDir, binDir string) string {
 		artifactDir(a, toolDir), `"$`+binDir+`"`,
 	)
 	for _, bin := range slices.Sorted(maps.Keys(bins)) {
-		words = append(words, quote(bin), quote(bins[bin]))
+		words = append(words, quote(a.link(bin)), quote(bins[bin]))
 	}
 	return strings.Join(words, " ")
 }
@@ -567,9 +569,24 @@ func linkCalls(a Artifact, toolDir, binDir string, check func(link, target strin
 				target = under(toolDir, a.dir()+"/"+bins[bin])
 			}
 		}
-		calls = append(calls, check(under(binDir, bin), target, args)...)
+		calls = append(calls, check(under(binDir, a.link(bin)), target, args)...)
+		if _, ok := a.Wrap[bin]; ok {
+			calls = append(calls, "verify_wrapper "+under(binDir, bin))
+		}
 	}
 	return calls
+}
+
+func wrapperCalls(a Artifact, binDir string) []string {
+	calls := make([]string, 0, len(a.Wrap))
+	for _, bin := range slices.Sorted(maps.Keys(a.Wrap)) {
+		calls = append(calls, "install_wrapper "+under(binDir, bin)+" "+quote(a.wrappers[bin]))
+	}
+	return calls
+}
+
+func wrapped(tools []Artifact) bool {
+	return slices.ContainsFunc(tools, func(a Artifact) bool { return len(a.Wrap) > 0 })
 }
 
 func serviceExecutable(s Service) string {
