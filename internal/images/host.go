@@ -97,7 +97,7 @@ set -eu
 exec 9> "$lock"
 flock 9
 if [ -e "$volume" ]; then
-  mount -o loop,discard,noatime,nosuid,nodev "$volume" "$disk"
+  mount -o discard,noatime,nosuid,nodev "\$(losetup --direct-io=on --find --show "$volume")" "$disk"
   chmod 1777 "$disk"
 fi
 if ! findmnt -n -o SOURCE --target "$disk" | grep -q '^/dev/loop'; then

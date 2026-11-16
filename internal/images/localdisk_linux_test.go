@@ -47,7 +47,8 @@ func newLocalDiskBox(t *testing.T) localDiskBox {
 	for name, script := range map[string]string{
 		"getent":     "#!/bin/sh\necho \"agent:x:1:1::" + box.home + ":/bin/sh\"\n",
 		"mountpoint": "#!/bin/sh\n[ -e " + box.mounted + " ]\n",
-		"mount":      "#!/bin/sh\necho \"$@\" >> " + box.mounts + "\ncase \"$*\" in\n  *--bind*) touch " + box.mounted + " ;;\n  *loop*) mv \"$3\" \"$3.covered\" ;;\nesac\n",
+		"mount":      "#!/bin/sh\necho \"$@\" >> " + box.mounts + "\ncase \"$*\" in\n  *--bind*) touch " + box.mounted + " ;;\n  */dev/loop7*) mv " + box.volume() + " " + box.volume() + ".covered ;;\nesac\n",
+		"losetup":    "#!/bin/sh\n[ \"$*\" = \"--direct-io=on --find --show " + box.volume() + "\" ] || exit 1\necho /dev/loop7\n",
 		"mkfs.ext4":  "#!/bin/sh\necho \"$@\" >> " + box.mkfs + "\n",
 		"findmnt":    "#!/bin/sh\necho /dev/vdb\n[ ! -e " + box.volume() + ".covered ] || echo /dev/loop0\n",
 		"sprite-env": "#!/bin/sh\necho \"$@\" >> " + box.services + "\ncase \"$2\" in\n" +
@@ -129,7 +130,7 @@ func TestTheMoveMountsTheVolumeCopiesTheHomeBindsItAndLinksTheStore(t *testing.T
 	if got, want := lines(t, box.mkfs), []string{"-q -m 0 -E nodiscard " + box.volume()}; !slices.Equal(got, want) {
 		t.Errorf("formatted %q, want %q", got, want)
 	}
-	want := []string{"-o loop,discard,noatime,nosuid,nodev " + box.volume() + " " + box.disk, "--bind " + copied + " " + box.home}
+	want := []string{"-o discard,noatime,nosuid,nodev /dev/loop7 " + box.disk, "--bind " + copied + " " + box.home}
 	if got := lines(t, box.mounts); !slices.Equal(got, want) {
 		t.Errorf("mounted %q, want %q", got, want)
 	}
