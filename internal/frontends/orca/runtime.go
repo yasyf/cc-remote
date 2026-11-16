@@ -270,7 +270,7 @@ var (
 	AWSScript       = memoryScript(awsFile) + " && " + awsKeysScript
 )
 
-const awsKeysScript = `tmp=$(mktemp ` + awsKeysFile + `.XXXXXX) && { echo "[default]"; for pair in AccessKeyId:aws_access_key_id SecretAccessKey:aws_secret_access_key SessionToken:aws_session_token; do sed -n "s/.*\"${pair%%:*}\":\"\([^\"]*\)\".*/${pair#*:} = \1/p" ` + awsFile + `; done; } > "$tmp" && mv "$tmp" ` + awsKeysFile
+const awsKeysScript = `tmp=$(mktemp ` + awsKeysFile + `.XXXXXX) && { echo "[default]"; for pair in AccessKeyId:aws_access_key_id SecretAccessKey:aws_secret_access_key SessionToken:aws_session_token; do printf '%s\n' "$(sed -n "s/.*\"${pair%%:*}\":\"\([^\"]*\)\".*/${pair#*:} = \1/p" ` + awsFile + `)"; done; } > "$tmp" && mv "$tmp" ` + awsKeysFile
 
 func memoryScript(file string) string {
 	return `umask 077 && mkdir -p ` + memoryDir + ` && tmp=$(mktemp ` + file + `.XXXXXX) && cat > "$tmp" && mv "$tmp" ` + file
