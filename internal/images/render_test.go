@@ -808,6 +808,36 @@ mise_data() {
     ln -sfnT "$root_cache_dir/mise" "$HOME/.local/share/mise"
   fi
 }`
+	const localizePlugins = `localize_plugins() {
+  local market="$1" repo="$2" access="$3" dir="$marketplace_dir/$1" manifest localized id name url path ref unpacked
+  shift 3
+  [ -f "$dir/.claude-plugin/marketplace.json" ] || return 0
+  manifest="$(cat "$dir/.claude-plugin/marketplace.json")" || exit
+  localized="$manifest"
+  for id in "$@"; do
+    [ "${id#*@}" = "$market" ] || continue
+    name="${id%@*}"
+    IFS=$'\t' read -r url path ref < <(jq -r --arg name "$name" '.plugins[] | select(.name == $name and (.source | type) == "object" and .source.source == "git-subdir") | [.source.url, .source.path, .source.ref] | @tsv' <<< "$manifest") || continue
+    case "$url" in
+      "https://github.com/$repo" | "https://github.com/$repo.git") ;;
+      *) continue ;;
+    esac
+    if [ "$access" = private ]; then
+      with_github_token git -C "$dir" fetch -q --depth 1 "https://github.com/$repo.git" "$ref"
+    else
+      git -C "$dir" fetch -q --depth 1 "https://github.com/$repo.git" "$ref"
+    fi
+    unpacked="$dir/.cc-remote-plugins/$name"
+    rm -rf "$unpacked"
+    mkdir -p "$unpacked"
+    git -C "$dir" archive "FETCH_HEAD:$path" | tar -x -C "$unpacked"
+    manifest="$(jq --arg name "$name" '.plugins |= map(if .name == $name then .source = "./.cc-remote-plugins/\($name)" else . end)' <<< "$manifest")"
+  done
+  if [ "$manifest" != "$localized" ]; then
+    printf '%s\n' "$manifest" > "$dir/.claude-plugin/marketplace.json"
+  fi
+}`
+	checkoutLine := regexp.MustCompile(`(?m)^(  checkout ('[^']*') ('[^']*') '[^']*' (public|private))$`)
 	before := os.DirFS("testdata/ddfe484")
 	files := []string{"artifacts.sh", "provision.sh", "plugins.sh", "supervise.py", "namespace/Dockerfile"}
 	for name, inv := range map[string]Inventory{"full": validInventory(), "bare": {Version: SchemaVersion}} {
@@ -842,17 +872,23 @@ mise_data() {
 					"    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    tar -xJf \"$download\" -C \"$(dirname \"$codex_runtime_root\")\"\n    rm -f \"$download\"\n", "    mkdir \"$staging\"\n    tar -xJf \"$download\" -C \"$staging\"\n    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    mv \"$staging/$(basename \"$codex_runtime_root\")\" \"$codex_runtime_root\"\n    rm -rf \"$staging\" \"$download\"\n",
 					"system_bin_dir=/usr/local/bin\n", "system_bin_dir=/usr/local/bin\nroot_cache_dir=/var/tmp/cc-remote\n",
 					"\nclaude_env() {\n", "\n"+goCaches+"\n\nclaude_env() {\n",
+					"\nrecorded_source() {\n", "\n"+localizePlugins+"\n\nrecorded_source() {\n",
 					"  mkdir -p \"$bin_dir\"\n", "  mkdir -p \"$bin_dir\"\n  go_caches\n  mise_data\n",
 					`select(.id == $id) | .installPath`, `select(.id == $id and .scope == "user") | .installPath`,
 					`select(.id == $id) | .version`, `select(.id == $id and .scope == "user") | .version`,
 					`select((.id | IN($ARGS.positional[]))`, `select(.scope == "user" and (.id | IN($ARGS.positional[]))`,
 				).Replace(string(want)))
+				ids := ""
+				for _, plugin := range inv.Claude.Plugins {
+					ids += " " + quote(plugin.ID)
+				}
+				want = checkoutLine.ReplaceAll(want, []byte("${1}\n  localize_plugins ${2} ${3} ${4}"+ids))
 				got, err := execute(now, r.template, r.data)
 				if err != nil {
 					t.Fatalf("render %s: %v", r.template, err)
 				}
 				if !bytes.Equal(got, want) {
-					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the creates that count an existing service as created, the single Debian transaction, the staged Codex runtime, the Go caches, the mise data and the user-scope plugin reads for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
+					t.Errorf("%s differs from the ddfe484 render plus the OpenSSL prerequisite, the service create report, the creates that count an existing service as created, the single Debian transaction, the staged Codex runtime, the Go caches, the mise data, the user-scope plugin reads and the localized git-subdir plugins for an inventory without apt.payload at %s", r.template, firstDifference(got, want))
 				}
 			}
 		})
