@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Go's build cache moves back to a Sprite's home volume, and builds run three
+  jobs.** A Sprite's root filesystem writes to a network block device that
+  averages about 200 ms a write, and heavy build writes there time it out and
+  wedge the machine. `GOCACHE` and `GOTMPDIR` now live at `~/.cache/go-build`
+  and `~/.cache/go-tmp` on the local volume, while `GOMODCACHE` stays under
+  `/var/tmp/cc-remote`. A `cc-remote-go-cache-trim` service runs `go clean
+  -cache` whenever the volume has less than 3 GiB free, checking every minute.
+  The Orca runtime exports `GOFLAGS=-p=3` and a 1.5 GiB `GOMEMLIMIT` on Sprites,
+  up from `-p=2` and 2 GiB: a cold build of this repository went from 28.3 s to
+  23.9 s on a pool Sprite with no `memory.high` events.
+
 ### Added
 - **A worker's AWS session also lands in a shared credentials file.** Next to
   `/dev/shm/cc-remote/aws.json`, the worker's terminal and each `orca keep`

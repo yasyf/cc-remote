@@ -774,13 +774,31 @@ create_service() {
   esac
 }
 
+trim_go_cache() {
+  local trim="$state_dir/go-cache-trim.sh"
+  mkdir -p "$state_dir"
+  cat > "$trim.tmp" <<SH
+#!/bin/sh
+while :; do
+  if [ "\$(df --output=avail -k $(shq "$HOME") | tail -n 1)" -lt $go_cache_floor_kib ]; then
+    GOCACHE=$(shq "$HOME/.cache/go-build") $(shq "$(command -v go)") clean -cache
+  fi
+  sleep 60
+done
+SH
+  chmod 755 "$trim.tmp"
+  mv "$trim.tmp" "$trim"
+  create_sprite_service cc-remote-go-cache-trim --cmd "$trim" --duration 1ms --no-stream > /dev/null
+}
+
 go_caches() {
   if ! command -v go > /dev/null; then
     return
   fi
   if command -v sprite-env > /dev/null; then
-    mkdir -p "$root_cache_dir/go-mod" "$root_cache_dir/go-build" "$root_cache_dir/go-tmp"
-    go env -w GOMODCACHE="$root_cache_dir/go-mod" GOCACHE="$root_cache_dir/go-build" GOTMPDIR="$root_cache_dir/go-tmp"
+    mkdir -p "$root_cache_dir/go-mod" "$HOME/.cache/go-build" "$HOME/.cache/go-tmp"
+    go env -w GOMODCACHE="$root_cache_dir/go-mod" GOCACHE="$HOME/.cache/go-build" GOTMPDIR="$HOME/.cache/go-tmp"
+    trim_go_cache
     return
   fi
   home_go_cache GOMODCACHE "$HOME/.cache/go-mod"
@@ -825,7 +843,7 @@ mise_data() {
 					"      deb) apt-get install -y -qq \"$download\" > /dev/null ;;\n", "      deb) deb_artifacts+=(\"$download\") ;;\n",
 					"download=\"$tmp_dir/codex-runtime.tar.xz\" plugin\n", "download=\"$tmp_dir/codex-runtime.tar.xz\" staging=\"$tmp_dir/codex-runtime\" plugin\n",
 					"    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    tar -xJf \"$download\" -C \"$(dirname \"$codex_runtime_root\")\"\n    rm -f \"$download\"\n", "    mkdir \"$staging\"\n    tar -xJf \"$download\" -C \"$staging\"\n    rm -rf \"$codex_runtime_root\"\n    mkdir -p \"$(dirname \"$codex_runtime_root\")\"\n    mv \"$staging/$(basename \"$codex_runtime_root\")\" \"$codex_runtime_root\"\n    rm -rf \"$staging\" \"$download\"\n",
-					"system_bin_dir=/usr/local/bin\n", "system_bin_dir=/usr/local/bin\nroot_cache_dir=/var/tmp/cc-remote\n",
+					"system_bin_dir=/usr/local/bin\n", "system_bin_dir=/usr/local/bin\nroot_cache_dir=/var/tmp/cc-remote\ngo_cache_floor_kib=$((3 * 1024 * 1024))\n",
 					"\nclaude_env() {\n", "\n"+goCaches+"\n\nclaude_env() {\n",
 					"  mkdir -p \"$bin_dir\"\n", "  mkdir -p \"$bin_dir\"\n  go_caches\n  mise_data\n",
 					`select(.id == $id) | .installPath`, `select(.id == $id and .scope == "user") | .installPath`,

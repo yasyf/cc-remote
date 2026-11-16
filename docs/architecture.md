@@ -146,22 +146,28 @@ stay. A workload past the throttle level is slowed inside the container while
 the daemon keeps its memory. The throttle level is what keeps the machine up: on
 a scratch Sprite a 10 GiB allocation crawled at 7.5 GiB for five minutes and the
 machine kept running, and the same allocation under the cap alone restarted it.
-The provider also names `GoBuildJobs` and `GoMemoryLimit`, 2 and 2 GiB on
-Sprites, which the Orca runtime exports as `GOFLAGS=-p=2` and `GOMEMLIMIT` to
-every lane, so a Go build or test runs two jobs at a time and each Go process
-collects its garbage before it passes 2 GiB.
+The provider also names `GoBuildJobs` and `GoMemoryLimit`, 3 and 1.5 GiB on
+Sprites, which the Orca runtime exports as `GOFLAGS=-p=3` and `GOMEMLIMIT` to
+every lane, so a Go build or test runs three jobs at a time and each Go process
+collects its garbage before it passes 1.5 GiB. A cold `go build ./...` of this
+repository took 28.3 s at `-p=2` and 23.9 s at `-p=3` on a pool Sprite, with
+no `memory.high` events.
 
-Go's module cache, build cache and temporary build directory, and mise's data
-directory, are the exceptions to the volume on a Sprite. The tool install points
-Go's at `/var/tmp/cc-remote/go-mod`, `go-build` and `go-tmp` with `go env -w`,
-and links `~/.local/share/mise` to `/var/tmp/cc-remote/mise`, since `/var/tmp`
+Go's module cache and mise's data directory are the exceptions to the
+volume on a Sprite. The tool install points `GOMODCACHE` at
+`/var/tmp/cc-remote/go-mod` with `go env -w`, and links `~/.local/share/mise` to `/var/tmp/cc-remote/mise`, since `/var/tmp`
 is on the root filesystem. A machine whose home already has a mise data
 directory keeps it. A bare `mise install` in a repository pinning 43 tools
 wrote 3.9 GiB there; the volume took 328 MiB, mise's npm cache in
 `~/.cache/aube`. The volume holds the home, `/tmp`, and
 every log and state file the Orca runtime writes, so a full volume stops the
 runtime. On a pool Sprite the volume is 12 GiB and the module cache alone had
-grown to 2.6 GiB, while the root filesystem had 90 GiB free. Elsewhere Go keeps
+grown to 2.6 GiB, while the root filesystem had 90 GiB free. The build cache and
+temporary build directory stay on the volume, at `~/.cache/go-build` and
+`~/.cache/go-tmp`: the root filesystem's writable layer is a network block
+device whose writes average about 200 ms, and heavy build writes there time it
+out and wedge the machine. A `cc-remote-go-cache-trim` service checks the
+volume every minute and runs `go clean -cache` when less than 3 GiB is free. Elsewhere Go keeps
 its caches in the home, and the install moves a cache that sits outside it to
 `$HOME/.cache/go-mod` or `$HOME/.cache/go-build`.
 
