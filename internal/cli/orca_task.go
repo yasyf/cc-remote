@@ -40,6 +40,9 @@ const (
 	launchWithin       = 30 * time.Minute
 	machineStepWithin  = 2 * time.Minute
 	runtimeStartWithin = 5 * time.Minute
+	beforeWorkerWithin = 20 * time.Minute
+	collectWithin      = 10 * time.Minute
+	reconnectWithin    = 5 * time.Minute
 )
 
 var parentEvery = 5 * time.Second
@@ -687,6 +690,8 @@ the patch against the report, writes both files unchanged into the new --output 
 hashes and bounded git status entries. The machine is unchanged; a matching report does not prove completeness.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(cmd.Context(), collectWithin)
+			defer cancel()
 			cfg, err := flags.load()
 			if err != nil {
 				return err
@@ -695,7 +700,7 @@ hashes and bounded git status entries. The machine is unchanged; a matching repo
 			if err != nil {
 				return err
 			}
-			collection, err := request.collect(cmd.Context(), orca.NewClient(runner), task)
+			collection, err := request.collect(ctx, orca.NewClient(runner), task)
 			if err != nil {
 				return err
 			}
@@ -762,6 +767,8 @@ its forward if it exits again. A runtime other than the saved one, as a cold boo
 into the task. It does not resume a machine or start a runtime or worker.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithTimeout(cmd.Context(), reconnectWithin)
+			defer cancel()
 			cfg, err := flags.load()
 			if err != nil {
 				return err
@@ -770,14 +777,14 @@ into the task. It does not resume a machine or start a runtime or worker.`,
 			if err != nil {
 				return err
 			}
-			if err := task.ensure(cmd.Context(), cfg.Path); err != nil {
+			if err := task.ensure(ctx, cfg.Path); err != nil {
 				return err
 			}
 			driver := orcaDriver{state: cfg.State(), log: slog.Default()}
 			if err := driver.save(task); err != nil {
 				return err
 			}
-			probed, err := task.run(cmd.Context(), orca.ProbeScript, nil)
+			probed, err := task.run(ctx, orca.ProbeScript, nil)
 			if err != nil {
 				return err
 			}
@@ -785,7 +792,7 @@ into the task. It does not resume a machine or start a runtime or worker.`,
 			if err != nil {
 				return err
 			}
-			if _, err := orca.NewClient(runner).On(task.Environment, ready.RuntimeID).Status(cmd.Context()); err != nil {
+			if _, err := orca.NewClient(runner).On(task.Environment, ready.RuntimeID).Status(ctx); err != nil {
 				return err
 			}
 			if err := driver.adopt(task, ready); err != nil {
@@ -999,7 +1006,9 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 		return err
 	}
 	if task.beforeWorker != "" {
-		said, err := task.run(ctx, task.beforeWorker, nil)
+		before, cancel := context.WithTimeout(ctx, beforeWorkerWithin)
+		said, err := task.run(before, task.beforeWorker, nil)
+		cancel()
 		if err != nil {
 			return errors.Join(fmt.Errorf("the --before-worker-file script failed, so no worker started: %w", err), d.save(task))
 		}
@@ -1144,7 +1153,9 @@ func lastReady(stdout []byte) []byte {
 }
 
 func (d orcaDriver) worker(ctx context.Context, native orca.Remote, task *orcaTask, repo orca.Repo, title string, keys secrets, policy orca.ShellPolicy) (string, error) {
-	out, err := task.run(ctx, orca.KeyDirScript, nil)
+	keyDir, cancel := context.WithTimeout(ctx, machineStepWithin)
+	out, err := task.run(keyDir, orca.KeyDirScript, nil)
+	cancel()
 	if err != nil {
 		return "", err
 	}

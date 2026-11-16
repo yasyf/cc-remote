@@ -250,6 +250,8 @@ func (d orcaDriver) guestBootstrap(ctx context.Context, task *orcaTask, helper s
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, p.Timeout+machineStepWithin)
+	defer cancel()
 	started := time.Now()
 	out, err := task.run(ctx, "exec "+remote.Quote(helper)+" orca guest-bootstrap", bytes.NewReader(descriptor))
 	var steps []string

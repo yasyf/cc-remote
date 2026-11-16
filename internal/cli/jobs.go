@@ -26,9 +26,11 @@ import (
 )
 
 const (
-	jobsSchema   = 1
-	tokenRefresh = 45 * time.Minute
-	claimPoll    = 5 * time.Second
+	jobsSchema          = 1
+	tokenRefresh        = 45 * time.Minute
+	claimPoll           = 5 * time.Second
+	jobCredentialWithin = time.Minute
+	jobResetWithin      = 10 * time.Minute
 )
 
 type jobState string
@@ -245,7 +247,9 @@ func (p *jobPool) grant(ctx context.Context, name string) error {
 		return err
 	}
 	credential := fmt.Sprintf("protocol=https\nhost=%s\nusername=x-access-token\npassword=%s\n\n", repository.Host, token)
-	result, err := p.provider.Exec(ctx, name, []string{"git", "credential-cache", fmt.Sprintf("--timeout=%d", int((tokenRefresh + 20*time.Minute).Seconds())), "store"}, strings.NewReader(credential))
+	store, cancel := context.WithTimeout(ctx, jobCredentialWithin)
+	defer cancel()
+	result, err := p.provider.Exec(store, name, []string{"git", "credential-cache", fmt.Sprintf("--timeout=%d", int((tokenRefresh + 20*time.Minute).Seconds())), "store"}, strings.NewReader(credential))
 	if err == nil && result.ExitCode != 0 {
 		err = fmt.Errorf("git credential-cache store exited %d", result.ExitCode)
 	}
@@ -264,7 +268,9 @@ func (p *jobPool) release(ctx context.Context, name string) error {
 		return fmt.Errorf("%s is %s, not held", name, member.State)
 	}
 	if reset := p.cfg.Jobs.Reset; len(reset) > 0 {
-		result, err := p.provider.Exec(ctx, name, reset, nil)
+		resetting, cancel := context.WithTimeout(ctx, jobResetWithin)
+		result, err := p.provider.Exec(resetting, name, reset, nil)
+		cancel()
 		if err == nil && result.ExitCode != 0 {
 			err = fmt.Errorf("reset exited %d", result.ExitCode)
 		}
