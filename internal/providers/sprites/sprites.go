@@ -42,7 +42,7 @@ const (
 	containerMemoryHigh = containerMemoryMax - 512<<20
 	goBuildJobs         = 3
 	goMemoryLimit       = 3 << 29
-	goCacheFloor        = 3 << 30
+	goCacheFloor        = 1 << 30
 )
 
 var unusedImageAgents = []string{
