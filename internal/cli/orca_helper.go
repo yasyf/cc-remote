@@ -120,14 +120,11 @@ case "$staging" in
 esac
 printf '%s\n' "$admission" > "$staging/admission.json"
 chmod 0644 "$staging/admission.json"
-(
-  flock 9
-  if [ -e "$store/$digest" ] || [ -L "$store/$digest" ]; then
-    echo "cc-remote: $store/$digest already exists; an admitted bootstrap helper is never replaced" >&2
-    exit 1
-  fi
-  mv -T "$staging" "$store/$digest"
-) 9> "$store/.lock"`
+if [ -e "$store/$digest" ] || [ -L "$store/$digest" ]; then
+  echo "cc-remote: $store/$digest already exists; an admitted bootstrap helper is never replaced" >&2
+  exit 1
+fi
+mv -T "$staging" "$store/$digest"`
 
 type helperAdmission struct {
 	Schema       int    `json:"schema"`
