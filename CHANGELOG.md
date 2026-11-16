@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **The Orca keeper runs the newest installed cc-remote, not the pin of the
+  repository that launched it.** A launch from a checkout pinned to 0.27.57 kept
+  the keeper on 0.27.57 after 0.27.68 was installed globally, so its fixes never
+  ran. A launch now starts the newest release among itself and every
+  `cc-remote` on `PATH`, asking each for its version from the state directory so
+  a version manager's shim answers with its global pin, and the keeper hands
+  over to a newer one it finds every 10 minutes.
 - **The Orca keeper stops dialing Sprites that cannot answer.** In the 24 hours
   before this change the keeper logged 406 failed forward dials and 528 failed
   reopens across 54 workspaces: 391 Sprites API timeouts, 284 Sprites that

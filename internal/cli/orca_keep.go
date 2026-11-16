@@ -41,12 +41,37 @@ var (
 
 type storageCheck func(ctx context.Context, task *orcaTask) error
 
-var keepCommand = func(config string) (*exec.Cmd, error) {
+var keepCommand = func(dir state.Dir, config string) (*exec.Cmd, error) {
 	helper, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command(helper, "orca", "keep", "--config", config), nil
+	if installed, ok := installedKeeper(context.Background(), dir); ok && newerRelease(installed.Version, version.String()) {
+		helper = installed.Binary
+	}
+	cmd := exec.Command(helper, "orca", "keep", "--config", config)
+	cmd.Dir = string(dir)
+	return cmd, nil
+}
+
+var installedKeeper = func(ctx context.Context, dir state.Dir) (successor, bool) {
+	var newest successor
+	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
+		binary := filepath.Join(entry, "cc-remote")
+		if info, err := os.Stat(binary); err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		asked := exec.CommandContext(ctx, binary, "version")
+		asked.Dir = string(dir)
+		out, err := asked.Output()
+		if err != nil {
+			continue
+		}
+		if found := strings.TrimSpace(string(out)); releaseParts(found) != nil && (newest.Version == "" || newerRelease(found, newest.Version)) {
+			newest = successor{Version: found, Binary: binary}
+		}
+	}
+	return newest, newest.Version != ""
 }
 
 var execKeeper = func(next successor) error {
@@ -87,6 +112,10 @@ writes the new session into the worker's AWS credentials file the same way, so a
 session its launch captured. Tasks whose configs name the same command share what it prints. One keep runs per state directory: a keep that finds another running
 records itself as that keep's successor and exits, the running keep execs a successor of a newer
 release at its next pass, so a pin change reaches the keep, and a keep exits once no task is kept.
+A launch starts the newest release among itself and every cc-remote on PATH, each asked for its
+version from the state directory so a version manager's shim answers with its global pin rather than
+the pin of the repository the launch ran in, and every 10 minutes keep hands over to a newer one it
+finds there, so an install reaches the keep with no restart.
 
 A kept Sprite task has no SSH forward: keep itself listens on the task's recorded 127.0.0.1 port and
 bridges each connection to the same port on the Sprite over the Sprites API's port proxy, one process
@@ -165,7 +194,7 @@ func (d orcaDriver) keep(task *orcaTask, config string) error {
 }
 
 func spawnKeeper(dir state.Dir, config string) error {
-	cmd, err := keepCommand(config)
+	cmd, err := keepCommand(dir, config)
 	if err != nil {
 		return err
 	}
@@ -194,13 +223,16 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 		if !held {
 			return offerSuccessor(dir, self)
 		}
-		next, err := holdForwards(ctx, dir, log, prune, storage, open, renewals, self.Version)
+		next, err := holdForwards(ctx, dir, log, prune, storage, open, renewals, self)
 		unlock()
 		if err != nil {
 			return err
 		}
 		if next != nil {
 			log.Info("handing the keeper to a newer release", "version", next.Version, "binary", next.Binary)
+			if err := os.Chdir(string(dir)); err != nil {
+				return err
+			}
 			err := execKeeper(*next)
 			log.Warn("the newer keeper did not start, so this one keeps holding", "version", next.Version, "binary", next.Binary, "error", err)
 			if err := os.Remove(dir.OrcaKeeperSuccessor()); err != nil {
@@ -215,7 +247,7 @@ func keepForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 	}
 }
 
-func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, open taskProvider, renewals []*renewal, running string) (*successor, error) {
+func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune func(context.Context) error, storage storageCheck, open taskProvider, renewals []*renewal, self successor) (*successor, error) {
 	ticker := time.NewTicker(keepEvery)
 	defer ticker.Stop()
 	k := newKeeper(dir, log, storage, open, renewals)
@@ -232,10 +264,16 @@ func holdForwards(ctx context.Context, dir state.Dir, log *slog.Logger, prune fu
 		if err != nil {
 			return nil, err
 		}
-		if next != nil && newerRelease(next.Version, running) {
+		if next != nil && newerRelease(next.Version, self.Version) {
 			return next, nil
 		}
 		if time.Since(pruned) >= pruneEvery {
+			if !pruned.IsZero() {
+				if installed, ok := installedKeeper(ctx, dir); ok && newerRelease(installed.Version, self.Version) {
+					installed.Config = self.Config
+					return &installed, nil
+				}
+			}
 			if err := prune(ctx); err != nil {
 				log.Warn("pruning Orca environments failed, and the next prune tries again", "error", err)
 			}

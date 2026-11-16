@@ -37,7 +37,7 @@ func TestMain(m *testing.M) {
 	fillCommand = func(string, string, string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("a test started the warm pool fill without a stand-in")
 	}
-	keepCommand = func(string) (*exec.Cmd, error) {
+	keepCommand = func(state.Dir, string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("a test started the forward keeper without a stand-in")
 	}
 	os.Exit(m.Run())

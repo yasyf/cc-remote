@@ -418,6 +418,13 @@ its config, so a launch from a newer pin takes the keep over within one pass.
 A keep of the same or an older release, or a development build, never takes it
 over. When the exec fails, keep drops the record, logs why, and keeps holding.
 
+A launch starts the newest release among its own binary and every `cc-remote` on
+`PATH`. It asks each one for its version from the state directory, so a version
+manager's shim answers with its global pin rather than the pin of the repository
+the launch ran in. Every 10 minutes after its first pass, keep looks again and
+hands over to a newer release it finds there the same way, so installing a
+release reaches the keep with no restart.
+
 keep also runs `orca prune` on its first pass and every 10 minutes after. A
 failed prune is logged and tried again on the next one, and it never stops keep.
 

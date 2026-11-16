@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -28,7 +29,7 @@ func standInKeeper(t *testing.T) *atomic.Int32 {
 	t.Helper()
 	starts := &atomic.Int32{}
 	original := keepCommand
-	keepCommand = func(string) (*exec.Cmd, error) {
+	keepCommand = func(state.Dir, string) (*exec.Cmd, error) {
 		starts.Add(1)
 		return exec.Command("true"), nil
 	}
@@ -124,7 +125,7 @@ func holding(t *testing.T, dir state.Dir, log *slog.Logger, renewals ...*renewal
 	ctx, cancel := context.WithCancel(t.Context())
 	held := make(chan error, 1)
 	go func() {
-		_, err := holdForwards(ctx, dir, log, noPrune, storageReachable, noOpen, renewals, "")
+		_, err := holdForwards(ctx, dir, log, noPrune, storageReachable, noOpen, renewals, successor{})
 		held <- err
 	}()
 	t.Cleanup(func() {
@@ -599,5 +600,32 @@ func TestAKeepOfANewerReleaseTakesOverFromTheRunningOne(t *testing.T) {
 	defer cancel()
 	if err := keepForwards(ctx, dir, quiet, noPrune, storageReachable, noOpen, nil, running); !errors.Is(err, context.DeadlineExceeded) || len(started) != 1 {
 		t.Errorf("the 0.27.9 keep beside a recorded 0.27.8 successor = %v, started %+v; want no handoff to an older release", err, started)
+	}
+}
+
+func TestTheInstalledKeeperIsTheNewestReleaseOnPathAskedFromTheStateDirectory(t *testing.T) {
+	dir := state.Dir(t.TempDir())
+	var path []string
+	for i, script := range []string{
+		"echo 0.27.57",
+		`[ "$PWD" = "` + string(dir) + `" ] && echo 0.27.68 || echo 0.27.1`,
+		"echo dev",
+		"exit 1",
+		"echo 0.27.9",
+	} {
+		bin := filepath.Join(t.TempDir(), strconv.Itoa(i))
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "cc-remote"), []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path = append(path, bin)
+	}
+	path = append(path, t.TempDir())
+	t.Setenv("PATH", strings.Join(path, string(os.PathListSeparator))+string(os.PathListSeparator)+"/bin:/usr/bin")
+	got, ok := installedKeeper(t.Context(), dir)
+	if want := (successor{Version: "0.27.68", Binary: filepath.Join(path[1], "cc-remote")}); !ok || got != want {
+		t.Fatalf("installedKeeper() = %+v, %t; want %+v", got, ok, want)
 	}
 }
