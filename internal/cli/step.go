@@ -125,7 +125,7 @@ func stepScript(launch string) string {
 		"fi",
 		`until test -e "$dir/pid"; do sleep 0.1; done`,
 		`flock "$dir/lock" true`,
-		`test -e "$dir/exit" || { echo "`+remote.Prefix+`: step $1 ended without an exit status" >&2; exit 1; }`,
+		`test -e "$dir/exit" || { echo "`+remote.Prefix+`: step $1 stopped before its command recorded an exit status: the machine suspended mid-step, which stops every service and the command with it; run the step again" >&2; exit 1; }`,
 		`size=$(wc -c < "$dir/output")`,
 		"framed=1",
 		`echo "$((size - offset)) $(cat "$dir/exit")"`,

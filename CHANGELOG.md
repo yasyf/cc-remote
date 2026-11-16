@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **`cc-remote step` says when a suspend stopped its command.** Suspending a
+  Sprite stops every service, the step's included, and a client that lost its
+  connection for long enough let the Sprite suspend, so the command died before
+  it recorded an exit status and step reported only that it "ended without an
+  exit status". Step now names the suspend and tells the caller to run the step
+  again.
 - **A Sprite's home volume no longer stalls under memory pressure.** Its loop
   device is attached with direct I/O, so home writes skip the second page cache
   of the image file under it. Buffered, a VM short of memory left the loop
