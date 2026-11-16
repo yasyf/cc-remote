@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -85,6 +87,7 @@ type orcaTask struct {
 	booted       *orcaBoot
 	author       author
 	beforeWorker string
+	transcript   []byte
 	drift        []images.HookDrift
 }
 
@@ -109,6 +112,7 @@ type orcaLaunch struct {
 	agent          orca.Agent
 	existing, warm bool
 	beforeWorker   string
+	transcript     []byte
 	author         author
 }
 
@@ -498,6 +502,7 @@ func (l *orcaLaunch) prime(ctx context.Context, session *workspace.Session, runn
 	if err == nil {
 		task.Pregrant, task.claimed, task.booted, task.author, task.drift = pregrant, opening == openSpare, booted, l.author, result.HookDrift
 		task.beforeWorker = l.beforeWorker
+		task.transcript = l.transcript
 		err = driver.launch(ctx, session, task, runtime, keys, cmp.Or(l.title, result.Name))
 	}
 	if err == nil {
@@ -603,7 +608,7 @@ directory for status, reconnect, send, and read.`,
 
 func newOrcaPrepareCmd(runner orca.Runner) *cobra.Command {
 	var launch orcaLaunch
-	var briefFile, beforeWorkerFile string
+	var briefFile, beforeWorkerFile, transcriptFile string
 	cmd := &cobra.Command{
 		Use:   "prepare <name>",
 		Short: "Create a workspace and start an idle worker on its checkout with its brief on the machine, sending no prompt",
@@ -631,11 +636,26 @@ With --resume, the claude worker that --existing starts resumes that Claude sess
 starting a new one, keeping the whole context of a worker whose machine restarted under it, and its startup takes
 the full session over a summary when Claude offers one.
 
+With --resume-transcript, the claude worker resumes the Claude session the file holds on a machine that never
+ran it, such as a fresh Sprite after the one it ran on was lost: prepare writes the file to that session's
+place under ~/.claude/projects for the checkout, its name less .jsonl being the session id, before the worker
+starts, and the worker resumes it as --resume does. It takes no --existing or --resume.
+
 With --before-worker-file, the file's script runs with sh on the machine after the checkout and before the worker
 starts, so the worker's first session sees whatever it installs. A nonzero exit stops prepare with no worker. The
 task record carries the script's stdout as beforeWorker.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if transcriptFile != "" {
+				if launch.existing || launch.agent.Resume != "" {
+					return errors.New("--resume-transcript places a Claude session on a machine that never ran it, so it takes no --existing or --resume")
+				}
+				transcript, err := os.ReadFile(transcriptFile)
+				if err != nil {
+					return err
+				}
+				launch.transcript, launch.agent.Resume = transcript, strings.TrimSuffix(filepath.Base(transcriptFile), ".jsonl")
+			}
 			if err := launch.agent.Validate(); err != nil {
 				return err
 			}
@@ -648,7 +668,7 @@ task record carries the script's stdout as beforeWorker.`,
 			if launch.existing && cmd.Flags().Changed("ref") {
 				return errors.New("--existing starts a worker on the workspace's retained checkout, so it takes no --ref")
 			}
-			if launch.agent.Resume != "" && !launch.existing {
+			if launch.agent.Resume != "" && !launch.existing && launch.transcript == nil {
 				return errors.New("--resume continues a Claude session recorded on the workspace's machine, so it needs --existing")
 			}
 			brief, err := readBrief(briefFile)
@@ -670,6 +690,7 @@ task record carries the script's stdout as beforeWorker.`,
 	launch.bind(cmd, "MCP servers the worker may start, inline only: for claude one JSON object per flag; for codex one TOML inline table for mcp_servers (default none)")
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "file holding the worker's complete brief, copied unchanged to the machine")
 	cmd.Flags().StringVar(&beforeWorkerFile, "before-worker-file", "", "file holding a script to run on the machine before the worker starts; a nonzero exit stops prepare with no worker")
+	cmd.Flags().StringVar(&transcriptFile, "resume-transcript", "", "claude only: a Claude session's <session-id>.jsonl transcript, placed on the machine before the worker starts so the worker resumes that session")
 	cmd.Flags().BoolVar(&launch.existing, "existing", false, "start a worker on the recorded workspace's machine and retained checkout instead of creating one, continuing its recorded Orca task")
 	cmd.Flags().StringVar(&launch.agent.Resume, "resume", "", "claude only, with --existing: the id of a Claude session on the machine that the worker resumes instead of starting a new one")
 	cmd.Flags().BoolVar(&launch.warm, "warm", false, "treat the name as a lane: claim an unused warm pool Sprite refreshed to --ref, moving to the next when one fails before its worker starts, or create the lane's workspace when none is left, refilling the pool in the background after each claim")
@@ -1004,6 +1025,11 @@ func (d orcaDriver) launch(ctx context.Context, session *workspace.Session, task
 	task.RepoID = repo.ID
 	if err := d.save(task); err != nil {
 		return err
+	}
+	if task.transcript != nil {
+		if _, err := task.run(ctx, transcriptScript(task.ProjectRoot, task.Agent.Resume), bytes.NewReader(task.transcript)); err != nil {
+			return errors.Join(fmt.Errorf("placing the --resume-transcript session on %s, so no worker started: %w", task.Machine, err), d.save(task))
+		}
 	}
 	if task.beforeWorker != "" {
 		before, cancel := context.WithTimeout(ctx, beforeWorkerWithin)
@@ -1474,4 +1500,11 @@ func loadTask(dir state.Dir, name string) (*orcaTask, error) {
 	}
 	task.dir = dir
 	return task, nil
+}
+
+var claudeProjectSlug = regexp.MustCompile(`[^A-Za-z0-9]`)
+
+func transcriptScript(projectRoot, session string) string {
+	dir := `"$HOME/.claude/projects/` + claudeProjectSlug.ReplaceAllString(projectRoot, "-") + `"`
+	return "mkdir -p " + dir + " && cat > " + dir + "/" + session + ".jsonl"
 }
