@@ -13,8 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wedge the machine. `GOCACHE` and `GOTMPDIR` now live at `~/.cache/go-build`
   and `~/.cache/go-tmp` on the local volume, while `GOMODCACHE` stays under
   `/var/tmp/cc-remote`. The Orca runtime's launcher runs `go clean -cache` whenever
-  the volume has less than 1 GiB free, checking every minute: a pool Sprite's
-  shallow monorepo checkout already leaves only about 3 GiB of its 12 GiB free.
+  the volume has less than 3 GiB free, checking every minute.
   The Orca runtime exports `GOFLAGS=-p=3` and a 1.5 GiB `GOMEMLIMIT` on Sprites,
   up from `-p=2` and 2 GiB: a cold build of this repository went from 28.3 s to
   23.9 s on a pool Sprite with no `memory.high` events.
