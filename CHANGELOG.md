@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   averages about 200 ms a write, and heavy build writes there time it out and
   wedge the machine. `GOCACHE` and `GOTMPDIR` now live at `~/.cache/go-build`
   and `~/.cache/go-tmp` on the local volume, while `GOMODCACHE` stays under
-  `/var/tmp/cc-remote`. The Orca runtime's launcher runs `go clean -cache` whenever
-  the volume has less than 3 GiB free, checking every minute.
+  `/var/tmp/cc-remote`. The Orca runtime's launcher checks the volume every minute;
+  under 3 GiB free it first removes each `target/*/incremental` directory,
+  which cargo rebuilds cheaply, and runs `go clean -cache` only if that left
+  less than 3 GiB, so a reused machine keeps the rest of its warm `rust/target`.
   The Orca runtime exports `GOFLAGS=-p=3` and a 1.5 GiB `GOMEMLIMIT` on Sprites,
   up from `-p=2` and 2 GiB: a cold build of this repository went from 28.3 s to
   23.9 s on a pool Sprite with no `memory.high` events.

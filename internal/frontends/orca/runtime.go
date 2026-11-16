@@ -43,16 +43,16 @@ var (
 )
 
 type Runtime struct {
-	Entry         string
-	Display       []string
-	Args          []string
-	Port          int
-	Advertise     string
-	Supervised    bool
-	Restart       bool
-	GoBuildJobs   int
-	GoMemoryLimit int64
-	GoCacheFloor  int64
+	Entry           string
+	Display         []string
+	Args            []string
+	Port            int
+	Advertise       string
+	Supervised      bool
+	Restart         bool
+	GoBuildJobs     int
+	GoMemoryLimit   int64
+	BuildCacheFloor int64
 }
 
 type Ready struct {
@@ -137,10 +137,11 @@ func (r Runtime) Launcher() string {
 		"flock -n 9 || exit 0",
 		"trim=",
 	)
-	if r.GoCacheFloor > 0 {
+	if r.BuildCacheFloor > 0 {
 		lines = append(lines,
 			"if command -v go > /dev/null; then",
-			`  ( while :; do test "$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')" -ge `+strconv.FormatInt(r.GoCacheFloor>>10, 10)+` || go clean -cache; sleep 60; done ) > /dev/null 2>&1 9>&- &`,
+			`  roomy() { test "$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')" -ge `+strconv.FormatInt(r.BuildCacheFloor>>10, 10)+`; }`,
+			`  ( while :; do roomy || { find "$HOME" -maxdepth 5 -type d -path '*/target/*/incremental' -prune -exec rm -rf {} +; roomy || go clean -cache; }; sleep 60; done ) > /dev/null 2>&1 9>&- &`,
 			"  trim=$!",
 			"fi",
 		)

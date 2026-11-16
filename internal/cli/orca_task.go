@@ -1237,13 +1237,13 @@ func orcaRuntime(session *workspace.Session) (orca.Runtime, error) {
 	}
 	traits := session.Provider.Traits()
 	return orca.Runtime{
-		Entry:         dir + "/" + cfg.Orca.Entry,
-		Display:       cfg.Orca.Display,
-		Args:          cfg.Orca.Args,
-		Supervised:    traits.Supervisor == providers.SupervisorSpriteEnv,
-		GoBuildJobs:   traits.GoBuildJobs,
-		GoMemoryLimit: traits.GoMemoryLimit,
-		GoCacheFloor:  traits.GoCacheFloor,
+		Entry:           dir + "/" + cfg.Orca.Entry,
+		Display:         cfg.Orca.Display,
+		Args:            cfg.Orca.Args,
+		Supervised:      traits.Supervisor == providers.SupervisorSpriteEnv,
+		GoBuildJobs:     traits.GoBuildJobs,
+		GoMemoryLimit:   traits.GoMemoryLimit,
+		BuildCacheFloor: traits.BuildCacheFloor,
 	}, nil
 }
 

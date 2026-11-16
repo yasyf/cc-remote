@@ -156,13 +156,13 @@ func TestFirstUseCheckRefusesAnyEarlierRuntimeState(t *testing.T) {
 
 func TestRuntimeLauncher(t *testing.T) {
 	runtime := orca.Runtime{
-		Entry:         ".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun",
-		Display:       []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"},
-		Args:          []string{"--log-level", "info"},
-		Port:          7001,
-		GoBuildJobs:   2,
-		GoMemoryLimit: 2 << 30,
-		GoCacheFloor:  3 << 30,
+		Entry:           ".local/share/cc-remote/tools/orca-runtime-1.4.218/squashfs-root/AppRun",
+		Display:         []string{"xvfb-run", "--auto-servernum", "--server-args=-nolisten tcp"},
+		Args:            []string{"--log-level", "info"},
+		Port:            7001,
+		GoBuildJobs:     2,
+		GoMemoryLimit:   2 << 30,
+		BuildCacheFloor: 3 << 30,
 	}
 	want := strings.Join([]string{
 		"#!/bin/sh",
@@ -179,7 +179,8 @@ func TestRuntimeLauncher(t *testing.T) {
 		"flock -n 9 || exit 0",
 		"trim=",
 		"if command -v go > /dev/null; then",
-		`  ( while :; do test "$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')" -ge 3145728 || go clean -cache; sleep 60; done ) > /dev/null 2>&1 9>&- &`,
+		`  roomy() { test "$(df -Pk "$HOME" | awk 'NR == 2 { print $4 }')" -ge 3145728; }`,
+		`  ( while :; do roomy || { find "$HOME" -maxdepth 5 -type d -path '*/target/*/incremental' -prune -exec rm -rf {} +; roomy || go clean -cache; }; sleep 60; done ) > /dev/null 2>&1 9>&- &`,
 		"  trim=$!",
 		"fi",
 		"say() {",

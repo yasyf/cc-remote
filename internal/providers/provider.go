@@ -73,7 +73,7 @@ type Traits struct {
 	Platform         string
 	GoBuildJobs      int
 	GoMemoryLimit    int64
-	GoCacheFloor     int64
+	BuildCacheFloor  int64
 	MemoryMax        int64
 	MemoryHigh       int64
 }
