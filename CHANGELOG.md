@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`cc-remote step` forwards stdin only with `--stdin`.** It read any stdin
+  that was not a terminal to its end before starting the command, so a caller
+  whose stdin was an open pipe that never closed, such as a background shell,
+  waited forever and started nothing. A caller that pipes input, such as a
+  token, now passes `--stdin`.
+
 ### Fixed
 - **Prepare on a kept Sprite replaces a service whose definition changed, and
   starts one that stopped.** Creating a service that already exists answers

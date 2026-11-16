@@ -25,10 +25,11 @@ var stepRedial = 5 * time.Second
 
 func newStepCmd() *cobra.Command {
 	var flags selection
+	var forwardStdin bool
 	cmd := &cobra.Command{
 		Use:   "step <machine> -- <command> [args...]",
 		Short: "Run a command detached on a machine, replaying its output and exit status across dropped connections",
-		Long:  "step saves the command's combined output and exit status under ~/.cc-remote/steps on the machine, reconnects after a drop, and exits with the command's own status. An interrupt stops the command.",
+		Long:  "step saves the command's combined output and exit status under ~/.cc-remote/steps on the machine, reconnects after a drop, and exits with the command's own status. An interrupt stops the command. The command reads an empty stdin unless --stdin forwards this one, read to its end before the command starts.",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := flags.load()
@@ -40,7 +41,7 @@ func newStepCmd() *cobra.Command {
 				return err
 			}
 			var stdin []byte
-			if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice == 0 {
+			if forwardStdin {
 				if stdin, err = io.ReadAll(os.Stdin); err != nil {
 					return err
 				}
@@ -48,6 +49,7 @@ func newStepCmd() *cobra.Command {
 			return runStep(cmd.Context(), provider, args[0], args[1:], stdin, cmd.OutOrStdout())
 		},
 	}
+	cmd.Flags().BoolVar(&forwardStdin, "stdin", false, "forward this stdin to the command, read to its end first")
 	flags.bind(cmd)
 	return cmd
 }
