@@ -496,6 +496,13 @@ old, large session from a summary, the startup picks the full session, and it
 takes Claude's `bypass permissions on` status line as ready, since a resumed
 screen shows the conversation's end, not the startup banner.
 
+`--resume-transcript <path>/<session-id>.jsonl`, claude only and never with
+`--existing` or `--resume`, resumes a session on a machine that never ran it,
+such as a fresh Sprite after the one the worker ran on was lost. Before the
+worker starts, prepare writes the file to `~/.claude/projects/<checkout as a
+slug>/<session-id>.jsonl` on the machine, and the worker then starts as
+`claude --resume <session-id>`, as with `--resume`.
+
 The key, worker, brief, and task record then follow the ordinary `prepare`
 steps. A failure keeps the machine, any saved task record, and any started
 worker or forward as they are.

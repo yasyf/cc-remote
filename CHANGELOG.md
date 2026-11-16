@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`orca prepare --resume-transcript <session-id>.jsonl` resumes a Claude
+  session on a fresh machine.** A drive lane whose Sprite was lost or
+  destroyed was relaunched from scratch on a new one, losing its whole
+  conversation. Prepare now writes the given transcript where Claude reads it
+  for the checkout before the worker starts, and the worker runs
+  `claude --resume <session-id>`. The flag refuses `--existing`, `--resume`, codex,
+  and a file whose name is not a session id.
 - **`cc-remote orca release <lane>` destroys what an ended lane ran on.** It
   records each warm pool workspace the lane claimed as `released`, then closes
   its forward, removes its Orca environment, destroys its machine, and removes

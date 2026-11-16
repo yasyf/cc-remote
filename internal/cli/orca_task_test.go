@@ -876,6 +876,8 @@ func TestPrepareRefusesBadInputBeforeAnyEffect(t *testing.T) {
 		return path
 	}
 	brief, empty := write("brief.md", "do the work\n"), write("empty.md", " \n\t")
+	session := write("5d576546-4c87-4a78-94b4-945eb9e49c86.jsonl", "{}\n")
+	unnamed := write("transcript.jsonl", "{}\n")
 	claude := []string{"--model", "claude-opus-5-5", "--effort", "xhigh"}
 	codex := []string{"--agent", "codex", "--model", "gpt-6.1-sol", "--effort", "xhigh"}
 	tests := []struct {
@@ -899,6 +901,11 @@ func TestPrepareRefusesBadInputBeforeAnyEffect(t *testing.T) {
 		{"warm with existing", slices.Concat(claude, []string{"--warm", "--existing", "--brief-file", brief}), "pass only one"},
 		{"resume without existing", slices.Concat(claude, []string{"--resume", "5d576546-4c87-4a78-94b4-945eb9e49c86", "--brief-file", brief}), "needs --existing"},
 		{"existing resume reaches the config", slices.Concat(claude, []string{"--existing", "--resume", "5d576546-4c87-4a78-94b4-945eb9e49c86", "--brief-file", brief}), "read config"},
+		{"transcript with existing", slices.Concat(claude, []string{"--existing", "--resume-transcript", session, "--brief-file", brief}), "takes no --existing or --resume"},
+		{"transcript with resume", slices.Concat(claude, []string{"--resume", "5d576546-4c87-4a78-94b4-945eb9e49c86", "--resume-transcript", session, "--brief-file", brief}), "takes no --existing or --resume"},
+		{"transcript not named by a session", slices.Concat(claude, []string{"--resume-transcript", unnamed, "--brief-file", brief}), "not a Claude session id"},
+		{"transcript on codex", slices.Concat(codex, []string{"--resume-transcript", session, "--brief-file", brief}), "claude setting"},
+		{"transcript reaches the config", slices.Concat(claude, []string{"--resume-transcript", session, "--brief-file", brief}), "read config"},
 		{"warm with a ref reaches the config", slices.Concat(claude, []string{"--warm", "--ref", "feature", "--brief-file", brief}), "read config"},
 	}
 	for _, tt := range tests {
@@ -1668,4 +1675,20 @@ func TestDefaultPrepareStillCreatesAFreshWorkspaceUnderTheTaskLock(t *testing.T)
 	w.refusedWithoutEffects(func(runner orca.Runner) error {
 		return w.prepare(t.Context(), later, runner, io.Discard, "task-a", false)
 	}, "task-a already has an Orca task")
+}
+
+func TestTranscriptScriptWritesTheSessionWhereClaudeResumesIt(t *testing.T) {
+	tests := []struct {
+		name, root, want string
+	}{
+		{"sprite checkout", "/home/sprite/monorepo", `mkdir -p "$HOME/.claude/projects/-home-sprite-monorepo" && cat > "$HOME/.claude/projects/-home-sprite-monorepo"/5d576546-4c87-4a78-94b4-945eb9e49c86.jsonl`},
+		{"dotted worktree", "/home/sprite/.claude/worktrees/monorepo/a.b", `mkdir -p "$HOME/.claude/projects/-home-sprite--claude-worktrees-monorepo-a-b" && cat > "$HOME/.claude/projects/-home-sprite--claude-worktrees-monorepo-a-b"/5d576546-4c87-4a78-94b4-945eb9e49c86.jsonl`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := transcriptScript(tt.root, "5d576546-4c87-4a78-94b4-945eb9e49c86"); got != tt.want {
+				t.Errorf("transcriptScript() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
