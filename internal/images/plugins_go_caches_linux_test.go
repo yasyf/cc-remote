@@ -31,7 +31,6 @@ func TestPluginsKeepGoBuildCacheInTheHomeOnASprite(t *testing.T) {
 	}
 	root := t.TempDir()
 	home, bin, cache := filepath.Join(root, "home"), filepath.Join(root, "bin"), filepath.Join(root, "var-tmp")
-	services := filepath.Join(root, "services")
 	module := filepath.Join(root, "proxy", "example.com", "cached", "@v")
 	for _, dir := range []string{home, bin, module} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -67,7 +66,7 @@ func TestPluginsKeepGoBuildCacheInTheHomeOnASprite(t *testing.T) {
 	if err := archive.Close(); err != nil {
 		t.Fatal(err)
 	}
-	run := exec.Command("bash", "-c", "set -euo pipefail\nroot_cache_dir="+quote(cache)+"\nstate_dir="+quote(filepath.Join(home, ".cc-remote"))+"\ngo_cache_floor_kib=3145728\nshq() { printf \"'%s'\" \"$1\"; }\ncreate_sprite_service() { printf '%s\\n' \"$@\" > "+quote(services)+"; }\n"+script[start:end]+"\ngo_caches\ngo mod download example.com/cached@v1.0.0\ngo env GOMODCACHE GOCACHE GOTMPDIR\n")
+	run := exec.Command("bash", "-c", "set -euo pipefail\nroot_cache_dir="+quote(cache)+"\n"+script[start:end]+"\ngo_caches\ngo mod download example.com/cached@v1.0.0\ngo env GOMODCACHE GOCACHE GOTMPDIR\n")
 	run.Dir = root
 	run.Env = []string{
 		"HOME=" + home,
@@ -86,19 +85,6 @@ func TestPluginsKeepGoBuildCacheInTheHomeOnASprite(t *testing.T) {
 	}
 	if got, want := string(out), strings.Join([]string{cache + "/go-mod", home + "/.cache/go-build", home + "/.cache/go-tmp", ""}, "\n"); got != want {
 		t.Errorf("go env = %q, want %q", got, want)
-	}
-	trim := filepath.Join(home, ".cc-remote", "go-cache-trim.sh")
-	if got, err := os.ReadFile(services); err != nil || string(got) != strings.Join([]string{"cc-remote-go-cache-trim", "--cmd", trim, "--duration", "1ms", "--no-stream", ""}, "\n") {
-		t.Errorf("create_sprite_service got %q, %v; want the go cache trim service running %s", got, err, trim)
-	}
-	body, err := os.ReadFile(trim)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"df --output=avail -k '" + home + "'", "-lt 3145728", "GOCACHE='" + home + "/.cache/go-build' '" + gobin + "' clean -cache", "sleep 60"} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("go-cache-trim.sh lacks %q:\n%s", want, body)
-		}
 	}
 	if got, err := os.ReadFile(filepath.Join(cache, "go-mod", "example.com", "cached@v1.0.0", "cached.go")); err != nil || string(got) != source {
 		t.Errorf("the downloaded module's cached.go reads %q, %v; want %q", got, err, source)

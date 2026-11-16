@@ -12,7 +12,6 @@ bin_dir="$HOME/.local/bin"
 system_tool_dir=/opt/cc-remote/tools
 system_bin_dir=/usr/local/bin
 root_cache_dir=/var/tmp/cc-remote
-go_cache_floor_kib=$((3 * 1024 * 1024))
 {{- with .Closure}}
 closure_root=/opt/cc-remote/closure
 {{- end}}
@@ -552,23 +551,6 @@ home_go_cache() {
   esac
 }
 
-trim_go_cache() {
-  local trim="$state_dir/go-cache-trim.sh"
-  mkdir -p "$state_dir"
-  cat > "$trim.tmp" <<SH
-#!/bin/sh
-while :; do
-  if [ "\$(df --output=avail -k $(shq "$HOME") | tail -n 1)" -lt $go_cache_floor_kib ]; then
-    GOCACHE=$(shq "$HOME/.cache/go-build") $(shq "$(command -v go)") clean -cache
-  fi
-  sleep 60
-done
-SH
-  chmod 755 "$trim.tmp"
-  mv "$trim.tmp" "$trim"
-  create_sprite_service cc-remote-go-cache-trim --cmd "$trim" --duration 1ms --no-stream > /dev/null
-}
-
 go_caches() {
   if ! command -v go > /dev/null; then
     return
@@ -576,7 +558,6 @@ go_caches() {
   if command -v sprite-env > /dev/null; then
     mkdir -p "$root_cache_dir/go-mod" "$HOME/.cache/go-build" "$HOME/.cache/go-tmp"
     go env -w GOMODCACHE="$root_cache_dir/go-mod" GOCACHE="$HOME/.cache/go-build" GOTMPDIR="$HOME/.cache/go-tmp"
-    trim_go_cache
     return
   fi
   home_go_cache GOMODCACHE "$HOME/.cache/go-mod"
