@@ -108,7 +108,9 @@ exit 0`)
 
 func TestKernelModeRunsTailscaledAsRootUnderSpriteEnv(t *testing.T) {
 	script := sprites.EnrollScript("ws-1")
-	if !strings.Contains(script, `create_sprite_service tailscaled --cmd "`+launcherPath+`" --duration 1ms --no-stream`) || strings.Contains(script, "services get") || strings.Contains(script, "setsid") {
+	create := remote.CreateServiceFunc("sprite-env")
+	launch := strings.Replace(script, create, "", 1)
+	if !strings.Contains(script, create) || !strings.Contains(launch, `create_sprite_service tailscaled --cmd "`+launcherPath+`" --duration 1ms --no-stream`) || strings.Contains(launch, "services get") || strings.Contains(launch, "setsid") {
 		t.Errorf("enrollment starts tailscaled outside sprite-env:\n%s", script)
 	}
 	if launcher := sprites.Launcher(); !strings.Contains(launcher, "exec sudo -n tailscaled --state=/var/lib/tailscale/tailscaled.state") || strings.Contains(launcher, "userspace") {
@@ -129,7 +131,12 @@ func TestSpriteEnvCountsAnExistingTailscaledServiceAsStarted(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bin, home := t.TempDir(), t.TempDir()
+			launcher := home + "/.cc-remote/tailscaled.sh"
 			fakeBinary(t, bin, "sprite-env", `printf '%s\n' "$*" >> "`+bin+`/calls"
+if [ "$2" = get ]; then
+  echo '{"name":"tailscaled","cmd":"`+launcher+`","args":[],"needs":[],"state":{"status":"running"}}'
+  exit 0
+fi
 echo "`+tt.body+`"
 echo "curl: (22) The requested URL returned error: 409" >&2
 exit 22`)
@@ -139,9 +146,12 @@ exit 22`)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("start = %v: %s, want an error %v", err, out, tt.wantErr)
 			}
-			calls, err := os.ReadFile(filepath.Join(bin, "calls"))
-			if want := "services create tailscaled --cmd " + home + "/.cc-remote/tailscaled.sh --duration 1ms --no-stream\n"; err != nil || string(calls) != want {
-				t.Errorf("sprite-env saw %q (%v), want only %q", calls, err, want)
+			want := "services create tailscaled --cmd " + launcher + " --duration 1ms --no-stream\n"
+			if !tt.wantErr {
+				want += "services get tailscaled\n"
+			}
+			if calls, err := os.ReadFile(filepath.Join(bin, "calls")); err != nil || string(calls) != want {
+				t.Errorf("sprite-env saw %q (%v), want %q", calls, err, want)
 			}
 		})
 	}

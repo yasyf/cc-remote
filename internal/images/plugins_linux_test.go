@@ -199,14 +199,14 @@ if [ -f "$XDG_CONFIG_HOME/synckit/state.json" ]; then
 fi
 echo "$(basename "$0") $* state=$state" >> "$FAKE_LOG"
 case "$2" in
-  get) [ -f "${FAKE_LOG%/*}/services/$3" ] || exit 1; [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; printf '{"state":{"status":"%s"}}\n' "$(cat "${FAKE_LOG%/*}/service-status")" ;;
+  get) [ -f "${FAKE_LOG%/*}/services/$3" ] || exit 1; [ ! -f "${FAKE_LOG%/*}/stall-get" ] || exec sleep 10; jq -c --arg status "$(cat "${FAKE_LOG%/*}/service-status")" '.state.status = $status' "${FAKE_LOG%/*}/services/$3" ;;
   create)
     if [ -f "${FAKE_LOG%/*}/services/$3" ]; then
       echo "service already exists: $3"
       echo "curl: (22) The requested URL returned error: 409" >&2
       exit 22
     fi
-    mkdir -p "${FAKE_LOG%/*}/services" && : > "${FAKE_LOG%/*}/services/$3"
+    mkdir -p "${FAKE_LOG%/*}/services" && echo '{}' > "${FAKE_LOG%/*}/services/$3"
     ;;
 esac
 `
@@ -1060,7 +1060,7 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 			}
 			for _, service := range inventory.Services {
 				if tt.existing {
-					writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-"+service.Name), nil, 0o600)
+					writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-"+service.Name), supervisedServiceJSON(t, h.home, service.Name), 0o600)
 				}
 				switch {
 				case tt.sockets == "listening", tt.sockets == "late" && service.Name == "cookiesync":
@@ -1139,8 +1139,8 @@ func TestPluginsConfigureAwaitsServiceReadiness(t *testing.T) {
 			if installs != 1 || creates != wantCreates || mutations != 0 {
 				t.Errorf("installs=%d creates=%d start/restart=%d, want 1 %d 0:\n%s", installs, creates, mutations, wantCreates, strings.Join(calls, "\n"))
 			}
-			if tt.existing && countCall(calls, "sprite-env services get cc-remote-capt state=present") != 1 {
-				t.Errorf("the existing capt service was not gated through sprite-env:\n%s", strings.Join(calls, "\n"))
+			if tt.existing && (countCall(calls, "sprite-env services get cc-remote-capt state=present") != 2 || countCall(calls, "sprite-env services delete cc-remote-capt state=present") != 0) {
+				t.Errorf("the existing capt service was not kept after its create's get and then gated through sprite-env:\n%s", strings.Join(calls, "\n"))
 			}
 			if tt.namespace {
 				launched := countCall(calls, "nohup setsid HOME/.cc-remote/supervise.py capt") + countCall(calls, "nohup setsid HOME/.cc-remote/supervise.py cookiesync")
@@ -1159,6 +1159,17 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func supervisedServiceJSON(t *testing.T, home, name string, needs ...string) []byte {
+	t.Helper()
+	return mustJSON(t, map[string]any{
+		"name":  "cc-remote-" + name,
+		"cmd":   filepath.Join(home, ".cc-remote", "supervise.py"),
+		"args":  []string{name},
+		"needs": append([]string{}, needs...),
+		"state": map[string]string{"status": "running"},
+	})
 }
 
 func TestPluginsConfigureQueuesEveryServiceCreate(t *testing.T) {
@@ -1185,8 +1196,14 @@ func TestPluginsConfigureQueuesEveryServiceCreate(t *testing.T) {
 				inventory.Services = append(inventory.Services, service)
 			}
 			host := newPluginsHost(t, inventory, nil, state, nil)
+			current := map[string][]byte{}
 			for _, name := range names {
 				listenReady(t, host.home, ".s/"+name)
+				if payload {
+					current["cc-remote-"+name] = supervisedServiceJSON(t, host.home, name, "cc-remote-payload")
+				} else {
+					current["cc-remote-"+name] = supervisedServiceJSON(t, host.home, name)
+				}
 			}
 			starts := make(chan string, len(names))
 			release := make(chan struct{})
@@ -1249,7 +1266,7 @@ func TestPluginsConfigureQueuesEveryServiceCreate(t *testing.T) {
 					lock.Unlock()
 					switch {
 					case created:
-						if _, err := fmt.Fprintln(w, `{"state":{"status":"running"}}`); err != nil {
+						if _, err := fmt.Fprintf(w, "%s\n", current[name]); err != nil {
 							t.Errorf("write the status of %s: %v", name, err)
 						}
 					case !payload || name != "cc-remote-payload":
@@ -1349,16 +1366,15 @@ except urllib.error.HTTPError as error:
 			finishArtifactScript(t, done, fail)
 			lock.Lock()
 			defer lock.Unlock()
-			wantGets := make([]string, 0, 1+len(names))
-			wantGets = append(wantGets, "cc-remote-payload")
-			for _, name := range names {
-				wantGets = append(wantGets, "cc-remote-"+name)
-			}
-			if fail {
-				wantGets = wantGets[:1]
+			wantGets := []string{"cc-remote-payload"}
+			if !fail {
+				wantGets = append(wantGets, "cc-remote-existing")
+				for _, name := range names {
+					wantGets = append(wantGets, "cc-remote-"+name)
+				}
 			}
 			if !slices.Equal(gets, wantGets) {
-				t.Errorf("get order = %v, want the payload check then one readiness check per service: %v", gets, wantGets)
+				t.Errorf("get order = %v, want the payload check, the existing service's comparison after its 409, then one readiness check per service: %v", gets, wantGets)
 			}
 			wantCreates := []string{"cc-remote-first", "cc-remote-second", "cc-remote-third", "cc-remote-fourth"}
 			if !fail {
@@ -1407,7 +1423,7 @@ case "$2" in
       done < "$dir/buffers"
     fi
     [ -f "$dir/services/$3" ] || exit 1
-    printf '{"state":{"status":"running"}}\n'
+    jq -c '.state.status = "running"' "$dir/services/$3"
     ;;
   create)
     for fd in 1 2; do
@@ -1420,7 +1436,7 @@ case "$2" in
       exit "$(cat "$dir/exit-$3")"
     fi
     sleep 0.2
-    mkdir -p "$dir/services" && : > "$dir/services/$3"
+    mkdir -p "$dir/services" && echo '{}' > "$dir/services/$3"
     ;;
 esac
 `
@@ -1549,7 +1565,7 @@ func TestPluginsConfigureReportsFailedServiceCreates(t *testing.T) {
 	t.Run("an existing service's 409 create counts as created and reports nothing", func(t *testing.T) {
 		h := newPluginsHost(t, inventory("solo"), nil, fakeState{}, nil)
 		listenReady(t, h.home, ".s/solo")
-		writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-solo"), nil, 0o600)
+		writePluginTestFile(t, filepath.Join(h.fakes, "services", "cc-remote-solo"), supervisedServiceJSON(t, h.home, "solo"), 0o600)
 		respond(t, h, "solo", serviceCreateResult{stdout: "service already exists: cc-remote-solo\n", stderr: "curl: (22) The requested URL returned error: 409\n", exit: 22})
 		stdout, stderr, err := configure(t, h)
 		if err != nil {

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Prepare on a kept Sprite replaces a service whose definition changed, and
+  starts one that stopped.** Creating a service that already exists answers
+  "Service already running with that command" even when its command, arguments
+  or needs differ, or when it has stopped, so a kept Sprite ran the old command
+  or none. When a create finds the service, `create_sprite_service` now reads it
+  back and deletes and creates it again unless its command, arguments and needs
+  match and it is running or starting.
 - **ssh to a suspended Sprite starts its sshd again.** Suspending a Sprite stops
   every service, sshd included, so the machine can pause. The next ssh woke it,
   but `sprite proxy` answered `failed to connect to localhost:22`, and ssh
