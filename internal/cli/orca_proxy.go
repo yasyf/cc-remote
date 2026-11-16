@@ -22,10 +22,14 @@ import (
 )
 
 var (
-	proxyEvery   = time.Second
-	proxyRetry   = 10 * time.Second
-	proxyRelease = 10 * time.Second
+	proxyEvery      = time.Second
+	proxyRetry      = 10 * time.Second
+	proxyRelease    = 10 * time.Second
+	dialBackoff     = 5 * time.Second
+	dialBackoffMost = 5 * time.Minute
 )
+
+const parkAfter = 3
 
 type taskProvider func(task *orcaTask) (providers.Provider, error)
 
@@ -41,6 +45,15 @@ type proxies struct {
 	mu     sync.Mutex
 	failed map[string]error
 	logged map[string]string
+	health map[string]*dialHealth
+}
+
+type dialHealth struct {
+	misses int
+	until  time.Time
+	silent int
+	parked bool
+	seen   providers.State
 }
 
 type heldProxy struct {
@@ -60,7 +73,7 @@ func newProxies(dir state.Dir, log *slog.Logger, open taskProvider) *proxies {
 	return &proxies{
 		dir: dir, log: log, open: open,
 		held: map[string]*heldProxy{}, skipped: map[string]bool{}, tried: map[string]time.Time{},
-		failed: map[string]error{}, logged: map[string]string{},
+		failed: map[string]error{}, logged: map[string]string{}, health: map[string]*dialHealth{},
 	}
 }
 
@@ -252,10 +265,13 @@ func (p *proxies) serve(ctx context.Context, held *heldProxy) {
 func (p *proxies) bridge(ctx context.Context, held *heldProxy, local net.Conn) {
 	defer func() { _ = local.Close() }()
 	task := held.task
+	if p.resting(task.Workspace) {
+		return
+	}
 	remote, err := held.dial(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			p.fail(task.Workspace, fmt.Errorf("reaching port %d on %s: %w", task.Port, task.Machine, err))
+			p.missed(ctx, task, fmt.Errorf("reaching port %d on %s: %w", task.Port, task.Machine, err))
 		}
 		return
 	}
@@ -335,6 +351,102 @@ func (p *proxies) succeed(name string) {
 	defer p.mu.Unlock()
 	delete(p.failed, name)
 	delete(p.logged, name)
+	delete(p.health, name)
+}
+
+func (p *proxies) resting(name string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	health := p.health[name]
+	return health != nil && (health.parked || time.Now().Before(health.until))
+}
+
+func (p *proxies) missed(ctx context.Context, task *orcaTask, err error) {
+	machine := p.machineState(ctx, task)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failed[task.Workspace] = err
+	health := p.health[task.Workspace]
+	if health == nil {
+		health = &dialHealth{}
+		p.health[task.Workspace] = health
+	}
+	if health.parked {
+		return
+	}
+	switch {
+	case machine == providers.StateSuspended || machine == stateGone:
+		health.park(machine)
+		p.log.Warn("parked a kept forward whose Sprite is "+string(machine)+", and keep dials it again once the Sprite runs again", "workspace", task.Workspace, "error", err)
+	case answeredNothing(err):
+		if health.silent++; health.silent >= parkAfter {
+			health.park(machine)
+			p.log.Warn("parked a kept forward whose Sprite answered nothing "+strconv.Itoa(parkAfter)+" times in a row, and keep dials it again once the Sprite suspends and runs again", "workspace", task.Workspace, "error", err)
+			return
+		}
+		p.log.Warn("a kept forward failed, and keep tries it again", "workspace", task.Workspace, "error", err)
+	default:
+		health.misses++
+		wait := min(dialBackoff<<min(health.misses-1, 16), dialBackoffMost)
+		health.until = time.Now().Add(wait)
+		p.log.Warn("a kept forward failed, and keep waits before dialing it again", "workspace", task.Workspace, "wait", wait, "misses", health.misses, "error", err)
+	}
+}
+
+func (h *dialHealth) park(machine providers.State) {
+	h.parked = true
+	h.seen = machine
+}
+
+const stateGone providers.State = "gone"
+
+func (p *proxies) machineState(ctx context.Context, task *orcaTask) providers.State {
+	provider, err := p.open(task)
+	if err != nil {
+		return providers.StateUnknown
+	}
+	ctx, cancel := context.WithTimeout(ctx, answerWithin)
+	defer cancel()
+	machine, err := provider.Get(ctx, task.Machine)
+	if errors.Is(err, providers.ErrNotFound) {
+		return stateGone
+	}
+	if err != nil {
+		return providers.StateUnknown
+	}
+	return machine.State
+}
+
+func (p *proxies) revive(ctx context.Context, task *orcaTask) {
+	p.mu.Lock()
+	health := p.health[task.Workspace]
+	parked := health != nil && health.parked
+	p.mu.Unlock()
+	if !parked {
+		return
+	}
+	machine := p.machineState(ctx, task)
+	if machine == providers.StateUnknown {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.health[task.Workspace] != health {
+		return
+	}
+	if machine == providers.StateRunning && health.seen != providers.StateRunning {
+		delete(p.health, task.Workspace)
+		delete(p.failed, task.Workspace)
+		delete(p.logged, task.Workspace)
+		p.log.Info("a parked kept forward's Sprite runs again, so keep dials it again", "workspace", task.Workspace)
+		return
+	}
+	health.seen = machine
+}
+
+func answeredNothing(err error) bool {
+	var refused *ssh.OpenChannelError
+	return errors.Is(err, io.EOF) || errors.As(err, &refused)
 }
 
 func (p *proxies) failure(name string) error {

@@ -329,3 +329,96 @@ func TestEnsureAcceptsTheSSHForwardAKeeperOfAnEarlierReleaseOpened(t *testing.T)
 		t.Errorf("ensure beside an older keeper's live SSH forward = %v with %d keepers started; want it accepted after starting one", err, starts.Load())
 	}
 }
+
+func TestAKeptForwardParksAfterThreeSilentDialsAndDialsAgainOnceItsSpriteSuspendsAndRuns(t *testing.T) {
+	dir := state.Dir(t.TempDir())
+	fake := &providertest.Fake{}
+	if _, err := fake.Create(t.Context(), providers.Spec{Name: "lane"}); err != nil {
+		t.Fatal(err)
+	}
+	held := newProxies(dir, slog.New(slog.DiscardHandler), func(*orcaTask) (providers.Provider, error) { return fake, nil })
+	task := &orcaTask{Workspace: "lane", Provider: sprites.Name, Machine: "lane", dir: dir}
+	for try := 1; try <= parkAfter; try++ {
+		if held.resting("lane") {
+			t.Fatalf("the forward rested before silent dial %d", try)
+		}
+		held.missed(t.Context(), task, fmt.Errorf("reaching port 1 on lane: %w", io.EOF))
+	}
+	if !held.resting("lane") {
+		t.Fatalf("the forward still dials after %d silent dials", parkAfter)
+	}
+	held.revive(t.Context(), task)
+	if !held.resting("lane") {
+		t.Fatal("a running Sprite that answered nothing was dialed again before it suspended")
+	}
+	if err := fake.Suspend(t.Context(), "lane"); err != nil {
+		t.Fatal(err)
+	}
+	held.revive(t.Context(), task)
+	if !held.resting("lane") {
+		t.Fatal("a suspended Sprite's forward was dialed again")
+	}
+	if err := fake.Wake(t.Context(), "lane"); err != nil {
+		t.Fatal(err)
+	}
+	held.revive(t.Context(), task)
+	if held.resting("lane") || held.failure("lane") != nil {
+		t.Fatalf("the forward still rests after its Sprite ran again: %v", held.failure("lane"))
+	}
+}
+
+func TestAKeptForwardParksAtOnceWhenItsSpriteIsSuspendedOrGone(t *testing.T) {
+	tests := []struct {
+		name    string
+		machine bool
+		suspend bool
+	}{
+		{name: "a suspended Sprite", machine: true, suspend: true},
+		{name: "a destroyed Sprite", machine: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &providertest.Fake{}
+			if tt.machine {
+				if _, err := fake.Create(t.Context(), providers.Spec{Name: "lane"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.suspend {
+				if err := fake.Suspend(t.Context(), "lane"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			held := newProxies(state.Dir(t.TempDir()), slog.New(slog.DiscardHandler), func(*orcaTask) (providers.Provider, error) { return fake, nil })
+			held.missed(t.Context(), &orcaTask{Workspace: "lane", Provider: sprites.Name, Machine: "lane"}, errors.New("i/o timeout"))
+			if health := held.health["lane"]; health == nil || !health.parked {
+				t.Fatalf("health = %+v, want parked after one failed dial", health)
+			}
+		})
+	}
+}
+
+func TestAKeptForwardBacksOffExponentiallyOnTransientFailuresAndResetsOnSuccess(t *testing.T) {
+	fake := &providertest.Fake{}
+	if _, err := fake.Create(t.Context(), providers.Spec{Name: "lane"}); err != nil {
+		t.Fatal(err)
+	}
+	held := newProxies(state.Dir(t.TempDir()), slog.New(slog.DiscardHandler), func(*orcaTask) (providers.Provider, error) { return fake, nil })
+	task := &orcaTask{Workspace: "lane", Provider: sprites.Name, Machine: "lane"}
+	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second, 160 * time.Second, 5 * time.Minute, 5 * time.Minute}
+	for i, wait := range want {
+		before := time.Now()
+		held.missed(t.Context(), task, errors.New("503 opening the proxy"))
+		health := held.health["lane"]
+		if got := health.until.Sub(before); got < wait || got > wait+time.Second {
+			t.Fatalf("miss %d waits %s, want %s", i+1, got, wait)
+		}
+		if health.parked || !held.resting("lane") {
+			t.Fatalf("miss %d: parked=%t resting=%t, want a timed rest", i+1, health.parked, held.resting("lane"))
+		}
+	}
+	held.succeed("lane")
+	if held.resting("lane") {
+		t.Fatal("a forward that dialed again still rests")
+	}
+}

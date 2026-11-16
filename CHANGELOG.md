@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **The Orca keeper stops dialing Sprites that cannot answer.** In the 24 hours
+  before this change the keeper logged 406 failed forward dials and 528 failed
+  reopens across 54 workspaces: 391 Sprites API timeouts, 284 Sprites that
+  answered nothing (one workspace 149 times), and 100 API 502s and 503s. A
+  timeout or API error now waits 5 seconds, doubling to 5 minutes, before the
+  next dial. A forward whose Sprite is suspended or gone parks at once, and one
+  whose Sprite answers nothing parks after 3 dials in a row. A parked forward
+  refuses connections without dialing, logs once, and gets no key writes until
+  its Sprite is seen running again after it was not.
 - **`cc-remote step` forwards stdin only with `--stdin`.** It read any stdin
   that was not a terminal to its end before starting the command, so a caller
   whose stdin was an open pipe that never closed, such as a background shell,

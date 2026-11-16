@@ -373,7 +373,14 @@ reachable. A machine that still reports its storage gone 10 minutes after its
 first failed reopen runs nothing again, so keep releases its task, logs that
 once, and stops reopening it; `reconnect` keeps it again. The 10 minutes pass
 over a platform restart, during which a live machine answers `Storage not
-ready` for a few seconds. `orca stop` and `destroy` release the task before
+ready` for a few seconds. A failed dial through a kept Sprite task's forward
+rests that forward. A timeout or a Sprites API error waits 5 seconds, doubling
+to 5 minutes, before the next dial. A Sprite that is suspended or gone parks
+the forward at once, and one that answers nothing parks it after 3 dials in a
+row. A parked forward refuses connections without dialing and gets no key
+writes until keep sees its Sprite running after it was not, which happens when
+something else wakes it, such as `reconnect`; a dial that succeeds clears the
+rest. `orca stop` and `destroy` release the task before
 they close its forward, so keep never reopens a stopped lane's forward. A task
 launched by a release without keep is not kept until `reconnect` runs on it.
 keep logs to `orca/keeper.log` in the state directory.

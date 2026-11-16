@@ -69,7 +69,11 @@ later takes its first at the next 30-second pass, so a new worker gets its first
 however many other machines answer nothing. When a reopen
 fails, keep asks the provider whether the machine's storage is reachable, and once a failing machine
 has reported its storage gone for 10 minutes, keep releases its task, logs that once, and reopens it
-no more; orca reconnect keeps it again. orca stop and destroy release a task before they close its forward, so keep
+no more; orca reconnect keeps it again. A failed dial through a kept Sprite task's forward also rests
+that forward: a timeout or an API error waits 5 seconds, doubling to 5 minutes, before the next dial;
+a Sprite that is suspended or gone parks it at once, and one that answers nothing parks it after 3 dials
+in a row. A parked forward refuses connections without dialing and gets no key writes until its Sprite is
+seen running again after it was not, and a dial that succeeds clears the rest. orca stop and destroy release a task before they close its forward, so keep
 never reopens a stopped lane's forward. Every 10 minutes, starting with its first pass, it also runs
 orca prune, so a stopped lane's or a gone machine's Orca environment does not linger for Orca to keep
 reading and retrying. Each 30-second pass reads again the config that kept each task, the one its
@@ -342,6 +346,12 @@ func (k *keeper) pass(ctx context.Context, kept *keptTask) (bool, error) {
 	if released, err := k.reopen(ctx, kept, task); err != nil || released {
 		return false, err
 	}
+	if task.proxied() {
+		k.held.revive(ctx, task)
+		if k.held.resting(kept.name) {
+			return true, nil
+		}
+	}
 	lines := k.linesOf(kept.name)
 	for _, r := range k.renewals {
 		line := lines[r.key]
@@ -368,6 +378,9 @@ func (k *keeper) reopen(ctx context.Context, kept *keptTask, task *orcaTask) (bo
 	}
 	if !storageLost(ctx, k.storage, task) {
 		kept.since = time.Time{}
+		if task.proxied() && k.held.resting(kept.name) {
+			return false, nil
+		}
 		k.log.Warn("a kept forward did not reopen, and the next pass tries again", "workspace", kept.name, "error", failed)
 		return false, nil
 	}
