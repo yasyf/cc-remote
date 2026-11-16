@@ -621,7 +621,7 @@ func TestProvisionPackAddsOnlyVerifiedNativeRoots(t *testing.T) {
 			script := strings.ReplaceAll(string(scripts.ProvisionScript), "/var/lib/cc-remote/build", filepath.Join(root, "build"))
 			writePluginTestFile(t, filepath.Join(fakes, "provision.sh"), []byte(script), 0o700)
 			cmd := exec.Command("bash", filepath.Join(fakes, "provision.sh"), "pack", "tools-fingerprint")
-			cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+fakes+":"+os.Getenv("PATH"), "SUDO_USER=builder")
+			cmd.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "PATH="+fakes+":"+os.Getenv("PATH"), "SUDO_USER=builder")
 			out, err := cmd.CombinedOutput()
 			if tt.wantErr != "" {
 				if exitCode(err) != 1 || !strings.Contains(string(out), tt.wantErr) {

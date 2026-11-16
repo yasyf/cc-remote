@@ -150,7 +150,7 @@ exec %s "$@"
 			}
 			cmd := exec.Command("bash", filepath.Join(h.fakes, "plugins.sh"), "install")
 			cmd.Stdin = strings.NewReader("synthetic-token\nretained-input\n")
-			cmd.Env = append(os.Environ(), "HOME="+h.home, "PATH="+h.fakes+":"+os.Getenv("PATH"), "FAKE_STATE="+filepath.Join(h.fakes, "state.json"), "FAKE_CATALOG="+filepath.Join(h.fakes, "catalog.json"), "FAKE_LOG="+filepath.Join(h.fakes, "calls.log"), "FAKE_SOURCES="+filepath.Join(h.fakes, "sources"), "REAL_GIT="+realGit)
+			cmd.Env = append(os.Environ(), "HOME="+h.home, "XDG_CONFIG_HOME="+filepath.Join(h.home, ".config"), "PATH="+h.fakes+":"+os.Getenv("PATH"), "FAKE_STATE="+filepath.Join(h.fakes, "state.json"), "FAKE_CATALOG="+filepath.Join(h.fakes, "catalog.json"), "FAKE_LOG="+filepath.Join(h.fakes, "calls.log"), "FAKE_SOURCES="+filepath.Join(h.fakes, "sources"), "REAL_GIT="+realGit)
 			done := startArtifactScript(cmd)
 			seen := map[string]bool{}
 			for len(seen) < 2 {

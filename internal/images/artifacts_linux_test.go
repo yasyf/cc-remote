@@ -590,7 +590,7 @@ func TestPluginsWorkersCannotConsumeTokenInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", filepath.Join(host.fakes, "plugins.sh"), "install")
-	cmd.Env = append(os.Environ(), "HOME="+host.home, "PATH="+host.fakes+":"+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(), "HOME="+host.home, "XDG_CONFIG_HOME="+filepath.Join(host.home, ".config"), "PATH="+host.fakes+":"+os.Getenv("PATH"))
 	cmd.Stdin = strings.NewReader("synthetic-token\nretained-input\n")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("worker inherited token input or environment: %v %s", err, out)

@@ -186,7 +186,7 @@ func TestPluginsPublishProvesLinksWithoutRunningVersions(t *testing.T) {
 				family = tt.family
 			}
 			cmd := exec.Command("bash", filepath.Join(fakes, "plugins.sh"), tt.phase, stamp)
-			cmd.Env = append(append(os.Environ(), "HOME="+home, "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "FAMILY="+family), tt.env...)
+			cmd.Env = append(append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "FAMILY="+family), tt.env...)
 			out, err := cmd.CombinedOutput()
 			ready, readyErr := os.ReadFile(filepath.Join(home, ".cc-remote", "ready"))
 			if got := logLines(t, filepath.Join(root, "tool.log")); !slices.Equal(got, tt.wantRan) {

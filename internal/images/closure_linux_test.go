@@ -2093,7 +2093,7 @@ func TestPluginsVerifyProvesTheClosureConsumers(t *testing.T) {
 			).Replace(string(scripts.Plugins))
 			writePluginTestFile(t, filepath.Join(fakes, "plugins.sh"), []byte(plugins), 0o700)
 			cmd := exec.Command("bash", filepath.Join(fakes, "plugins.sh"), "verify")
-			cmd.Env = append(append(os.Environ(), "HOME="+home, "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "FAMILY="+tt.family), tt.env...)
+			cmd.Env = append(append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "PATH="+fakes+":"+os.Getenv("PATH"), "TEST_ROOT="+root, "FAMILY="+tt.family), tt.env...)
 			out, err := cmd.CombinedOutput()
 			if recorded, readErr := os.ReadFile(filepath.Join(home, ".cc-remote", "verify-progress")); readErr != nil || string(recorded) != tt.progress+"\n" {
 				t.Errorf("verify progress = %q, %v, want %q", recorded, readErr, tt.progress)
