@@ -434,13 +434,15 @@ func TestRuntimeEnsureScriptCountsAnExistingServiceAsCreated(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			home, fakes := t.TempDir(), t.TempDir()
 			serveJSON := filepath.Join(home, ".cc-remote", "orca", "serve.json")
+			serveSh := filepath.Join(home, ".cc-remote", "orca", "serve.sh")
 			files := map[string]string{
 				filepath.Join(home, "tools", "AppRun"): "#!/bin/sh\n",
 				serveJSON:                              readyLine("ws://stale:7001") + "\n",
-				filepath.Join(fakes, "sprite-env"): "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + filepath.Join(fakes, "calls") + "\ncase \"$2\" in\n" +
-					"  get) echo \"service not found: $3\"; echo 'curl: (22) The requested URL returned error: 404' >&2; exit 22 ;;\n" +
-					"  create) echo '" + tt.answer + "'; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22 ;;\n" +
-					"  restart) echo '" + readyLine("ws://fresh:7001") + "' > " + serveJSON + " ;;\n" +
+				filepath.Join(fakes, "sprite-env"): "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + filepath.Join(fakes, "calls") + "\ncase \"$2 $3\" in\n" +
+					"  'get cc-remote-orca') echo '{\"name\":\"cc-remote-orca\",\"cmd\":\"" + serveSh + "\",\"args\":[],\"needs\":[],\"state\":{\"status\":\"running\"}}' ;;\n" +
+					"  get*) echo \"service not found: $3\"; echo 'curl: (22) The requested URL returned error: 404' >&2; exit 22 ;;\n" +
+					"  create*) echo '" + tt.answer + "'; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22 ;;\n" +
+					"  restart*) echo '" + readyLine("ws://fresh:7001") + "' > " + serveJSON + " ;;\n" +
 					"esac\n",
 			}
 			for path, body := range files {
@@ -457,7 +459,10 @@ func TestRuntimeEnsureScriptCountsAnExistingServiceAsCreated(t *testing.T) {
 			var stderr strings.Builder
 			cmd.Stderr = &stderr
 			out, err := cmd.Output()
-			want := []string{"services get cc-remote-payload", "services create cc-remote-orca --cmd " + home + "/.cc-remote/orca/serve.sh --duration 1ms --no-stream"}
+			want := []string{"services get cc-remote-payload", "services create cc-remote-orca --cmd " + serveSh + " --duration 1ms --no-stream"}
+			if !tt.wantErr {
+				want = append(want, "services get cc-remote-orca")
+			}
 			ready := "ws://stale:7001"
 			if tt.restart {
 				want, ready = append(want, "services restart cc-remote-orca"), "ws://fresh:7001"

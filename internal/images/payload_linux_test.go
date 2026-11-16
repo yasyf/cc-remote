@@ -33,6 +33,10 @@ touch "$6/.mounted"
 `
 	fakeSpriteEnv = `#!/bin/sh
 printf '%s\n' "$*" >> "$TEST_ROOT/sprite-env.log"
+if [ "$2" = get ] && [ -f "$TEST_ROOT/service" ]; then
+  echo '{"name":"cc-remote-payload","cmd":"sudo","args":["-n","sh","-c","/opt/cc-remote/payload-mount.sh && exec sleep infinity"],"needs":[],"state":{"status":"running"}}'
+  exit 0
+fi
 test "$2" = create || exit 64
 printf '%s\n' "$@" > "$TEST_ROOT/create.argv"
 if [ -f "$TEST_ROOT/service" ]; then
@@ -506,8 +510,12 @@ func TestProvisionPayloadRegistersTheRemountService(t *testing.T) {
 				t.Fatalf("payload failed: %v\n%s", err, out)
 			}
 			calls := logLines(t, filepath.Join(root, "sprite-env.log"))
-			if created := logLines(t, filepath.Join(root, "create.argv")); !slices.Equal(calls, []string{strings.Join(wantCreate, " ")}) || !slices.Equal(created, wantCreate) {
-				t.Errorf("sprite-env saw %q and created %q, want only %q, an existing service's 409 counted as created", calls, created, wantCreate)
+			wantCalls := []string{strings.Join(wantCreate, " ")}
+			if existing {
+				wantCalls = append(wantCalls, "services get cc-remote-payload")
+			}
+			if created := logLines(t, filepath.Join(root, "create.argv")); !slices.Equal(calls, wantCalls) || !slices.Equal(created, wantCreate) {
+				t.Errorf("sprite-env saw %q and created %q, want %q, an existing service's 409 counted as created once its get matched", calls, created, wantCalls)
 			}
 		})
 	}

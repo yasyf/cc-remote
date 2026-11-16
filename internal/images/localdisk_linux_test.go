@@ -50,7 +50,10 @@ func newLocalDiskBox(t *testing.T) localDiskBox {
 		"mount":      "#!/bin/sh\necho \"$@\" >> " + box.mounts + "\ncase \"$*\" in\n  *--bind*) touch " + box.mounted + " ;;\n  *loop*) mv \"$3\" \"$3.covered\" ;;\nesac\n",
 		"mkfs.ext4":  "#!/bin/sh\necho \"$@\" >> " + box.mkfs + "\n",
 		"findmnt":    "#!/bin/sh\necho /dev/vdb\n[ ! -e " + box.volume() + ".covered ] || echo /dev/loop0\n",
-		"sprite-env": "#!/bin/sh\necho \"$@\" >> " + box.services + "\n[ ! -e " + box.services + ".exist ] || { echo \"service already exists: $3\"; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22; }\n",
+		"sprite-env": "#!/bin/sh\necho \"$@\" >> " + box.services + "\ncase \"$2\" in\n" +
+			"  get) echo '" + bootServiceJSON(LocalDiskService, box.boot) + "' ;;\n" +
+			"  create) [ ! -e " + box.services + ".exist ] || { echo \"service already exists: $3\"; echo 'curl: (22) The requested URL returned error: 409' >&2; exit 22; } ;;\n" +
+			"esac\n",
 	} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
@@ -148,8 +151,8 @@ func TestTheMoveCountsABootServiceThatAlreadyExistsAsCreated(t *testing.T) {
 		t.Fatal(err)
 	}
 	box.move(t)
-	if services := lines(t, box.services); len(services) != 1 || !strings.HasPrefix(services[0], "services create "+LocalDiskService+" ") {
-		t.Errorf("services %q, want the one create its 409 answered", services)
+	if services := lines(t, box.services); len(services) != 2 || !strings.HasPrefix(services[0], "services create "+LocalDiskService+" ") || services[1] != "services get "+LocalDiskService {
+		t.Errorf("services %q, want the one create its 409 answered and the get that found it unchanged", services)
 	}
 }
 
@@ -246,4 +249,8 @@ func TestABootRefusesWhenTheVolumeIsNeitherMountedNorOnTheDisk(t *testing.T) {
 	if got := lines(t, box.mounts); len(got) != 2 {
 		t.Errorf("a boot with no volume bound the home onto the bare disk: %q", got)
 	}
+}
+
+func bootServiceJSON(name, boot string) string {
+	return `{"name":"` + name + `","cmd":"sudo","args":["-n","sh","-c","` + boot + ` && exec sleep infinity"],"needs":[],"state":{"status":"running"}}`
 }

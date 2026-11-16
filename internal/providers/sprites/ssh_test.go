@@ -16,6 +16,10 @@ import (
 const (
 	fakeSpriteEnv = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DIR/sprite-env.log"
+if [ "$2" = get ] && [ -f "$FAKE_DIR/sshd-service" ]; then
+  echo '{"name":"sshd","cmd":"sudo","args":["sh","-c","mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e"],"needs":[],"state":{"status":"running"}}'
+  exit 0
+fi
 test "$2" = create || exit 64
 printf '%s\n' "$@" > "$FAKE_DIR/create.argv"
 if [ -f "$FAKE_DIR/sshd-service" ]; then
@@ -107,8 +111,12 @@ func TestAuthorizeScriptWaitsForSSHDToAnswer(t *testing.T) {
 			if len(scans) == 0 || (tt.wantScans != 0 && len(scans) != tt.wantScans) || slices.ContainsFunc(scans, func(scan string) bool { return scan != wantScan }) {
 				t.Errorf("ssh-keyscan ran %d times with %q, want %d times (0 = any) with %q", len(scans), scans, tt.wantScans, wantScan)
 			}
-			if calls := loggedLines(t, filepath.Join(fakes, "sprite-env.log")); !slices.Equal(calls, []string{strings.Join(wantCreate, " ")}) {
-				t.Errorf("sprite-env saw %q, want only the create", calls)
+			wantCalls := []string{strings.Join(wantCreate, " ")}
+			if tt.existing {
+				wantCalls = append(wantCalls, "services get sshd")
+			}
+			if calls := loggedLines(t, filepath.Join(fakes, "sprite-env.log")); !slices.Equal(calls, wantCalls) {
+				t.Errorf("sprite-env saw %q, want %q", calls, wantCalls)
 			}
 			if created := loggedLines(t, filepath.Join(fakes, "create.argv")); !slices.Equal(created, wantCreate) {
 				t.Errorf("create = %q, want %q", created, wantCreate)
