@@ -282,10 +282,49 @@ const (
 	awsKeysFile       = memoryDir + "/aws-credentials"
 )
 
+const KeysFile = memoryDir + "/keys.env"
+
 var (
 	GitHubAppScript = memoryScript(GitHubAppFile)
 	AWSScript       = memoryScript(awsFile) + " && " + awsKeysScript
+	AWSConfigScript = AWSScript + ` && printf '[default]\ncredential_process = cat ` + awsFile + `\n' > ` + awsConfigFile
+	KeysScript      = memoryScript(KeysFile)
 )
+
+type Keys struct {
+	Key, Judge, TypeSafe, GitHub, Name, Email, Trunk, Gemini, Env []byte
+	GitHubApp, AWS                                                bool
+}
+
+func (a Agent) KeysEnv(k Keys) []byte {
+	judge := a.judge()
+	exports := [][2]string{{a.variable(), string(k.Key)}, {judge.variable(), string(k.Judge)}, {typesafeVariable, string(k.TypeSafe)}, {trunkVariable, string(k.Trunk)}, {geminiVariable, string(k.Gemini)}}
+	git := []string{"user.name", string(k.Name), "user.email", string(k.Email)}
+	if len(k.GitHub) > 0 {
+		exports = append(exports, [2]string{githubVariables[0], string(k.GitHub)})
+		git = append(git, "credential.https://github.com.helper", "", "credential.https://github.com.helper", "!gh auth git-credential")
+	}
+	if k.GitHubApp {
+		exports = append(exports, [2]string{githubAppVariable, GitHubAppFile})
+	}
+	if k.AWS {
+		exports = append(exports, [2]string{awsVariable, awsConfigFile}, [2]string{awsKeysVariable, awsKeysFile})
+	}
+	lines := []string{"unset " + strings.Join(slices.Concat(a.cleared(), judge.cleared()), " ")}
+	for _, export := range exports {
+		if export[1] != "" {
+			lines = append(lines, "export "+export[0]+"="+remote.Quote(export[1]))
+		}
+	}
+	lines = append(lines, "export GIT_CONFIG_COUNT="+strconv.Itoa(len(git)/2))
+	for i := 0; i < len(git); i += 2 {
+		lines = append(lines, "export GIT_CONFIG_KEY_"+strconv.Itoa(i/2)+"="+remote.Quote(git[i]), "export GIT_CONFIG_VALUE_"+strconv.Itoa(i/2)+"="+remote.Quote(git[i+1]))
+	}
+	if len(k.Env) > 0 {
+		lines = append(lines, "export "+string(k.Env))
+	}
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
 
 const awsKeysScript = `tmp=$(mktemp ` + awsKeysFile + `.XXXXXX) && { echo "[default]"; for pair in AccessKeyId:aws_access_key_id SecretAccessKey:aws_secret_access_key SessionToken:aws_session_token; do printf '%s\n' "$(sed -n "s/.*\"${pair%%:*}\":\"\([^\"]*\)\".*/${pair#*:} = \1/p" ` + awsFile + `)"; done; } > "$tmp" && mv "$tmp" ` + awsKeysFile
 
