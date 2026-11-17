@@ -29,10 +29,12 @@ func NewRootCmd() *cobra.Command {
 		newVerifyCmd(),
 		newProxyCmd(),
 		newKeyCmd(),
+		newKeysCmd(),
 		newImagesCmd(),
 		newPayloadCmd(),
 		newJobsCmd(),
 		newStepCmd(),
+		newPoolCmd(),
 		newOrcaCmd(runner),
 	)
 	return root

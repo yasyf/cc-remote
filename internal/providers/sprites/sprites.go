@@ -423,6 +423,10 @@ func (p *Provider) destroy(ctx context.Context, id string) error {
 }
 
 func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.Reader) (providers.Result, error) {
+	return p.Stream(ctx, id, cmd, stdin, nil)
+}
+
+func (p *Provider) Stream(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout io.Writer) (providers.Result, error) {
 	if providers.CheckName(id, nameLimit) != nil {
 		return providers.Result{}, fmt.Errorf("sprite %q: %w", id, providers.ErrNotFound)
 	}
@@ -430,10 +434,17 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	if stdin == nil {
 		args = append(args, "--no-stdin")
 	}
-	command := append(append(args, "--"), cmd...)
-	result, err := p.Runner.Run(ctx, p.command(stdin, command...))
+	var streamed byteCount
+	run := func() (providers.Result, error) {
+		command := p.command(stdin, append(append(args, "--"), cmd...)...)
+		if stdout != nil {
+			command.Stdout = io.MultiWriter(stdout, &streamed)
+		}
+		return p.Runner.Run(ctx, command)
+	}
+	result, err := run()
 	for _, wait := range startWaits {
-		if err != nil || !neverStarted(result) || !rewound(stdin) {
+		if err != nil || !neverStarted(result, streamed) || !rewound(stdin) {
 			break
 		}
 		select {
@@ -441,7 +452,7 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 			return result, ctx.Err()
 		case <-time.After(wait):
 		}
-		result, err = p.Runner.Run(ctx, p.command(stdin, command...))
+		result, err = run()
 	}
 	if err != nil || result.ExitCode == 0 {
 		return result, err
@@ -450,8 +461,8 @@ func (p *Provider) Exec(ctx context.Context, id string, cmd []string, stdin io.R
 	return result, err
 }
 
-func neverStarted(result providers.Result) bool {
-	return result.ExitCode != 0 && len(result.Stdout) == 0 && bytes.HasPrefix(result.Stderr, []byte(startFailure))
+func neverStarted(result providers.Result, streamed byteCount) bool {
+	return result.ExitCode != 0 && len(result.Stdout) == 0 && streamed == 0 && bytes.HasPrefix(result.Stderr, []byte(startFailure))
 }
 
 func rewound(stdin io.Reader) bool {

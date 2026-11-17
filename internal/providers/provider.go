@@ -25,6 +25,10 @@ type Provider interface {
 	List(ctx context.Context, labels map[string]string) ([]Machine, error)
 }
 
+type Streamer interface {
+	Stream(ctx context.Context, id string, cmd []string, stdin io.Reader, stdout io.Writer) (Result, error)
+}
+
 type Extender interface {
 	Extend(ctx context.Context, id string, by time.Duration) (time.Time, error)
 }

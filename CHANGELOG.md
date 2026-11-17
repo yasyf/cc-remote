@@ -6,6 +6,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`cc-remote step` streams, and a dropped caller can attach again.** Step
+  prints its id to stderr first, takes `--id` so a caller can choose it, and
+  streams the command's output as it is written instead of replaying it once the
+  command ends. `cc-remote step attach <machine> <id> --offset <bytes>` follows a
+  step that already started from the bytes the caller holds, and a step with the
+  id of one that already started follows it instead of starting another. A
+  Sprite stays awake for as long as the command runs, through a task it renews
+  every 30 minutes, so a caller that drops for longer than the idle window no
+  longer lets the Sprite suspend and kill the command.
+- **`cc-remote keys push <machine>` hands a machine its keys with no Orca task.**
+  It captures each `orca.keys` key as a launch does and writes them to the
+  machine's `/dev/shm/cc-remote`: the exports every step sources before its
+  command, the AWS session and the GitHub App token. It prints the earliest
+  expiry, and pushing again refreshes them, so a caller renews tokens without
+  `orca keep`.
+- **`cc-remote pool claim <lane>` claims a warm workspace with no Orca task.**
+  It takes an unused warm workspace, or creates one under the lane's name when
+  none is ready, starts a fill, and prints the workspace and its machine.
+
+### Changed
+- **`cc-remote step --stdin` keeps the forwarded stdin off the machine's disk.**
+  It is held in `/dev/shm` until the command opens it, then removed.
+
 ### Fixed
 - **`cc-remote step` says when a suspend stopped its command.** Suspending a
   Sprite stops every service, the step's included, and a client that lost its
