@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,12 +26,18 @@ const (
 	stepStop    = 30 * time.Second
 	stepTrailer = remote.Prefix + " step"
 	stepMemory  = "/dev/shm/" + remote.Prefix
-	spriteTasks = "curl -fsS -m 5 --unix-socket /.sprite/api.sock -H 'Host: sprite' -H 'Content-Type: application/json'"
+	stepHold    = `awake -X PUT -d '{"expire":"1h"}'`
+	stepRelease = "awake -X DELETE"
 )
 
 var (
 	stepRedial = 5 * time.Second
 	stepID     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	stepAwake  = map[providers.Supervisor]string{
+		providers.SupervisorSpriteEnv: `awake() { curl -fsS -m 5 --unix-socket /.sprite/api.sock -H 'Host: sprite' -H 'Content-Type: application/json' "http://sprite/v1/tasks/cc-remote-step-$step" "$@" > /dev/null; }`,
+	}
+	stepRenew = "1800"
+	stepRetry = "30"
 )
 
 func newStepCmd() *cobra.Command {
@@ -115,12 +122,13 @@ func runStep(ctx context.Context, provider providers.Provider, machine, id strin
 	if _, err := fmt.Fprintf(notes, "%s: step %s on %s\n", remote.Prefix, id, machine); err != nil {
 		return err
 	}
-	launch, awake, finish := stepSupervisor(provider.Traits().Supervisor)
+	supervisor := provider.Traits().Supervisor
+	launch, finish := stepSupervisor(supervisor)
 	run := ""
 	if argv != nil {
-		run = stepRun(argv, awake, finish)
+		run = stepRun(argv, stepAwake[supervisor], finish)
 	}
-	script, streamed := stepScript(launch), offset
+	script, streamed := stepScript(launch, stepAwake[supervisor]), offset
 	for {
 		var got byteCount
 		result, err := stream(ctx, provider, machine, []string{"sh", "-c", script, "step", id, strconv.Itoa(streamed), run}, bytes.NewReader(stdin), io.MultiWriter(out, &got))
@@ -139,6 +147,8 @@ func runStep(ctx context.Context, provider providers.Provider, machine, id strin
 			return &CommandExit{code}
 		case ended && size == streamed:
 			return nil
+		case ended && size < streamed:
+			return fmt.Errorf("step %s on %s ended with %d bytes of output, fewer than the %d already read", id, machine, size, streamed)
 		}
 		slog.Warn("step connection dropped, reconnecting", "step", id, "machine", machine, "streamed", streamed, "exit", result.ExitCode, "stderr", string(bytes.TrimSpace(result.Stderr)))
 		select {
@@ -187,58 +197,84 @@ func stepEnd(stderr []byte) (size, code int, ended, failed bool) {
 func stopStep(ctx context.Context, provider providers.Provider, machine, id string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepStop)
 	defer cancel()
-	_, err := provider.Exec(ctx, machine, []string{"sh", "-c", `dir="` + remote.StateDir + `/steps/$1"; test -e "$dir/exit" || kill -s TERM -- "-$(cat "$dir/pid")"`, "stop", id}, nil)
+	script := `step=$1 dir="` + remote.StateDir + `/steps/$1"; test -e "$dir/exit" || kill -s TERM -- "-$(cat "$dir/pid")"`
+	if awake := stepAwake[provider.Traits().Supervisor]; awake != "" {
+		script = awake + "\n" + script + "\n" + stepRelease
+	}
+	_, err := provider.Exec(ctx, machine, []string{"sh", "-c", script, "stop", id}, nil)
 	return err
 }
 
-func stepSupervisor(supervisor providers.Supervisor) (launch, awake, finish string) {
+func stepSupervisor(supervisor providers.Supervisor) (launch, finish string) {
 	switch supervisor {
 	case providers.SupervisorSpriteEnv:
-		task := spriteTasks + ` "http://sprite/v1/tasks/cc-remote-step-${dir##*/}"`
 		return `sprite-env services create "cc-remote-step-$1" --cmd "$dir/run" --dir "$PWD" --duration 1ms --no-stream >&2`,
-			`while :; do ` + task + ` -X PUT -d '{"expire":"1h"}' > /dev/null 2>&1; sleep 1800; done 8<&- 9>&- &`,
-			task + ` -X DELETE > /dev/null 9>&-; exec sprite-env services delete "cc-remote-step-${dir##*/}" > /dev/null 9>&-`
+			`exec sprite-env services delete "cc-remote-step-${dir##*/}" > /dev/null 9>&-`
 	case providers.SupervisorSetsid:
-		return `nohup setsid "$dir/run" > /dev/null 2>&1 < /dev/null &`, "", ""
+		return `nohup setsid "$dir/run" > /dev/null 2>&1 < /dev/null &`, ""
 	}
 	panic("unknown step supervisor " + string(supervisor))
 }
 
-func stepScript(launch string) string {
-	return remote.Script(
-		`dir="`+remote.StateDir+`/steps/$1" memory="`+stepMemory+`/steps/$1" offset=$2`,
-		`trap 'code=$?; test -n "${framed-}" || echo "`+stepTrailer+` failed $code" >&2' EXIT`,
-		`mkdir -p "${dir%/*}"`,
-		`if test -n "$3" && mkdir -m 700 "$dir" 2> /dev/null; then`,
-		`  (umask 077 && mkdir -p "${memory%/*}" && cat > "$memory.part" && mv "$memory.part" "$memory")`,
-		`  export -p > "$dir/env"`,
-		`  printf '%s\n' "$3" > "$dir/run"`,
-		`  chmod 700 "$dir/run"`,
-		`  : > "$dir/output"`,
-		"  "+launch,
-		"fi",
-		`test -d "$dir" || { echo "`+remote.Prefix+`: no step $1 started on this machine" >&2; exit 1; }`,
-		`until test -e "$dir/pid"; do sleep 0.1; done`,
-		`if test -e "$dir/exit"; then tail -c "+$((offset + 1))" "$dir/output"; else tail -c "+$((offset + 1))" -f --pid="$(cat "$dir/pid")" "$dir/output"; fi`,
-		`flock "$dir/lock" true`,
-		`test -e "$dir/exit" || { echo "`+remote.Prefix+`: step $1 stopped before its command recorded an exit status: the machine suspended mid-step, which stops every service and the command with it; run the step again" >&2; exit 1; }`,
-		"framed=1",
-		`echo "`+stepTrailer+` ended $(wc -c < "$dir/output") $(cat "$dir/exit")" >&2`,
-	)
+func stepScript(launch, awake string) string {
+	held := []string{}
+	if awake != "" {
+		held = []string{
+			"  " + awake,
+			"  tries=0",
+			"  until " + stepHold + "; do",
+			"    tries=$((tries + 1))",
+			`    test "$tries" -lt 3 || { rm -rf "$dir"; echo "` + remote.Prefix + `: step $1 could not hold the machine awake, so its command never started" >&2; exit 1; }`,
+			"    sleep 2",
+			"  done",
+		}
+	}
+	return remote.Script(slices.Concat(
+		[]string{
+			`step=$1 dir="` + remote.StateDir + `/steps/$1" memory="` + stepMemory + `/steps/$1" offset=$2`,
+			`trap 'code=$?; test -n "${framed-}" || echo "` + stepTrailer + ` failed $code" >&2' EXIT`,
+			`mkdir -p "${dir%/*}"`,
+			`if test -n "$3" && mkdir -m 700 "$dir" 2> /dev/null; then`,
+		},
+		held,
+		[]string{
+			`  (umask 077 && mkdir -p "${memory%/*}" && cat > "$memory.part" && mv "$memory.part" "$memory")`,
+			`  export -p > "$dir/env"`,
+			`  printf '%s\n' "$3" > "$dir/run"`,
+			`  chmod 700 "$dir/run"`,
+			`  : > "$dir/output"`,
+			"  " + launch,
+			"fi",
+			`test -d "$dir" || { echo "` + remote.Prefix + `: no step $1 started on this machine" >&2; exit 1; }`,
+			`until test -e "$dir/pid"; do sleep 0.1; done`,
+			`if test -e "$dir/exit"; then tail -c "+$((offset + 1))" "$dir/output"; else tail -c "+$((offset + 1))" -f --pid="$(cat "$dir/pid")" "$dir/output"; fi`,
+			`flock "$dir/lock" true`,
+			`test -e "$dir/exit" || { echo "` + remote.Prefix + `: step $1 stopped before its command recorded an exit status: it was stopped, or the machine suspended mid-step, which stops every service and the command with it; run the step again" >&2; exit 1; }`,
+			"framed=1",
+			`echo "` + stepTrailer + ` ended $(wc -c < "$dir/output") $(cat "$dir/exit")" >&2`,
+		},
+	)...)
 }
 
 func stepRun(argv []string, awake, finish string) string {
 	lines := []string{
 		"#!/bin/sh",
 		`dir=${0%/*}`,
-		`memory="` + stepMemory + `/steps/${dir##*/}"`,
+		`step=${dir##*/}`,
+		`memory="` + stepMemory + `/steps/$step"`,
 		`exec 9> "$dir/lock"`,
 		"flock 9",
 		`if ! test -e "$dir/pid"; then`,
 		`  echo $$ > "$dir/pid"`,
 	}
 	if awake != "" {
-		lines = append(lines, "  "+awake, "  awake=$!")
+		lines = append(lines,
+			"  "+awake,
+			`  trap 'kill "$renew" 2> /dev/null; `+stepRelease+`' EXIT`,
+			`  trap 'exit 143' HUP INT TERM`,
+			`  (while sleep `+stepRenew+`; do until `+stepHold+`; do sleep `+stepRetry+`; done; done) > /dev/null 2>&1 8<&- 9>&- &`,
+			"  renew=$!",
+		)
 	}
 	lines = append(lines,
 		`  exec 8< "$memory"`,
@@ -247,7 +283,7 @@ func stepRun(argv []string, awake, finish string) string {
 		`  echo $? > "$dir/exit"`,
 	)
 	if awake != "" {
-		lines = append(lines, `  kill "$awake"`)
+		lines = append(lines, `  kill "$renew"`, "  "+stepRelease, "  trap - EXIT HUP INT TERM")
 	}
 	return strings.Join(append(lines, "fi", finish), "\n")
 }

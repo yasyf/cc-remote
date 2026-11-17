@@ -146,3 +146,95 @@ func TestAnInterruptedStepStopsItsCommand(t *testing.T) {
 	}
 	waitForFile(t, filepath.Join(m.home, "stopped"))
 }
+
+func keepAwake(t *testing.T, script string) {
+	t.Helper()
+	original, renew, retry := stepAwake[providers.SupervisorSetsid], stepRenew, stepRetry
+	stepAwake[providers.SupervisorSetsid], stepRenew, stepRetry = script, "0.2", "0.05"
+	t.Cleanup(func() { stepAwake[providers.SupervisorSetsid], stepRenew, stepRetry = original, renew, retry })
+}
+
+func finished(_ int, run *exec.Cmd, stdout, stderr *bytes.Buffer) providers.Result {
+	_ = run.Wait()
+	return providers.Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: run.ProcessState.ExitCode()}
+}
+
+func awakeLog(t *testing.T, home string) []string {
+	t.Helper()
+	held, err := os.ReadFile(filepath.Join(home, "awake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(held)), "\n")
+}
+
+func TestStoppingAStepReleasesItsKeepAwakeTask(t *testing.T) {
+	keepAwake(t, `awake() { echo "$step $*" >> "$HOME/awake"; }`)
+	stepRenew = "60"
+	ctx, cancel := context.WithCancel(t.Context())
+	var m *stepMachine
+	m = newStepMachine(t, func(call int, run *exec.Cmd, stdout, _ *bytes.Buffer) providers.Result {
+		if call == 1 {
+			waitForFile(t, filepath.Join(m.home, "started"))
+			cancel()
+			hangUp(run)
+			return providers.Result{ExitCode: 255}
+		}
+		_ = run.Wait()
+		return providers.Result{Stdout: stdout.Bytes()}
+	})
+	step := `touch "$HOME/started"; while :; do sleep 0.01; done`
+	if err := runStep(ctx, m, "m", "held-1", 0, []string{"sh", "-c", step}, nil, io.Discard, io.Discard); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runStep = %v, want context.Canceled", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if released := awakeLog(t, m.home); strings.Count(strings.Join(released, "\n"), "held-1 -X DELETE") == 2 {
+			if released[0] != `held-1 -X PUT -d {"expire":"1h"}` {
+				t.Fatalf("awake = %q, want the hold taken first", released)
+			}
+			return
+		}
+	}
+	t.Fatalf("awake = %q, want the stopped runner and stopStep each to release the hold", awakeLog(t, m.home))
+}
+
+func TestAStepThatCannotHoldTheMachineAwakeNeverStartsItsCommand(t *testing.T) {
+	keepAwake(t, `awake() { echo "$step $*" >> "$HOME/awake"; return 1; }`)
+	m := newStepMachine(t, finished)
+	err := runStep(t.Context(), m, "m", "held-2", 0, []string{"sh", "-c", `touch "$HOME/ran"`}, []byte("brief"), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "could not hold the machine awake") {
+		t.Fatalf("runStep = %v, want the failed hold named", err)
+	}
+	if _, err := os.Stat(filepath.Join(m.home, "ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the command ran without a hold: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(m.home, ".cc-remote", "steps", "held-2")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the step's directory outlived its refused hold: %v", err)
+	}
+	if got := len(awakeLog(t, m.home)); got != 3 {
+		t.Fatalf("hold attempts = %d, want 3", got)
+	}
+}
+
+func TestAFailedRenewalIsRetriedBeforeTheHoldRunsOut(t *testing.T) {
+	keepAwake(t, `awake() { n=$(( $(cat "$HOME/n" 2> /dev/null || echo 0) + 1 )); echo "$n" > "$HOME/n"; echo "$n $*" >> "$HOME/awake"; test "$n" != 2; }`)
+	m := newStepMachine(t, finished)
+	if err := runStep(t.Context(), m, "m", "held-3", 0, []string{"sleep", "0.6"}, nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	held := awakeLog(t, m.home)
+	if len(held) < 4 || !strings.HasPrefix(held[1], "2 -X PUT") || !strings.HasPrefix(held[2], "3 -X PUT") || !strings.HasSuffix(held[len(held)-1], "-X DELETE") {
+		t.Fatalf("awake = %q, want the failed second hold retried at once and the hold released at the end", held)
+	}
+}
+
+func TestAttachingPastTheEndOfAFinishedStepFails(t *testing.T) {
+	m := newStepMachine(t, finished)
+	if err := runStep(t.Context(), m, "m", "past-1", 0, []string{"printf", "hello"}, nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	err := runStep(t.Context(), m, "m", "past-1", 6, nil, nil, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "fewer than the 6 already read") {
+		t.Fatalf("attach = %v, want the offset past the end refused", err)
+	}
+}

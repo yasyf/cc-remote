@@ -101,11 +101,6 @@ func pushKeys(ctx context.Context, provider providers.Provider, dir state.Dir, k
 			return nil, fmt.Errorf("github app token: %w", err)
 		}
 	}
-	if len(captured.githubLogin) > 0 {
-		if err := pushExec(ctx, provider, machine, []string{"gh", "config", "set", "-h", "github.com", "user", string(captured.githubLogin)}, nil); err != nil {
-			return nil, fmt.Errorf("github_login: %w", err)
-		}
-	}
 	env := agent.KeysEnv(orca.Keys{
 		Key: captured.key, Judge: captured.judge, TypeSafe: captured.typesafe, GitHub: captured.github,
 		Name: []byte(launcher.name), Email: []byte(launcher.email), Trunk: captured.trunk, Gemini: captured.gemini,
